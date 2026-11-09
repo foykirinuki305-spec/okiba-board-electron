@@ -2,3 +2,7 @@ node_modules/
 dist/
 dist-artifact/
 screenshots/
+
+screenshots-ci/
+screenshots/
+dist/
