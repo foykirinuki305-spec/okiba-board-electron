@@ -129,6 +129,10 @@ async function main() {
   step('launch app, home is shown');
   let app1 = await launch();
   let page = await app1.firstWindow();
+  page.on('pageerror', (e) => console.log('  [pageerror]', e.message));
+  page.on('console', (m) => {
+    if (m.type() === 'error') console.log('  [console]', m.text());
+  });
   await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
   assert(true, 'home shows board cards');
   await page.screenshot({ path: path.join(SHOTS, 'home.png') });
@@ -170,11 +174,19 @@ async function main() {
   await page.mouse.down();
   await page.mouse.move(box.x + box.width / 2 + 164, box.y + box.height / 2, { steps: 12 });
   await page.mouse.up();
-  await waitFor(() => {
+  try {
+    await waitFor(() => {
+      const data = readJson(path.join(boardDir, '.okiba-board.json'));
+      const pos = data.positions[longName];
+      return pos && pos.col === 1 && pos.row === 0;
+    }, 'dragged position saved to json');
+  } catch (e) {
     const data = readJson(path.join(boardDir, '.okiba-board.json'));
-    const pos = data.positions[longName];
-    return pos && pos.col === 1 && pos.row === 0;
-  }, 'dragged position saved to json');
+    console.log('  [diag] positions after drag:', JSON.stringify(data.positions));
+    const left = await first.evaluate((el) => el.style.left + '/' + el.offsetLeft);
+    console.log('  [diag] item left after drag:', left);
+    throw e;
+  }
   assert(true, 'item moved to cell (1,0) and position persisted');
 
   step('percent dropdown changes size and persists');

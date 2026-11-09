@@ -231,11 +231,12 @@ function renderHome() {
 
 function homeCardPointer(e, card, board) {
   if (e.button !== 0) return;
+  dragging = true; // suppress refresh for the whole press (see itemPointer)
   const startX = e.clientX, startY = e.clientY;
   let moved = false;
   const onMove = (ev) => {
     if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) > 7) {
-      moved = true; dragging = true;
+      moved = true;
       card.classList.add('dragging');
     }
     if (moved) {
@@ -440,13 +441,17 @@ function itemPointer(e, el, key, fullPath) {
   hideMenu();
   selectedKey = key;
   renderBoardSelection();
+  // Suppress auto-refresh for the WHOLE press, not just after the
+  // move threshold: a poll/fs re-render detaches this element, which
+  // silently kills pointer capture and the whole gesture.
+  dragging = true;
   const startX = e.clientX, startY = e.clientY;
   const origLeft = el.offsetLeft, origTop = el.offsetTop;
   let moved = false, handedOff = false;
   el.setPointerCapture(e.pointerId);
   const onMove = (ev) => {
     const dx = ev.clientX - startX, dy = ev.clientY - startY;
-    if (!moved && Math.hypot(dx, dy) > 6) { moved = true; dragging = true; el.classList.add('dragging'); }
+    if (!moved && Math.hypot(dx, dy) > 6) { moved = true; el.classList.add('dragging'); }
     if (!moved) return;
     el.style.left = (origLeft + dx) + 'px';
     el.style.top = (origTop + dy) + 'px';
