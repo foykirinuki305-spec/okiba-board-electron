@@ -174,126 +174,122 @@ function main() {
 
 }
 
-// ------------------------------------------------ dropwatch (async)
-const dw = require('../lib/dropwatch');
+// ------------------------------------------------ dropmove (async)
+const dm = require('../lib/dropmove');
 
-async function dropwatchMain() {
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const mkPair = () => {
-    const board = tmp(); const watch = tmp();
-    const src = path.join(board, '素材.mp4');
-    fs.writeFileSync(src, 'hello world'); // 11 bytes
-    return { board, watch, src };
-  };
-  const runWatch = (src, watch, trashed, timeoutMs = 2500) => dw.watchForCopy({
-    source: {
-      path: src, name: path.basename(src),
-      size: fs.statSync(src).size, isDir: false, hash: null,
-    },
-    dirs: [watch],
-    before: dw.snapshotDirs([watch]),
-    trashItem: async (p) => { trashed.push(p); fs.rmSync(p, { force: true }); },
-    pollMs: 40,
-    timeoutMs,
-  });
-
-  // (a) matching name+size+content appears -> original trashed (MOVE)
+async function dropmoveMain() {
+  // ---------- resolve output parsing ----------
   {
-    const { watch, src } = mkPair();
-    const trashed = [];
-    const promise = runWatch(src, watch, trashed);
-    await sleep(120);
-    fs.copyFileSync(src, path.join(watch, '素材.mp4'));
-    const res = await promise;
-    ok(res.moved === true && res.reason === 'copy-detected', 'dropwatch: copy detected');
-    ok(trashed.length === 1 && trashed[0] === src, 'dropwatch: original trashed on copy');
-    ok(!fs.existsSync(src), 'dropwatch: original gone after move completion');
+    const d = dm.parseResolveOutput(
+      JSON.stringify({ type: 'desktop', path: 'C:\\Users\\x\\Desktop' }));
+    ok(d.type === 'desktop' && d.path === 'C:\\Users\\x\\Desktop', 'parse: desktop');
+    const e2 = dm.parseResolveOutput('noise line\n' +
+      JSON.stringify({ type: 'explorer', path: 'D:\\素材' }));
+    ok(e2.type === 'explorer' && e2.path === 'D:\\素材', 'parse: explorer (last line)');
+    ok(dm.parseResolveOutput('').type === 'unknown', 'parse: empty -> unknown');
+    ok(dm.parseResolveOutput('not json').type === 'unknown', 'parse: garbage -> unknown');
+    ok(dm.parseResolveOutput('{"type":"explorer","path":""}').type === 'unknown',
+      'parse: explorer without path -> unknown');
+    ok(dm.parseResolveOutput('{"type":"taskbar","path":"C:\\\\x"}').type === 'unknown',
+      'parse: unrecognised type -> unknown');
   }
 
-  // (b) nothing appears -> original kept
+  // ---------- moveItemsOut: never overwrite, real move ----------
   {
-    const { watch, src } = mkPair();
-    const trashed = [];
-    const res = await dw.watchForCopy({
-      source: { path: src, name: '素材.mp4', size: 11, isDir: false, hash: null },
-      dirs: [watch],
-      before: dw.snapshotDirs([watch]),
-      trashItem: async (p) => { trashed.push(p); },
-      pollMs: 40, timeoutMs: 300,
+    const board = tmp(); const target = tmp();
+    const src = path.join(board, 'a.txt');
+    fs.writeFileSync(src, 'AAA');
+    fs.writeFileSync(path.join(target, 'a.txt'), 'existing');
+    const r = dm.moveItemsOut([src], target);
+    ok(r.moved.length === 1 && r.failed.length === 0, 'moveOut: one item moved');
+    ok(!fs.existsSync(src), 'moveOut: original removed (move, not copy)');
+    ok(fs.readFileSync(path.join(target, 'a.txt'), 'utf8') === 'existing',
+      'moveOut: existing target file untouched');
+    ok(fs.readFileSync(path.join(target, 'a (2).txt'), 'utf8') === 'AAA',
+      'moveOut: landed as "a (2).txt"');
+  }
+
+  // ---------- moveItemsOut: item already inside target is skipped ----------
+  {
+    const target = tmp();
+    const inside = path.join(target, 'b.txt');
+    fs.writeFileSync(inside, 'B');
+    const r = dm.moveItemsOut([inside], target);
+    ok(r.skipped.length === 1 && r.moved.length === 0, 'moveOut: inside-target skipped');
+    ok(fs.existsSync(inside), 'moveOut: skipped item untouched');
+  }
+
+  // ---------- moveItemsOut: missing item is a failure, nothing moves ----------
+  {
+    const target = tmp();
+    const r = dm.moveItemsOut([path.join(target, 'nope.txt')], target);
+    ok(r.moved.length === 0 && r.failed.length === 1, 'moveOut: missing -> failed, no move');
+  }
+
+  // ---------- moveItemsOut: folders move too ----------
+  {
+    const board = tmp(); const target = tmp();
+    const dir = path.join(board, '素材フォルダ');
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'in.txt'), 'in');
+    const r = dm.moveItemsOut([dir], target);
+    ok(r.moved.length === 1 && fs.existsSync(path.join(target, '素材フォルダ', 'in.txt')),
+      'moveOut: folder moved with contents');
+    ok(!fs.existsSync(dir), 'moveOut: folder original removed');
+  }
+
+  // ---------- simulated outside release, end to end ----------
+  // Resolver stubbed to a temp folder (the "Desktop"); the renderer
+  // would call this after an outside pointer release. Files land in
+  // the target and the board json no longer positions them.
+  {
+    const base = tmp(); const landing = tmp();
+    const boardFolder = path.join(base, 'ボードX');
+    fs.mkdirSync(boardFolder);
+    const f1 = path.join(boardFolder, 'one.txt');
+    const f2 = path.join(boardFolder, 'two.txt');
+    fs.writeFileSync(f1, '1');
+    fs.writeFileSync(f2, '2');
+    bf.saveBoard(boardFolder, { 'one.txt': [0, 0], 'two.txt': [0, 1] }, [], 100);
+    const resolver = dm.createResolver({
+      resolve: async () => dm.parseResolveOutput(
+        JSON.stringify({ type: 'desktop', path: landing })),
     });
-    ok(res.moved === false && res.reason === 'timeout', 'dropwatch: no drop -> timeout');
-    ok(trashed.length === 0 && fs.existsSync(src), 'dropwatch: no drop -> original kept');
+    const target = await resolver(-50, 300); // outside the window
+    ok(target.type === 'desktop' && target.path === landing, 'e2e: stub resolver resolves');
+    const r = dm.moveItemsOut([f1, f2], target.path);
+    ok(r.moved.length === 2, 'e2e: both files moved out');
+    ok(fs.existsSync(path.join(landing, 'one.txt')) &&
+       fs.existsSync(path.join(landing, 'two.txt')), 'e2e: files landed in target');
+    // board cleanup mirrors the app: positions of moved items dropped
+    const data = bf.loadBoard(boardFolder);
+    for (const p of r.moved) delete data.positions[path.basename(p)];
+    bf.saveBoard(boardFolder, data.positions, data.notes, data.sizePercent);
+    const after = bf.loadBoard(boardFolder);
+    ok(Object.keys(after.positions).length === 0, 'e2e: board json updated after move-out');
+    const scan = bf.scanFolder(boardFolder);
+    ok(scan.length === 0, 'e2e: board folder empty after move-out');
   }
 
-  // (c) the only "new" file IS the source itself -> kept (same-path guard)
+  // ---------- unknown resolution moves NOTHING ----------
   {
-    const watch = tmp();
-    const src = path.join(watch, '素材.mp4'); // source inside watched dir
-    fs.writeFileSync(src, 'hello world');
-    const trashed = [];
-    const res = await dw.watchForCopy({
-      source: { path: src, name: '素材.mp4', size: 11, isDir: false, hash: null },
-      dirs: [watch],
-      before: new Map([[watch, new Map()]]), // crafted: source "looks new"
-      trashItem: async (p) => { trashed.push(p); },
-      pollMs: 40, timeoutMs: 300,
+    const board = tmp();
+    const src = path.join(board, 'keep.txt');
+    fs.writeFileSync(src, 'K');
+    const resolver = dm.createResolver({
+      resolve: async () => dm.parseResolveOutput('{"type":"unknown"}'),
     });
-    ok(res.moved === false && trashed.length === 0 && fs.existsSync(src),
-      'dropwatch: source itself is never treated as its own copy');
-  }
-
-  // (d) same name but different SIZE appears -> kept
-  {
-    const { watch, src } = mkPair();
-    const trashed = [];
-    const promise = runWatch(src, watch, trashed, 600);
-    await sleep(120);
-    fs.writeFileSync(path.join(watch, '素材.mp4'), 'short'); // 5 bytes != 11
-    const res = await promise;
-    ok(res.moved === false && trashed.length === 0 && fs.existsSync(src),
-      'dropwatch: size mismatch -> original kept');
-  }
-
-  // (e) same name and SIZE but different CONTENT (hash) -> kept.
-  //     This is what stops a leaked thumbnail "download" (or any other
-  //     same-size stranger) from being mistaken for the dropped copy.
-  {
-    const { watch, src } = mkPair();
-    const trashed = [];
-    const promise = runWatch(src, watch, trashed, 600);
-    await sleep(120);
-    fs.writeFileSync(path.join(watch, '素材.mp4'), 'HELLO WORLD'); // 11 bytes, other bytes
-    const res = await promise;
-    ok(res.moved === false && trashed.length === 0 && fs.existsSync(src),
-      'dropwatch: hash mismatch -> original kept');
-  }
-
-  // (f) DIFFERENT name but same size+content -> still a move
-  //     (Explorer suffixes / renamed drops: name is only a tie-breaker)
-  {
-    const { watch, src } = mkPair();
-    const trashed = [];
-    const promise = runWatch(src, watch, trashed);
-    await sleep(120);
-    fs.copyFileSync(src, path.join(watch, '素材 - コピー.mp4'));
-    const res = await promise;
-    ok(res.moved === true && trashed.length === 1 && !fs.existsSync(src),
-      'dropwatch: renamed copy (same hash) completes the move');
-  }
-
-  // (g) name affinity helper
-  {
-    ok(dw.nameAffinity('a.mp4', 'a.mp4'), 'affinity: identical name');
-    ok(dw.nameAffinity('a.mp4', 'a (2).mp4'), 'affinity: " (2)" suffix');
-    ok(dw.nameAffinity('a.mp4', 'a - コピー.mp4'), 'affinity: " - コピー" suffix');
-    ok(!dw.nameAffinity('a.mp4', 'ab.mp4'), 'affinity: different stem rejected');
+    const target = await resolver(10, 10);
+    ok(target.type === 'unknown' && !target.path, 'e2e: unknown has no path');
+    // the app only calls moveItemsOut when a path resolved
+    ok(fs.existsSync(src), 'e2e: unknown target -> item stays on the board');
   }
 }
 
 (async () => {
   try {
     main();
-    await dropwatchMain();
+    await dropmoveMain();
     console.log('\nselftest: ' + passed + ' checks passed');
   } catch (e) {
     console.error(e.message || e);

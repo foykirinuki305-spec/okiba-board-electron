@@ -1,9 +1,9 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, shell, nativeImage, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, nativeImage, dialog, screen } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const bf = require('./lib/boardfs');
-const dw = require('./lib/dropwatch');
+const dm = require('./lib/dropmove');
 
 // ------------------------------------------------------------------ paths
 let BASE = null;
@@ -276,132 +276,74 @@ function registerIpc() {
     return bf.placeDroppedItems(paths, folder);
   });
 
-  // ------------------------- drag-out: native drag + move completion
-  // webContents.startDrag hands the real file to the OS, but a drop on
-  // the Desktop/Downloads makes Explorer COPY it and the source app is
-  // told nothing — so we complete the move ourselves (lib/dropwatch):
-  // snapshot the watch folders at drag start, then poll for a new file
-  // with the same size + content hash; only then trash the original.
-  const DRAG_ICON = nativeImage.createFromDataURL(
-    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAmElEQVR4nO3QMREAIBDAsDeDDwTiGWRkoEP2Xmftc382OkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAO0BzG0B0vTUaKYAAAAASUVORK5CYII=');
-  function dropWatchDirs() {
-    const fromEnv = process.env.OKIBA_DROP_WATCH_DIRS;
-    if (fromEnv) return fromEnv.split(path.delimiter).filter(Boolean);
-    const dirs = [];
-    try { dirs.push(app.getPath('desktop')); } catch (e) {}
-    try { dirs.push(app.getPath('downloads')); } catch (e) {}
-    return [...new Set(dirs)];
+  // ------------------------- drag-out: self-implemented MOVE
+  // webContents.startDrag is GONE (v1.2). On the user's real PC the
+  // handoff silently did nothing: startDrag is only honoured inside a
+  // native dragstart event, which a pointer-driven drag never
+  // produces, and the renderer could not even reliably notice the
+  // pointer leaving the window (pointer capture clamps coordinates
+  // at the edge). Instead the renderer detects an OUTSIDE RELEASE
+  // itself (pointerup coordinates outside the window, cross-checked
+  // with the OS cursor position) and asks main to do the move:
+  //   resolveDropTarget(screen point) -> folder under the pointer
+  //   (PowerShell: WindowFromPoint -> Progman/WorkerW = Desktop, or
+  //    the ShellWindows Explorer window's folder path; else unknown)
+  //   -> move the real files there with the intake rules.
+  // Unknown target => nothing is moved. Ever.
+  function resolverScriptPath() {
+    // Packaged: the script ships via extraResources (PowerShell
+    // cannot -File a script from inside the asar archive).
+    try {
+      const packed = path.join(process.resourcesPath, 'scripts', 'resolve-drop.ps1');
+      if (fs.existsSync(packed)) return packed;
+    } catch (e) {}
+    return path.join(__dirname, 'scripts', 'resolve-drop.ps1');
   }
+  const resolveDropTarget = dm.createResolver({ scriptPath: resolverScriptPath() });
 
-  // Synchronous prep (cheap: one stat + top-level listings) so it can
-  // run BEFORE startDrag inside the IPC handler. Returns null when
-  // there is nothing to watch / the source is gone.
-  function prepareDragOut(fullPath) {
-    let stat;
-    try { stat = fs.statSync(fullPath); } catch (e) { return null; }
-    const dirs = dropWatchDirs();
-    if (!dirs.length) return null;
-    const isDir = stat.isDirectory();
-    return {
-      dirs,
-      before: dw.snapshotDirs(dirs),
-      source: {
-        path: fullPath,
-        name: path.basename(fullPath),
-        size: isDir ? dw.dirSize(fullPath) : stat.size,
-        isDir,
-        hash: null,
-      },
-    };
-  }
-
-  async function trashForDragOut(p) {
-    // Test-only disposal override (E2E): move into a scratch folder
-    // instead of the real Recycle Bin, so the completion pipeline can
-    // be verified deterministically on any runner.
-    const testDir = process.env.OKIBA_TEST_TRASH_DIR;
-    if (testDir) {
-      fs.mkdirSync(testDir, { recursive: true });
-      const dest = bf.uniqueDestination(testDir, path.basename(p));
-      try { fs.renameSync(p, dest); }
-      catch (e) {
-        if (fs.statSync(p).isDirectory()) {
-          fs.cpSync(p, dest, { recursive: true });
-          fs.rmSync(p, { recursive: true, force: true });
+  // Every resolution is logged so the GUI test-suite can verify the
+  // new IPC path (renderer outside-release -> main resolve -> move)
+  // even though a real OS drop gesture cannot be automated.
+  const dropLog = [];
+  ipcMain.handle('resolve-drop-move', async (_e, payload) => {
+    const paths = (payload && Array.isArray(payload.paths)) ? payload.paths : [];
+    const x = payload ? Number(payload.screenX) : NaN;
+    const y = payload ? Number(payload.screenY) : NaN;
+    const result = { resolved: null, moved: [], skipped: [], failed: [], error: null };
+    try {
+      const target = (Number.isFinite(x) && Number.isFinite(y))
+        ? await resolveDropTarget(x, y)
+        : { type: 'unknown' };
+      result.resolved = target;
+      dropLog.push({ kind: 'resolve', x, y, target });
+      if (target && target.path) {
+        let isDir = false;
+        try { isDir = fs.statSync(target.path).isDirectory(); } catch (e) { isDir = false; }
+        if (isDir) {
+          const r = dm.moveItemsOut(paths, target.path);
+          result.moved = r.moved;
+          result.skipped = r.skipped;
+          result.failed = r.failed;
+          dropLog.push({ kind: 'move', target: target.path, moved: r.moved.length });
+          if (r.moved.length && win && !win.isDestroyed()) {
+            win.webContents.send('fs-changed');
+          }
         } else {
-          fs.copyFileSync(p, dest);
-          fs.rmSync(p, { force: true });
+          result.resolved = { type: 'unknown' };
         }
       }
-      return;
-    }
-    await shell.trashItem(p);
-  }
-
-  function startDragOutMonitor(session) {
-    if (!session) return;
-    // Hash the source off the drag-critical path; the watcher also
-    // computes it lazily if a candidate shows up first.
-    if (!session.source.isDir) {
-      dw.hashFile(session.source.path)
-        .then((h) => { session.source.hash = h; })
-        .catch(() => {});
-    }
-    dw.watchForCopy({
-      source: session.source,
-      dirs: session.dirs,
-      before: session.before,
-      trashItem: trashForDragOut,
-      hashFile: dw.hashFile,
-      pollMs: 300,
-      timeoutMs: 10000,
-    }).then((res) => {
-      if (!win || win.isDestroyed()) return;
-      if (res.moved) {
-        // original is gone -> rescan so the card disappears
-        win.webContents.send('fs-changed');
-      } else if (res.reason === 'error') {
-        win.webContents.send('status',
-          'ドラッグしたファイルの後片付けに失敗しました: ' + (res.error || ''));
-      }
-    }).catch(() => { /* watcher never throws, but stay safe */ });
-  }
-
-  // Every startDrag invocation is recorded so the GUI test-suite can
-  // verify the drag-out IPC path (renderer -> preload -> this handler)
-  // even though a real OS drag gesture cannot be automated.
-  const dragLog = [];
-  ipcMain.on('ondragstart', (event, fullPath) => {
-    // Snapshot BEFORE startDrag: the copy cannot exist yet, and the
-    // drag session only begins once startDrag is called.
-    const session = prepareDragOut(fullPath);
-    let okFlag = true;
-    let errMsg = null;
-    try {
-      // startDrag must be called synchronously inside this handler,
-      // so the icon is a pre-built generic image (not an async thumb).
-      event.sender.startDrag({ file: fullPath, icon: DRAG_ICON });
     } catch (e) {
-      okFlag = false;
-      errMsg = String((e && e.message) || e);
+      result.error = String((e && e.message) || e);
+      result.resolved = { type: 'unknown' };
+      dropLog.push({ kind: 'error', error: result.error });
     }
-    dragLog.push({ path: fullPath, ok: okFlag, err: errMsg });
-    if (okFlag) startDragOutMonitor(session);
+    return result;
   });
-  ipcMain.handle('test-draglog', () => dragLog);
-
-  // Test hook (E2E only, registered solely under OKIBA_TEST_HOOKS=1):
-  // run the exact prepare+monitor pipeline without the OS drag, so the
-  // test can drop a copy into a fake Desktop folder and watch the
-  // original get removed.
-  if (process.env.OKIBA_TEST_HOOKS === '1') {
-    ipcMain.handle('test-begin-dragout', (_e, fullPath) => {
-      const session = prepareDragOut(fullPath);
-      if (!session) return { ok: false };
-      startDragOutMonitor(session);
-      return { ok: true, dirs: session.dirs };
-    });
-  }
+  // Backup for outside-release detection: the true OS cursor position.
+  ipcMain.handle('cursor-point', () => {
+    try { return screen.getCursorScreenPoint(); } catch (e) { return null; }
+  });
+  ipcMain.handle('test-droplog', () => dropLog);
 }
 
 app.whenReady().then(async () => {

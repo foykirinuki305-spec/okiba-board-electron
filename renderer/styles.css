@@ -191,6 +191,14 @@ body {
   overflow: hidden; word-break: break-all;
   text-shadow: 0 1px 4px rgba(0, 0, 0, .65);
 }
+/* rubber-band selection (Windows desktop style: translucent blue
+   fill + blue border), drawn live while dragging on empty area */
+.rubber-band {
+  position: absolute; z-index: 55; pointer-events: none;
+  background: rgba(64, 128, 255, .18);
+  border: 1px solid rgba(96, 160, 255, .85);
+  border-radius: 2px;
+}
 /* type tiles (fallback when no thumbnail) */
 .tile { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; position: relative; }
 .tile svg { width: 52%; height: 52%; }

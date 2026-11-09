@@ -9,22 +9,25 @@
  *   -> change percent dropdown (size changes + persisted)
  *   -> theme button (theme changes + persisted)
  *   -> right-click custom menu -> rename modal opens/closes
- *   -> drag-out IPC path fires (okiba.startDrag -> main startDrag log)
- *   -> NO native-drag leakage: zero draggable elements in the DOM and
- *      a synthetic dragstart on a thumbnail <img> is preventDefaulted
- *      (a leaked data:-URL thumbnail drag is what previously reached
- *      the desktop as a "download" under a different name)
- *   -> drag-out MOVE completion: with OKIBA_DROP_WATCH_DIRS pointed
- *      at a fake Desktop, the prepare+monitor pipeline (test hook,
- *      same code as the real drag) removes the board original once a
- *      copy lands there
- *   -> context-menu trash uses the real shell.trashItem (Windows only)
- *   -> restart restores boards, positions, percent and theme
+ *   -> MULTI-SELECT (primary): rubber-band drag on empty area with NO
+ *      modifier key selects the enclosed items (desktop style)
+ *   -> group drag: both selected items move by the same cell delta
+ *      and the positions are saved
+ *   -> group drag onto a non-selected item's cell: whole group
+ *      reverts, nothing is saved
+ *   -> Ctrl+click toggling still works (auxiliary method)
+ *   -> DRAG-OUT (v1.2, self-implemented): a synthetic outside release
+ *      fires the resolve-drop IPC; with OKIBA_TEST_RESOLVER_DIR set,
+ *      main resolves the target and really MOVES the file there.
+ *      okiba.startDrag must no longer exist (mechanism removed).
+ *   -> context-menu trash uses the real shell.trashItem (Windows)
+ *   -> restart restores boards, positions (incl. group), percent,
+ *      theme
  *
  * Screenshots of home and board are written to $OKIBA_SHOTS (default
  * ./screenshots). Any failure exits non-zero, failing the CI build.
- * Native OS drag-in/drag-out gestures themselves cannot be automated;
- * only the IPC path is verified (see dragLog check).
+ * A real OS drop gesture still cannot be automated; the resolver is
+ * stubbed, but the IPC path and the actual file move are real.
  */
 const fs = require('fs');
 const os = require('os');
@@ -52,10 +55,22 @@ async function waitFor(fn, label, timeout = 12000) {
   }
 }
 function readJson(p) { return JSON.parse(fs.readFileSync(p, 'utf8')); }
+async function selectedNames(page) {
+  return page.locator('.item.selected .name').allTextContents();
+}
+async function dragCenterTo(page, locator, dx, dy) {
+  const box = await locator.boundingBox();
+  if (!box) throw new Error('no bounding box for drag source');
+  const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  await page.mouse.move(cx + dx, cy + dy, { steps: 14 });
+  await page.mouse.up();
+}
 
 // The drag-leak guard: NO element anywhere may be natively draggable.
-// Our only native drag is main-process startDrag; any draggable <img>
-// (thumbnails are data: URLs) would leak out as a browser "download".
+// (Thumbnails are data: URLs; a leaked <img> drag reaches the desktop
+// as a browser "download" instead of the real file.)
 async function assertNoDragLeak(page, where) {
   const scan = await page.evaluate(() => {
     const all = [...document.querySelectorAll('*')];
@@ -90,33 +105,40 @@ async function main() {
   const boardDir = path.join(base, boardName);
   fs.mkdirSync(boardDir, { recursive: true });
   const longName = '撮影データ_2024年_最終バージョン_その2.mp4';
-  fs.writeFileSync(path.join(boardDir, longName), 'fake video');
-  fs.writeFileSync(path.join(boardDir, '写真サンプル.png'), PNG_1PX);
-  fs.writeFileSync(path.join(boardDir, 'メモ帳.txt'), 'hello');
-  fs.writeFileSync(path.join(boardDir, '移動テスト.txt'), 'move me please');
+  const seeds = {
+    [longName]: 'fake video',
+    '写真サンプル.png': PNG_1PX,
+    'メモ帳.txt': 'hello',
+    'グループA.txt': 'A',
+    'グループB.txt': 'B',
+    '占有.txt': 'blocker',
+    '移動テスト.txt': 'move me please',
+  };
+  for (const [n, c] of Object.entries(seeds)) fs.writeFileSync(path.join(boardDir, n), c);
   fs.writeFileSync(path.join(boardDir, '.okiba-board.json'), JSON.stringify({
     version: 5, size_percent: 100,
     positions: {
       [longName]: { col: 0, row: 0 },
       '写真サンプル.png': { col: 0, row: 1 },
       'メモ帳.txt': { col: 0, row: 2 },
-      '移動テスト.txt': { col: 1, row: 2 },
+      'グループA.txt': { col: 2, row: 0 },
+      'グループB.txt': { col: 2, row: 1 },
+      '占有.txt': { col: 3, row: 0 },
+      '移動テスト.txt': { col: 3, row: 2 },
     },
     notes: [],
   }, null, 2));
 
-  // Fake Desktop for the drag-out move-completion watcher + a scratch
-  // "trash" so completion disposal is deterministic on any runner.
-  const fakeDesktop = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-desktop-'));
-  const testTrash = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-trash-'));
+  // Stub drop-target folder for the v1.2 drag-out resolver: main's
+  // resolve step is replaced by this folder; the MOVE itself is real.
+  const landing = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-landing-'));
 
   const env = {
     ...process.env,
     OKIBA_BASE: base,
     OKIBA_OLD_BASE: oldBase,
-    OKIBA_DROP_WATCH_DIRS: fakeDesktop,
+    OKIBA_TEST_RESOLVER_DIR: landing,
     OKIBA_TEST_HOOKS: '1',
-    OKIBA_TEST_TRASH_DIR: testTrash,
     ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
   };
   const launch = () => electron.launch({
@@ -160,20 +182,12 @@ async function main() {
   step('no native-drag leakage in the board DOM');
   const boardScan = await assertNoDragLeak(page, 'board');
   if (process.platform === 'win32') {
-    // shell thumbnails exist on Windows; on a headless Linux run
-    // createThumbnailFromPath may return nothing and no <img> renders
-    // (the lock assertions above still apply to whatever is in the DOM).
     assert(boardScan.imgCount >= 1, 'board shows at least one thumbnail <img> (all locked)');
   }
 
   step('pointer-drag an item one cell to the right');
   const first = page.locator('.item', { hasText: '撮影データ' }).first();
-  const box = await first.boundingBox();
-  assert(box, 'item has a bounding box');
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width / 2 + 164, box.y + box.height / 2, { steps: 12 });
-  await page.mouse.up();
+  await dragCenterTo(page, first, 164, 0);
   try {
     await waitFor(() => {
       const data = readJson(path.join(boardDir, '.okiba-board.json'));
@@ -183,8 +197,6 @@ async function main() {
   } catch (e) {
     const data = readJson(path.join(boardDir, '.okiba-board.json'));
     console.log('  [diag] positions after drag:', JSON.stringify(data.positions));
-    const left = await first.evaluate((el) => el.style.left + '/' + el.offsetLeft);
-    console.log('  [diag] item left after drag:', left);
     throw e;
   }
   assert(true, 'item moved to cell (1,0) and position persisted');
@@ -198,6 +210,8 @@ async function main() {
   }, 'size_percent=60 saved');
   const thumbAfter = await page.locator('.item .thumb').first().boundingBox();
   assert(thumbAfter.width < thumbBefore.width, 'icons got smaller at 60%');
+  // 60% grid metrics: cellW = round(164*.6) = 98, cellH = round(158*.6) = 95
+  const CELL_W = 98, CELL_H = 95;
 
   step('theme button changes theme and persists');
   const themeBefore = await page.evaluate(() => document.documentElement.dataset.theme);
@@ -226,31 +240,96 @@ async function main() {
   await page.waitForFunction(() => document.getElementById('modalOverlay').hidden);
   assert(true, 'rename modal closed without changes');
 
-  step('drag-out IPC path fires (startDrag recorded in main)');
-  const targetPath = path.join(boardDir, 'メモ帳.txt');
-  await page.evaluate((p) => window.okiba.startDrag(p), targetPath);
-  await waitFor(async () => {
-    const log = await page.evaluate(() => window.okiba.dragLog());
-    return Array.isArray(log) && log.some((e) => e.path === targetPath);
-  }, 'main recorded a startDrag invocation for the file');
-  assert(true, 'dragstart -> preload IPC -> main startDrag confirmed');
+  step('rubber-band (NO modifier) selects the enclosed items');
+  const areaBox = await page.locator('#boardArea').boundingBox();
+  // At 60%: A(2,0) spans area-x 212..310, B(2,1) 111.. in y.
+  // Band (215,5)-(300,230) clips A and B only.
+  await page.mouse.move(areaBox.x + 215, areaBox.y + 5);
+  await page.mouse.down();
+  await page.mouse.move(areaBox.x + 300, areaBox.y + 230, { steps: 12 });
+  const bandVisible = await page.evaluate(() =>
+    !!document.querySelector('.rubber-band'));
+  assert(bandVisible, 'rubber-band rectangle is drawn live while dragging');
+  await page.mouse.up();
+  await waitFor(async () => (await selectedNames(page)).length === 2,
+    'exactly two items selected by the band');
+  const bandSel = await selectedNames(page);
+  assert(bandSel.some((t) => t.includes('グループA')) &&
+         bandSel.some((t) => t.includes('グループB')),
+    'band selected グループA and グループB');
 
-  step('drag-out MOVE completion: copy lands in watched folder -> original removed');
-  const moveSrc = path.join(boardDir, '移動テスト.txt');
-  const hookRes = await page.evaluate((p) => window.okiba.testBeginDragOut(p), moveSrc);
-  assert(hookRes && hookRes.ok === true, 'move-completion watcher started via test hook');
-  await new Promise((r) => setTimeout(r, 300));
-  // simulate what Explorer does on drop: a copy appears in the folder
-  fs.copyFileSync(moveSrc, path.join(fakeDesktop, '移動テスト.txt'));
-  await waitFor(() => !fs.existsSync(moveSrc),
-    'original removed once the dropped copy was detected');
-  assert(fs.existsSync(path.join(testTrash, '移動テスト.txt')),
-    'original was disposed of (test trash) rather than copied');
+  step('group drag moves both items by the same delta and saves');
+  const itemA = page.locator('.item', { hasText: 'グループA' }).first();
+  await dragCenterTo(page, itemA, CELL_W * 2, CELL_H * 2);
+  await waitFor(() => {
+    const data = readJson(path.join(boardDir, '.okiba-board.json'));
+    const a = data.positions['グループA.txt'];
+    const b = data.positions['グループB.txt'];
+    return a && b && a.col === 4 && a.row === 2 && b.col === 4 && b.row === 3;
+  }, 'group positions saved: A(4,2) B(4,3)');
+  assert(true, 'both items moved by (+2,+2) and persisted');
+
+  step('group drag onto a non-selected cell reverts the whole group');
+  await dragCenterTo(page, itemA, -CELL_W, -CELL_H * 2); // A would land on 占有 (3,0)
+  await new Promise((r) => setTimeout(r, 700)); // let any (wrong) save happen
+  const afterRevert = readJson(path.join(boardDir, '.okiba-board.json'));
+  assert(afterRevert.positions['グループA.txt'].col === 4 &&
+         afterRevert.positions['グループA.txt'].row === 2 &&
+         afterRevert.positions['グループB.txt'].col === 4 &&
+         afterRevert.positions['グループB.txt'].row === 3,
+    'blocked group drag reverted completely (no partial move)');
+
+  step('Ctrl+click toggles selection (auxiliary method)');
+  const memo = page.locator('.item', { hasText: 'メモ帳' }).first();
+  const memoBox = await memo.boundingBox();
+  await page.keyboard.down('Control');
+  await page.mouse.click(memoBox.x + memoBox.width / 2, memoBox.y + memoBox.height / 2);
+  await page.keyboard.up('Control');
+  await waitFor(async () => (await selectedNames(page)).length === 3,
+    'ctrl+click added メモ帳 to the selection');
+  await page.keyboard.down('Control');
+  await page.mouse.click(memoBox.x + memoBox.width / 2, memoBox.y + memoBox.height / 2);
+  await page.keyboard.up('Control');
+  await waitFor(async () => (await selectedNames(page)).length === 2,
+    'ctrl+click again removed it');
+
+  step('drag-out v1.2: outside release resolves and MOVES the file');
+  const hasStartDrag = await page.evaluate(() => typeof window.okiba.startDrag);
+  assert(hasStartDrag === 'undefined', 'okiba.startDrag no longer exists (mechanism removed)');
+  // clear the selection with a plain click on empty area
+  await page.mouse.click(areaBox.x + 500, areaBox.y + 420);
+  await waitFor(async () => (await selectedNames(page)).length === 0, 'selection cleared');
+  const moveItem = page.locator('.item', { hasText: '移動テスト' }).first();
+  const mvBox = await moveItem.boundingBox();
+  await page.mouse.move(mvBox.x + mvBox.width / 2, mvBox.y + mvBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(mvBox.x + mvBox.width / 2 + 30, mvBox.y + mvBox.height / 2, { steps: 5 });
+  // synthetic OUTSIDE release: pointerup with clientX far left of window
+  await moveItem.evaluate((el) => {
+    el.dispatchEvent(new PointerEvent('pointerup', {
+      bubbles: true, cancelable: true, pointerId: 1,
+      clientX: -80, clientY: 120, screenX: -40, screenY: 200,
+    }));
+  });
+  await page.mouse.up(); // release the real button too
+  await waitFor(() => fs.existsSync(path.join(landing, '移動テスト.txt')),
+    'file really landed in the resolved target folder');
+  assert(!fs.existsSync(path.join(boardDir, '移動テスト.txt')),
+    'original left the board folder (a MOVE, not a copy)');
+  await waitFor(async () => {
+    const log = await page.evaluate(() => window.okiba.dropLog());
+    return Array.isArray(log) && log.some((e) => e.kind === 'resolve') &&
+      !log.some((e) => e.kind === 'startdrag');
+  }, 'main logged the resolve-drop invocation');
+  await waitFor(async () => {
+    const t = await page.evaluate(() => document.getElementById('toast').textContent);
+    return t.includes('移動しました');
+  }, 'status line confirmed the move to the user');
   await waitFor(async () => {
     const ns = await page.locator('.item .name').allTextContents();
     return !ns.some((t) => t.includes('移動テスト'));
   }, 'moved item disappeared from the board');
-  assert(true, 'drag-out completes as a MOVE, board reflects it');
+  assert(true, 'outside release -> resolve -> real MOVE, with visible feedback');
 
   if (process.platform === 'win32') {
     step('context-menu trash uses the real Recycle Bin (shell.trashItem)');
@@ -268,7 +347,7 @@ async function main() {
   await app1.close();
 
   // ------------------------------------------------------------ run 2
-  step('restart restores boards, positions, percent and theme');
+  step('restart restores boards, positions (incl. group), percent and theme');
   const app2 = await launch();
   page = await app2.firstWindow();
   await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
@@ -282,11 +361,15 @@ async function main() {
   await page.waitForSelector('#boardView:not([hidden]) .item');
   const selVal = await page.evaluate(() => document.getElementById('percentSel').value);
   assert(selVal === '60', 'percent restored to 60 after restart');
+  const data = readJson(path.join(boardDir, '.okiba-board.json'));
+  assert(data.positions[longName].col === 1, 'single-dragged position still saved');
+  assert(data.positions['グループA.txt'].col === 4 && data.positions['グループA.txt'].row === 2 &&
+         data.positions['グループB.txt'].col === 4 && data.positions['グループB.txt'].row === 3,
+    'group-dragged positions restored after restart');
+  assert(!data.positions['移動テスト.txt'], 'moved-out item has no stale position');
   const posLeft = await page.locator('.item', { hasText: '撮影データ' }).first()
     .evaluate((el) => el.style.left);
-  const data = readJson(path.join(boardDir, '.okiba-board.json'));
-  assert(data.positions[longName].col === 1, 'dragged position still saved after restart');
-  assert(parseInt(posLeft, 10) > 100, 'item rendered at the dragged column');
+  assert(parseInt(posLeft, 10) > 60, 'item rendered at the dragged column');
   await page.screenshot({ path: path.join(SHOTS, 'board-restored.png') });
   await app2.close();
 

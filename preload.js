@@ -27,12 +27,15 @@ contextBridge.exposeInMainWorld('okiba', {
   moveToDesktop: (p) => ipcRenderer.invoke('move-to-desktop', p),
   dropFiles: (boardName, paths) => ipcRenderer.invoke('drop-files', boardName, paths),
 
-  startDrag: (fullPath) => ipcRenderer.send('ondragstart', fullPath),
-  // test hook: read back the main process's startDrag invocation log
-  dragLog: () => ipcRenderer.invoke('test-draglog'),
-  // test hook (only usable when main runs with OKIBA_TEST_HOOKS=1):
-  // start the drag-out move-completion watcher without an OS drag
-  testBeginDragOut: (fullPath) => ipcRenderer.invoke('test-begin-dragout', fullPath),
+  // drag-out (v1.2): self-implemented move on outside release.
+  // resolveDropMove asks main to resolve the folder under the given
+  // screen point (Desktop / Explorer window) and move the files
+  // there; cursorPoint is the OS cursor position (backup signal).
+  resolveDropMove: (paths, screenX, screenY) =>
+    ipcRenderer.invoke('resolve-drop-move', { paths, screenX, screenY }),
+  cursorPoint: () => ipcRenderer.invoke('cursor-point'),
+  // test hook: read back main's resolve/move invocation log
+  dropLog: () => ipcRenderer.invoke('test-droplog'),
 
   onFsChanged: (cb) => ipcRenderer.on('fs-changed', cb),
   onStatus: (cb) => ipcRenderer.on('status', (_e, msg) => cb(msg)),

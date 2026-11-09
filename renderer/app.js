@@ -16,7 +16,7 @@ let view = 'home';
 let homeData = null;      // {boards, positions, migrated, base}
 let boardData = null;     // {name, entries, positions, notes, sizePercent}
 let cells = new Map();    // "file:name"|"note:id" -> [col,row]
-let selectedKey = null;
+let selection = new Set(); // selected item keys ("file:name"|"note:id")
 let busy = false;         // modal or menu open -> pause auto refresh
 let dragging = false;
 
@@ -27,12 +27,12 @@ const SVG = {
   video: '<svg viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2.5" fill="currentColor" opacity=".9"/><path d="M16 10.5l5-3v9l-5-3z" fill="currentColor"/></svg>',
 };
 
-function toast(msg) {
+function toast(msg, ms) {
   const t = $('toast');
   t.textContent = msg;
   t.hidden = false;
   clearTimeout(t._h);
-  t._h = setTimeout(() => { t.hidden = true; }, 3200);
+  t._h = setTimeout(() => { t.hidden = true; }, ms || 3200);
 }
 
 function applyTheme(name) {
@@ -107,17 +107,26 @@ function hideMenu() { ctxMenu.hidden = true; busy = false; }
 document.addEventListener('mousedown', (e) => {
   if (!ctxMenu.hidden && !ctxMenu.contains(e.target)) hideMenu();
 });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideMenu(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    hideMenu();
+    if (view === 'board' && selection.size) {
+      selection = new Set();
+      renderBoardSelection();
+    }
+  }
+});
 
 // ------------------------------------------------- native-drag lockdown
-// HTML5 drag is disabled app-wide, unconditionally. The ONLY native
-// drag in this app is the one the main process starts via
-// webContents.startDrag during our pointer-drag handoff. This matters:
-// thumbnails are <img> elements whose src is a data: URL, and an
-// <img> is natively draggable by default — dragging one out of the
-// window made Chromium save the THUMBNAIL as a browser-style download
-// (different file name, original left behind) instead of moving the
-// real file. The capture-phase preventDefault below seals every
+// HTML5 drag is disabled app-wide, unconditionally. There is NO
+// native drag in this app at all (webContents.startDrag was removed
+// in v1.2 — on the user's PC the handoff silently did nothing; the
+// drag-out move is now self-implemented on outside release). The
+// lockdown still matters: thumbnails are <img> elements whose src is
+// a data: URL, and an <img> is natively draggable by default —
+// dragging one out of the window made Chromium save the THUMBNAIL as
+// a browser-style download (different file name, original left
+// behind). The capture-phase preventDefault below seals every
 // remaining path (links, backgrounded images, future elements), and
 // every created <img>/item also gets draggable=false explicitly.
 document.addEventListener('dragstart', (e) => { e.preventDefault(); }, true);
@@ -280,6 +289,7 @@ async function renameBoardFlow(oldName) {
 async function refreshHome() {
   homeData = await api.getHome();
   applyTheme(homeData.theme);
+  if (dragging) return; // same mid-drag render guard as refreshBoard
   if (view === 'home') renderHome();
 }
 
@@ -349,7 +359,7 @@ function renderBoard() {
     const c = cells.get(key);
     if (!c) return;
     const el = document.createElement('div');
-    el.className = 'item' + (key === selectedKey ? ' selected' : '');
+    el.className = 'item' + (selection.has(key) ? ' selected' : '');
     el.draggable = false; // items move via pointer drag only (see lockdown)
     el.dataset.key = key;
     el.style.left = (ORIGIN + c[0] * m.cellW) + 'px';
@@ -395,8 +405,19 @@ function renderBoard() {
     });
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      selectedKey = key;
+      if (!selection.has(key)) selection = new Set([key]);
       renderBoardSelection();
+      if (selection.size > 1) {
+        // ---- multi-selection menu: bulk actions only ----
+        const fileCount = [...selection].filter((k) => k.startsWith('file:')).length;
+        const items = [{ label: `${selection.size}件を選択中`, action: () => {} }];
+        if (fileCount) {
+          items.push({ label: 'デスクトップへ移動', action: () => moveSelectionToDesktop() });
+        }
+        items.push({ label: 'ゴミ箱へ削除', danger: true, action: () => trashSelection() });
+        showMenu(e.clientX, e.clientY, items);
+        return;
+      }
       if (kind === 'note') {
         showMenu(e.clientX, e.clientY, [
           { label: '編集', action: () => editNoteFlow(key) },
@@ -432,73 +453,186 @@ function renderBoard() {
 
 function renderBoardSelection() {
   for (const el of boardArea.querySelectorAll('.item')) {
-    el.classList.toggle('selected', el.dataset.key === selectedKey);
+    el.classList.toggle('selected', selection.has(el.dataset.key));
   }
+}
+
+// ------------------------------------------------------- multi-select
+function pathOfKey(key) {
+  if (!key.startsWith('file:') || !boardData) return null;
+  const entry = boardData.entries.find((en) => en.name === key.slice(5));
+  return entry ? entry.path : null;
+}
+
+// Plan a group move by cell delta. Returns a Map key->[col,row] to
+// apply, or null to revert the WHOLE group: every target cell must be
+// inside the grid and either free or occupied by a selection member.
+// No partial moves — predictable, like the desktop.
+function planGroupMove(keys, dCol, dRow, rows) {
+  if (!dCol && !dRow) return new Map();
+  const keySet = new Set(keys);
+  const occupiedBy = new Map();
+  for (const [k, v] of cells.entries()) occupiedBy.set(v[0] + ',' + v[1], k);
+  const plan = new Map();
+  for (const k of keys) {
+    const c = cells.get(k);
+    if (!c) return null;
+    const t = [c[0] + dCol, c[1] + dRow];
+    if (t[0] < 0 || t[1] < 0 || t[1] >= rows) return null;
+    const occ = occupiedBy.get(t[0] + ',' + t[1]);
+    if (occ && !keySet.has(occ)) return null;
+    plan.set(k, t);
+  }
+  return plan;
+}
+
+async function moveSelectionToDesktop() {
+  const paths = [...selection].map(pathOfKey).filter(Boolean);
+  for (const p of paths) {
+    try { await api.moveToDesktop(p); } catch (e) { toast(String(e.message || e)); }
+  }
+  refreshBoard();
+}
+
+async function trashSelection() {
+  for (const key of [...selection]) {
+    if (key.startsWith('note:')) {
+      boardData.notes = boardData.notes.filter((n) => 'note:' + n.id !== key);
+      cells.delete(key);
+      selection.delete(key);
+    } else {
+      const p = pathOfKey(key);
+      if (p) {
+        try { await api.trashItem(p); } catch (e) { toast(String(e.message || e)); }
+      }
+    }
+  }
+  await persistBoard();
+  refreshBoard();
 }
 
 function itemPointer(e, el, key, fullPath) {
   if (e.button !== 0) return;
   hideMenu();
-  selectedKey = key;
-  renderBoardSelection();
-  // Suppress auto-refresh for the WHOLE press, not just after the
-  // move threshold: a poll/fs re-render detaches this element, which
-  // silently kills pointer capture and the whole gesture.
+  // Ctrl/Cmd+click: toggle this item in/out of the selection only.
+  if (e.ctrlKey || e.metaKey) {
+    if (selection.has(key)) selection.delete(key);
+    else selection.add(key);
+    renderBoardSelection();
+    return;
+  }
+  // Dragging an unselected item selects it alone first (standard).
+  if (!selection.has(key)) {
+    selection = new Set([key]);
+    renderBoardSelection();
+  }
+  // Suppress auto-refresh for the WHOLE press: a poll/fs re-render
+  // detaches these elements, which silently kills pointer capture.
   dragging = true;
+  const m = metrics();
+  const group = [...selection].map((k) => {
+    const cell = cells.get(k);
+    const gel = boardArea.querySelector(`.item[data-key="${CSS.escape(k)}"]`);
+    if (!cell || !gel) return null;
+    return {
+      key: k, el: gel, cell: [cell[0], cell[1]],
+      left: gel.offsetLeft, top: gel.offsetTop,
+      path: k.startsWith('file:') ? pathOfKey(k) : null,
+    };
+  }).filter(Boolean);
+  const anchor = group.find((g) => g.key === key) || group[0];
+  if (!anchor) { dragging = false; return; }
   const startX = e.clientX, startY = e.clientY;
-  const origLeft = el.offsetLeft, origTop = el.offsetTop;
-  let moved = false, handedOff = false;
+  let moved = false;
+  let lastCursor = null; // OS cursor position (screen coords), polled
   el.setPointerCapture(e.pointerId);
-  const onMove = (ev) => {
-    const dx = ev.clientX - startX, dy = ev.clientY - startY;
-    if (!moved && Math.hypot(dx, dy) > 6) { moved = true; el.classList.add('dragging'); }
-    if (!moved) return;
-    el.style.left = (origLeft + dx) + 'px';
-    el.style.top = (origTop + dy) + 'px';
-    // --- drag OUT handoff: pointer left the window while held ---
-    // Pointer capture keeps move events flowing outside the window,
-    // and HTML5 drag is fully disabled (see the lockdown above), so
-    // this pointer drag genuinely owns the gesture up to this point.
-    // api.startDrag makes the main process call the official
-    // webContents.startDrag synchronously in its IPC handler, while
-    // the button is still physically held. Explorer will COPY the
-    // file at the drop target; the main process then completes the
-    // MOVE (lib/dropwatch) and notifies us via 'fs-changed' so the
-    // card disappears. Drops elsewhere stay plain copies.
-    if (!handedOff && fullPath &&
-        (ev.clientX <= 0 || ev.clientY <= 0 ||
-         ev.clientX >= window.innerWidth - 1 || ev.clientY >= window.innerHeight - 1)) {
-      handedOff = true;
-      dragging = false;
-      el.classList.remove('dragging');
-      cleanup();
-      renderBoard(); // card returns to its cell while the OS drag runs
-      api.startDrag(fullPath); // official Electron native drag
-      setTimeout(refreshBoard, 1500); // fallback rescan
-    }
-  };
-  const onUp = () => {
-    cleanup();
-    if (handedOff) return;
-    el.classList.remove('dragging');
-    dragging = false;
-    if (!moved) return;
-    const m = metrics();
-    // nearest cell to the item's top-left corner (v7 pos_to_cell rule)
-    const cellTarget = [
-      Math.max(0, Math.round((el.offsetLeft - ORIGIN) / m.cellW)),
-      Math.max(0, Math.round((el.offsetTop - ORIGIN) / m.cellH)),
-    ];
-    moveKeyTo(key, cellTarget);
-    // persist FIRST: renderBoard() rebuilds cells from boardData,
-    // so saving after rendering would write back the old position.
-    persistBoard();
-    renderBoard();
-  };
+  // Backup exit signal: while dragging, poll the OS cursor position
+  // in the main process. Pointer capture can clamp the renderer's
+  // own coordinates at the window edge, so this is the reliable
+  // "the pointer really is outside" witness.
+  const poll = setInterval(() => {
+    api.cursorPoint().then((p) => { if (p) lastCursor = p; }).catch(() => {});
+  }, 120);
   const cleanup = () => {
+    clearInterval(poll);
     el.removeEventListener('pointermove', onMove);
     el.removeEventListener('pointerup', onUp);
     el.removeEventListener('pointercancel', onUp);
+  };
+  const onMove = (ev) => {
+    const dx = ev.clientX - startX, dy = ev.clientY - startY;
+    if (!moved && Math.hypot(dx, dy) > 6) {
+      moved = true;
+      for (const g of group) g.el.classList.add('dragging');
+    }
+    if (!moved) return;
+    for (const g of group) {
+      g.el.style.left = (g.left + dx) + 'px';
+      g.el.style.top = (g.top + dy) + 'px';
+    }
+  };
+  const finishInternal = () => {
+    // nearest cell to the anchor item's top-left (v7 pos_to_cell rule)
+    const target = [
+      Math.max(0, Math.round((anchor.el.offsetLeft - ORIGIN) / m.cellW)),
+      Math.max(0, Math.round((anchor.el.offsetTop - ORIGIN) / m.cellH)),
+    ];
+    const plan = planGroupMove(group.map((g) => g.key),
+      target[0] - anchor.cell[0], target[1] - anchor.cell[1], m.rows);
+    if (plan === null) { renderBoard(); return; } // blocked -> whole group reverts
+    for (const [k, c] of plan.entries()) cells.set(k, c);
+    // persist FIRST: renderBoard() rebuilds cells from boardData.
+    persistBoard();
+    renderBoard();
+  };
+  const onUp = async (ev) => {
+    cleanup();
+    for (const g of group) g.el.classList.remove('dragging');
+    dragging = false;
+    if (!moved) {
+      // plain click: collapse to just this item
+      selection = new Set([key]);
+      renderBoardSelection();
+      return;
+    }
+    // ---- was the pointer released OUTSIDE the window? ----
+    let outside = ev.clientX < 0 || ev.clientY < 0 ||
+      ev.clientX >= window.innerWidth || ev.clientY >= window.innerHeight;
+    let screenPt = { x: ev.screenX, y: ev.screenY };
+    if (lastCursor) {
+      const cx = lastCursor.x - window.screenX;
+      const cy = lastCursor.y - window.screenY;
+      if (cx < 0 || cy < 0 || cx >= window.innerWidth || cy >= window.innerHeight) {
+        outside = true;
+        screenPt = lastCursor;
+      }
+    }
+    const filePaths = group.map((g) => g.path).filter(Boolean);
+    if (!outside || !filePaths.length) { finishInternal(); return; }
+    // ---- outside release: self-implemented MOVE (no startDrag) ----
+    renderBoard(); // items snap back while main resolves the target
+    toast('移動先を判定しています…', 15000);
+    let res = null;
+    try { res = await api.resolveDropMove(filePaths, screenPt.x, screenPt.y); }
+    catch (err) { res = null; }
+    if (res && res.moved && res.moved.length) {
+      const movedSet = new Set(res.moved);
+      for (const g of group) {
+        if (g.path && movedSet.has(g.path)) {
+          cells.delete(g.key);
+          selection.delete(g.key);
+        }
+      }
+      await persistBoard();
+      toast(res.resolved && res.resolved.type === 'desktop'
+        ? 'デスクトップへ移動しました'
+        : 'フォルダへ移動しました');
+      refreshBoard();
+    } else {
+      // unknown target / failure: NOTHING was moved, items stay put.
+      toast('落とした場所が判定できませんでした');
+      renderBoard();
+    }
   };
   el.addEventListener('pointermove', onMove);
   el.addEventListener('pointerup', onUp);
@@ -549,6 +683,10 @@ async function refreshBoard() {
   const name = boardData.name;
   try {
     boardData = await api.getBoard(name);
+    // A refresh requested before a drag started can resolve DURING
+    // the drag; rendering then would wipe the dragged elements /
+    // rubber band mid-gesture. Re-check at render time.
+    if (dragging) return;
     if (view === 'board') renderBoard();
   } catch (e) { /* board folder may be gone */ }
 }
@@ -556,7 +694,8 @@ async function refreshBoard() {
 async function openBoard(name) {
   boardData = await api.getBoard(name);
   view = 'board';
-  selectedKey = null;
+  selection = new Set(); // selection never carries across boards
+
   homeView.hidden = true;
   boardView.hidden = false;
   renderBoard();
@@ -588,8 +727,58 @@ $('percentSel').addEventListener('change', async (e) => {
   await persistBoard();
 });
 
+// ------------------------------------------- rubber-band selection
+// PRIMARY multi-select (desktop style, no modifier needed): drag on
+// empty board area -> a translucent blue rectangle is drawn live and
+// every item it touches becomes the selection (replacing, unless
+// Ctrl/Cmd is held, in which case it adds). A plain click on empty
+// area just clears the selection.
 boardArea.addEventListener('pointerdown', (e) => {
-  if (e.target === boardArea) { selectedKey = null; renderBoardSelection(); }
+  if (e.target !== boardArea || e.button !== 0) return;
+  hideMenu();
+  const additive = e.ctrlKey || e.metaKey;
+  const baseSel = additive ? new Set(selection) : new Set();
+  if (!additive) { selection = new Set(); renderBoardSelection(); }
+  const rect = boardArea.getBoundingClientRect();
+  const x0 = e.clientX - rect.left, y0 = e.clientY - rect.top;
+  let band = null;
+  let moved = false;
+  dragging = true; // pause auto-refresh from pointerdown, not threshold
+  const onMove = (ev) => {
+    const x1 = ev.clientX - rect.left, y1 = ev.clientY - rect.top;
+    if (!moved && Math.hypot(x1 - x0, y1 - y0) > 4) {
+      moved = true;
+      dragging = true; // pause auto-refresh while banding
+      band = document.createElement('div');
+      band.className = 'rubber-band';
+      boardArea.appendChild(band);
+    }
+    if (!moved) return;
+    const bx = Math.min(x0, x1), by = Math.min(y0, y1);
+    const bw = Math.abs(x1 - x0), bh = Math.abs(y1 - y0);
+    band.style.left = bx + 'px';
+    band.style.top = by + 'px';
+    band.style.width = bw + 'px';
+    band.style.height = bh + 'px';
+    const sel = new Set(baseSel);
+    for (const itemEl of boardArea.querySelectorAll('.item')) {
+      const ix = itemEl.offsetLeft, iy = itemEl.offsetTop;
+      const iw = itemEl.offsetWidth, ih = itemEl.offsetHeight;
+      if (ix < bx + bw && ix + iw > bx && iy < by + bh && iy + ih > by) {
+        sel.add(itemEl.dataset.key);
+      }
+    }
+    selection = sel;
+    renderBoardSelection();
+  };
+  const onUp = () => {
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    if (band) band.remove();
+    dragging = false;
+  };
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
 });
 boardArea.addEventListener('dragover', (e) => {
   e.preventDefault();
