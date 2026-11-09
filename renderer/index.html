@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="紺">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'">
+<title>OkibaBoard</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- ================= HOME ================= -->
+  <section id="homeView" class="view">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22"><rect x="3" y="3" width="8" height="8" rx="2.5"/><rect x="13" y="3" width="8" height="8" rx="2.5"/><rect x="3" y="13" width="8" height="8" rx="2.5"/><rect x="13" y="13" width="8" height="8" rx="2.5"/></svg>
+        </span>
+        <span class="brand-title">ボード</span>
+      </div>
+      <div class="topbar-actions">
+        <button id="addBoardBtn" class="pill pill-accent">＋ ボード</button>
+        <button id="homeThemeBtn" class="pill">テーマ: 紺</button>
+      </div>
+    </header>
+    <main class="home-main">
+      <h1 class="home-heading">あなたのボード</h1>
+      <p id="homeSub" class="home-sub"></p>
+      <p id="migratedNotice" class="notice" hidden></p>
+      <div id="boardGrid" class="board-grid"></div>
+    </main>
+  </section>
+
+  <!-- ================= BOARD ================= -->
+  <section id="boardView" class="view" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <button id="backBtn" class="circle-btn" title="もどる">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <span id="boardTitle" class="brand-title"></span>
+      </div>
+      <div class="topbar-actions">
+        <label class="pill pill-select">
+          <span class="pill-label">大きさ</span>
+          <select id="percentSel">
+            <option>25</option><option>30</option><option>40</option><option>50</option>
+            <option>60</option><option>70</option><option>80</option><option>90</option>
+            <option>100</option><option>125</option>
+          </select><span class="pill-unit">%</span>
+        </label>
+        <button id="boardThemeBtn" class="pill">テーマ: 紺</button>
+      </div>
+    </header>
+    <main id="boardArea" class="board-area"></main>
+    <p id="boardHint" class="board-hint">ファイルをここに落とせます</p>
+  </section>
+
+  <div id="ctxMenu" class="ctx-menu" hidden></div>
+
+  <div id="modalOverlay" class="modal-overlay" hidden>
+    <div class="modal">
+      <h2 id="modalTitle" class="modal-title"></h2>
+      <input id="modalInput" class="modal-input" type="text">
+      <textarea id="modalArea" class="modal-input modal-area" rows="5" hidden></textarea>
+      <p id="modalError" class="modal-error"></p>
+      <div class="modal-buttons">
+        <button id="modalCancel" class="pill">キャンセル</button>
+        <button id="modalOk" class="pill pill-accent">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+name: build-windows
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Headless self-test (pure fs logic)
+        run: node tools/selftest.js
+
+      - name: Build portable exe
+        run: npx electron-builder --win portable
+
+      - name: Verify exe exists
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path dist -Filter *.exe | Select-Object -First 1
+          if (-not $exe) { throw 'exe not found in dist' }
+          Write-Host "EXE: $($exe.FullName) ($($exe.Length) bytes)"
+
+      - name: Launch smoke (in-app self-test mode)
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path dist -Filter *.exe | Select-Object -First 1
+          $env:OKIBA_SELFTEST = '1'
+          $env:OKIBA_BASE = Join-Path $env:RUNNER_TEMP 'okiba-smoke-base'
+          $env:OKIBA_OLD_BASE = Join-Path $env:RUNNER_TEMP 'okiba-smoke-old'
+          $p = Start-Process -FilePath $exe.FullName -PassThru -Wait
+          Write-Host "smoke exit code: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "launch smoke failed with exit code $($p.ExitCode)" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OkibaBoard-exe
+          path: dist/*.exe
