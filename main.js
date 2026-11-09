@@ -3,6 +3,7 @@ const { app, BrowserWindow, ipcMain, shell, nativeImage, dialog } = require('ele
 const fs = require('fs');
 const path = require('path');
 const bf = require('./lib/boardfs');
+const dw = require('./lib/dropwatch');
 
 // ------------------------------------------------------------------ paths
 let BASE = null;
@@ -275,28 +276,132 @@ function registerIpc() {
     return bf.placeDroppedItems(paths, folder);
   });
 
-  // Native drag OUT (official Electron API). Must be called from the
-  // renderer's dragstart handler via preload IPC.
+  // ------------------------- drag-out: native drag + move completion
+  // webContents.startDrag hands the real file to the OS, but a drop on
+  // the Desktop/Downloads makes Explorer COPY it and the source app is
+  // told nothing — so we complete the move ourselves (lib/dropwatch):
+  // snapshot the watch folders at drag start, then poll for a new file
+  // with the same size + content hash; only then trash the original.
   const DRAG_ICON = nativeImage.createFromDataURL(
     'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAmElEQVR4nO3QMREAIBDAsDeDDwTiGWRkoEP2Xmftc382OkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAO0BzG0B0vTUaKYAAAAASUVORK5CYII=');
+  function dropWatchDirs() {
+    const fromEnv = process.env.OKIBA_DROP_WATCH_DIRS;
+    if (fromEnv) return fromEnv.split(path.delimiter).filter(Boolean);
+    const dirs = [];
+    try { dirs.push(app.getPath('desktop')); } catch (e) {}
+    try { dirs.push(app.getPath('downloads')); } catch (e) {}
+    return [...new Set(dirs)];
+  }
+
+  // Synchronous prep (cheap: one stat + top-level listings) so it can
+  // run BEFORE startDrag inside the IPC handler. Returns null when
+  // there is nothing to watch / the source is gone.
+  function prepareDragOut(fullPath) {
+    let stat;
+    try { stat = fs.statSync(fullPath); } catch (e) { return null; }
+    const dirs = dropWatchDirs();
+    if (!dirs.length) return null;
+    const isDir = stat.isDirectory();
+    return {
+      dirs,
+      before: dw.snapshotDirs(dirs),
+      source: {
+        path: fullPath,
+        name: path.basename(fullPath),
+        size: isDir ? dw.dirSize(fullPath) : stat.size,
+        isDir,
+        hash: null,
+      },
+    };
+  }
+
+  async function trashForDragOut(p) {
+    // Test-only disposal override (E2E): move into a scratch folder
+    // instead of the real Recycle Bin, so the completion pipeline can
+    // be verified deterministically on any runner.
+    const testDir = process.env.OKIBA_TEST_TRASH_DIR;
+    if (testDir) {
+      fs.mkdirSync(testDir, { recursive: true });
+      const dest = bf.uniqueDestination(testDir, path.basename(p));
+      try { fs.renameSync(p, dest); }
+      catch (e) {
+        if (fs.statSync(p).isDirectory()) {
+          fs.cpSync(p, dest, { recursive: true });
+          fs.rmSync(p, { recursive: true, force: true });
+        } else {
+          fs.copyFileSync(p, dest);
+          fs.rmSync(p, { force: true });
+        }
+      }
+      return;
+    }
+    await shell.trashItem(p);
+  }
+
+  function startDragOutMonitor(session) {
+    if (!session) return;
+    // Hash the source off the drag-critical path; the watcher also
+    // computes it lazily if a candidate shows up first.
+    if (!session.source.isDir) {
+      dw.hashFile(session.source.path)
+        .then((h) => { session.source.hash = h; })
+        .catch(() => {});
+    }
+    dw.watchForCopy({
+      source: session.source,
+      dirs: session.dirs,
+      before: session.before,
+      trashItem: trashForDragOut,
+      hashFile: dw.hashFile,
+      pollMs: 300,
+      timeoutMs: 10000,
+    }).then((res) => {
+      if (!win || win.isDestroyed()) return;
+      if (res.moved) {
+        // original is gone -> rescan so the card disappears
+        win.webContents.send('fs-changed');
+      } else if (res.reason === 'error') {
+        win.webContents.send('status',
+          'ドラッグしたファイルの後片付けに失敗しました: ' + (res.error || ''));
+      }
+    }).catch(() => { /* watcher never throws, but stay safe */ });
+  }
+
   // Every startDrag invocation is recorded so the GUI test-suite can
   // verify the drag-out IPC path (renderer -> preload -> this handler)
   // even though a real OS drag gesture cannot be automated.
   const dragLog = [];
   ipcMain.on('ondragstart', (event, fullPath) => {
-    // startDrag must be called synchronously inside this handler,
-    // so the icon is a pre-built generic image (not an async thumb).
+    // Snapshot BEFORE startDrag: the copy cannot exist yet, and the
+    // drag session only begins once startDrag is called.
+    const session = prepareDragOut(fullPath);
     let okFlag = true;
     let errMsg = null;
     try {
+      // startDrag must be called synchronously inside this handler,
+      // so the icon is a pre-built generic image (not an async thumb).
       event.sender.startDrag({ file: fullPath, icon: DRAG_ICON });
     } catch (e) {
       okFlag = false;
       errMsg = String((e && e.message) || e);
     }
     dragLog.push({ path: fullPath, ok: okFlag, err: errMsg });
+    if (okFlag) startDragOutMonitor(session);
   });
   ipcMain.handle('test-draglog', () => dragLog);
+
+  // Test hook (E2E only, registered solely under OKIBA_TEST_HOOKS=1):
+  // run the exact prepare+monitor pipeline without the OS drag, so the
+  // test can drop a copy into a fake Desktop folder and watch the
+  // original get removed.
+  if (process.env.OKIBA_TEST_HOOKS === '1') {
+    ipcMain.handle('test-begin-dragout', (_e, fullPath) => {
+      const session = prepareDragOut(fullPath);
+      if (!session) return { ok: false };
+      startDragOutMonitor(session);
+      return { ok: true, dirs: session.dirs };
+    });
+  }
 }
 
 app.whenReady().then(async () => {

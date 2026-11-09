@@ -30,6 +30,10 @@ contextBridge.exposeInMainWorld('okiba', {
   startDrag: (fullPath) => ipcRenderer.send('ondragstart', fullPath),
   // test hook: read back the main process's startDrag invocation log
   dragLog: () => ipcRenderer.invoke('test-draglog'),
+  // test hook (only usable when main runs with OKIBA_TEST_HOOKS=1):
+  // start the drag-out move-completion watcher without an OS drag
+  testBeginDragOut: (fullPath) => ipcRenderer.invoke('test-begin-dragout', fullPath),
 
   onFsChanged: (cb) => ipcRenderer.on('fs-changed', cb),
+  onStatus: (cb) => ipcRenderer.on('status', (_e, msg) => cb(msg)),
 });

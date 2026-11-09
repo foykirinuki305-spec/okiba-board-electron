@@ -63,6 +63,11 @@
 }
 
 * { box-sizing: border-box; }
+/* Native HTML5 drag is disabled app-wide (see app.js lockdown): a
+   draggable <img> would leak out of the window as a browser-style
+   download of the thumbnail instead of the real file being moved. */
+img { -webkit-user-drag: none; }
+.item, .board-card, .tile { -webkit-user-drag: none; }
 html, body { height: 100%; }
 body {
   margin: 0;

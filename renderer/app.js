@@ -109,6 +109,29 @@ document.addEventListener('mousedown', (e) => {
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideMenu(); });
 
+// ------------------------------------------------- native-drag lockdown
+// HTML5 drag is disabled app-wide, unconditionally. The ONLY native
+// drag in this app is the one the main process starts via
+// webContents.startDrag during our pointer-drag handoff. This matters:
+// thumbnails are <img> elements whose src is a data: URL, and an
+// <img> is natively draggable by default — dragging one out of the
+// window made Chromium save the THUMBNAIL as a browser-style download
+// (different file name, original left behind) instead of moving the
+// real file. The capture-phase preventDefault below seals every
+// remaining path (links, backgrounded images, future elements), and
+// every created <img>/item also gets draggable=false explicitly.
+document.addEventListener('dragstart', (e) => { e.preventDefault(); }, true);
+// Drops outside the board area must never navigate or download.
+document.addEventListener('dragover', (e) => {
+  if (!boardArea.contains(e.target)) e.preventDefault();
+});
+document.addEventListener('drop', (e) => {
+  if (!boardArea.contains(e.target)) e.preventDefault();
+});
+
+// main-process status messages (e.g. drag-out cleanup failures)
+api.onStatus((msg) => toast(msg));
+
 // -------------------------------------------------------------- thumbs
 const thumbCache = new Map();
 function loadThumb(fullPath, imgEl) {
@@ -170,6 +193,7 @@ function renderHome() {
   for (const b of boards) {
     const card = document.createElement('div');
     card.className = 'board-card';
+    card.draggable = false;
     card.dataset.name = b.name;
     const collage = document.createElement('div');
     collage.className = 'collage';
@@ -177,6 +201,7 @@ function renderHome() {
       for (const u of b.thumbs) {
         const im = document.createElement('img');
         im.src = u; im.alt = '';
+        im.draggable = false; // never leak a thumbnail as a "download"
         collage.appendChild(im);
       }
     } else {
@@ -324,6 +349,7 @@ function renderBoard() {
     if (!c) return;
     const el = document.createElement('div');
     el.className = 'item' + (key === selectedKey ? ' selected' : '');
+    el.draggable = false; // items move via pointer drag only (see lockdown)
     el.dataset.key = key;
     el.style.left = (ORIGIN + c[0] * m.cellW) + 'px';
     el.style.top = (ORIGIN + c[1] * m.cellH) + 'px';
@@ -338,6 +364,7 @@ function renderBoard() {
         if (t) t.remove();
         const img = document.createElement('img');
         img.alt = '';
+        img.draggable = false; // a dragged data:-URL img becomes a "download"
         img.src = url;
         thumb.appendChild(img);
       };
@@ -424,6 +451,15 @@ function itemPointer(e, el, key, fullPath) {
     el.style.left = (origLeft + dx) + 'px';
     el.style.top = (origTop + dy) + 'px';
     // --- drag OUT handoff: pointer left the window while held ---
+    // Pointer capture keeps move events flowing outside the window,
+    // and HTML5 drag is fully disabled (see the lockdown above), so
+    // this pointer drag genuinely owns the gesture up to this point.
+    // api.startDrag makes the main process call the official
+    // webContents.startDrag synchronously in its IPC handler, while
+    // the button is still physically held. Explorer will COPY the
+    // file at the drop target; the main process then completes the
+    // MOVE (lib/dropwatch) and notifies us via 'fs-changed' so the
+    // card disappears. Drops elsewhere stay plain copies.
     if (!handedOff && fullPath &&
         (ev.clientX <= 0 || ev.clientY <= 0 ||
          ev.clientX >= window.innerWidth - 1 || ev.clientY >= window.innerHeight - 1)) {
@@ -433,7 +469,7 @@ function itemPointer(e, el, key, fullPath) {
       cleanup();
       renderBoard(); // card returns to its cell while the OS drag runs
       api.startDrag(fullPath); // official Electron native drag
-      setTimeout(refreshBoard, 900); // reflect move-out if it happened
+      setTimeout(refreshBoard, 1500); // fallback rescan
     }
   };
   const onUp = () => {

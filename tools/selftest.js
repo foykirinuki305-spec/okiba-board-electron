@@ -172,12 +172,131 @@ function main() {
       'moveToCell swaps occupant');
   }
 
-  console.log('\nselftest: ' + passed + ' checks passed');
 }
 
-try {
-  main();
-} catch (e) {
-  console.error(e.message || e);
-  process.exit(1);
+// ------------------------------------------------ dropwatch (async)
+const dw = require('../lib/dropwatch');
+
+async function dropwatchMain() {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const mkPair = () => {
+    const board = tmp(); const watch = tmp();
+    const src = path.join(board, '素材.mp4');
+    fs.writeFileSync(src, 'hello world'); // 11 bytes
+    return { board, watch, src };
+  };
+  const runWatch = (src, watch, trashed, timeoutMs = 2500) => dw.watchForCopy({
+    source: {
+      path: src, name: path.basename(src),
+      size: fs.statSync(src).size, isDir: false, hash: null,
+    },
+    dirs: [watch],
+    before: dw.snapshotDirs([watch]),
+    trashItem: async (p) => { trashed.push(p); fs.rmSync(p, { force: true }); },
+    pollMs: 40,
+    timeoutMs,
+  });
+
+  // (a) matching name+size+content appears -> original trashed (MOVE)
+  {
+    const { watch, src } = mkPair();
+    const trashed = [];
+    const promise = runWatch(src, watch, trashed);
+    await sleep(120);
+    fs.copyFileSync(src, path.join(watch, '素材.mp4'));
+    const res = await promise;
+    ok(res.moved === true && res.reason === 'copy-detected', 'dropwatch: copy detected');
+    ok(trashed.length === 1 && trashed[0] === src, 'dropwatch: original trashed on copy');
+    ok(!fs.existsSync(src), 'dropwatch: original gone after move completion');
+  }
+
+  // (b) nothing appears -> original kept
+  {
+    const { watch, src } = mkPair();
+    const trashed = [];
+    const res = await dw.watchForCopy({
+      source: { path: src, name: '素材.mp4', size: 11, isDir: false, hash: null },
+      dirs: [watch],
+      before: dw.snapshotDirs([watch]),
+      trashItem: async (p) => { trashed.push(p); },
+      pollMs: 40, timeoutMs: 300,
+    });
+    ok(res.moved === false && res.reason === 'timeout', 'dropwatch: no drop -> timeout');
+    ok(trashed.length === 0 && fs.existsSync(src), 'dropwatch: no drop -> original kept');
+  }
+
+  // (c) the only "new" file IS the source itself -> kept (same-path guard)
+  {
+    const watch = tmp();
+    const src = path.join(watch, '素材.mp4'); // source inside watched dir
+    fs.writeFileSync(src, 'hello world');
+    const trashed = [];
+    const res = await dw.watchForCopy({
+      source: { path: src, name: '素材.mp4', size: 11, isDir: false, hash: null },
+      dirs: [watch],
+      before: new Map([[watch, new Map()]]), // crafted: source "looks new"
+      trashItem: async (p) => { trashed.push(p); },
+      pollMs: 40, timeoutMs: 300,
+    });
+    ok(res.moved === false && trashed.length === 0 && fs.existsSync(src),
+      'dropwatch: source itself is never treated as its own copy');
+  }
+
+  // (d) same name but different SIZE appears -> kept
+  {
+    const { watch, src } = mkPair();
+    const trashed = [];
+    const promise = runWatch(src, watch, trashed, 600);
+    await sleep(120);
+    fs.writeFileSync(path.join(watch, '素材.mp4'), 'short'); // 5 bytes != 11
+    const res = await promise;
+    ok(res.moved === false && trashed.length === 0 && fs.existsSync(src),
+      'dropwatch: size mismatch -> original kept');
+  }
+
+  // (e) same name and SIZE but different CONTENT (hash) -> kept.
+  //     This is what stops a leaked thumbnail "download" (or any other
+  //     same-size stranger) from being mistaken for the dropped copy.
+  {
+    const { watch, src } = mkPair();
+    const trashed = [];
+    const promise = runWatch(src, watch, trashed, 600);
+    await sleep(120);
+    fs.writeFileSync(path.join(watch, '素材.mp4'), 'HELLO WORLD'); // 11 bytes, other bytes
+    const res = await promise;
+    ok(res.moved === false && trashed.length === 0 && fs.existsSync(src),
+      'dropwatch: hash mismatch -> original kept');
+  }
+
+  // (f) DIFFERENT name but same size+content -> still a move
+  //     (Explorer suffixes / renamed drops: name is only a tie-breaker)
+  {
+    const { watch, src } = mkPair();
+    const trashed = [];
+    const promise = runWatch(src, watch, trashed);
+    await sleep(120);
+    fs.copyFileSync(src, path.join(watch, '素材 - コピー.mp4'));
+    const res = await promise;
+    ok(res.moved === true && trashed.length === 1 && !fs.existsSync(src),
+      'dropwatch: renamed copy (same hash) completes the move');
+  }
+
+  // (g) name affinity helper
+  {
+    ok(dw.nameAffinity('a.mp4', 'a.mp4'), 'affinity: identical name');
+    ok(dw.nameAffinity('a.mp4', 'a (2).mp4'), 'affinity: " (2)" suffix');
+    ok(dw.nameAffinity('a.mp4', 'a - コピー.mp4'), 'affinity: " - コピー" suffix');
+    ok(!dw.nameAffinity('a.mp4', 'ab.mp4'), 'affinity: different stem rejected');
+  }
 }
+
+(async () => {
+  try {
+    main();
+    await dropwatchMain();
+    console.log('\nselftest: ' + passed + ' checks passed');
+  } catch (e) {
+    console.error(e.message || e);
+    process.exit(1);
+  }
+})();
