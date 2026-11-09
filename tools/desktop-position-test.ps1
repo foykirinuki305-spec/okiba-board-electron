@@ -71,6 +71,10 @@ function Invoke-PosScript([string[]]$a) {
   }
 }
 
+$script:styleCleared = $false
+$script:lvHwnd = [IntPtr]::Zero
+$script:origStyle = 0
+
 $desktop = [Environment]::GetFolderPath('Desktop')
 Diag "shell desktop folder: $desktop"
 $name = 'OkibaPosTest-' + [guid]::NewGuid().ToString('N').Substring(0, 10) + '.txt'
@@ -112,7 +116,71 @@ try {
   $placed = Invoke-PosScript @('-ClientCoords', "$targetX", "$targetY", $name)
   if (-not $placed) { Fail 'position invocation produced no result' }
   if ($placed.status -eq 'autoarrange') {
-    Loud-Skip 'desktop auto-arrange is ON in this runner session, positions cannot stick'
+    # The hosted runner's desktop ships with auto-arrange ON, but
+    # the environment this feature targets (the user's PC) has it
+    # OFF. LVS_AUTOARRANGE is a plain listview style bit — the
+    # control itself does the arranging — so clear it on the
+    # desktop listview for this test session only (restored in the
+    # finally block) and retry. The production script is untouched.
+    Diag 'auto-arrange is ON in this runner session; clearing the LVS_AUTOARRANGE style bit on the desktop listview (test session only) to mirror the target environment and retrying'
+    try {
+      Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class OkibaTestWin {
+  public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string win);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string win);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lp);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hwnd, StringBuilder buf, int max);
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hwnd, int index);
+  [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wp, IntPtr lp);
+  static IntPtr FromDefView(IntPtr parent) {
+    if (parent == IntPtr.Zero) return IntPtr.Zero;
+    IntPtr dv = FindWindowEx(parent, IntPtr.Zero, "SHELLDLL_DefView", null);
+    if (dv == IntPtr.Zero) return IntPtr.Zero;
+    return FindWindowEx(dv, IntPtr.Zero, "SysListView32", null);
+  }
+  public static IntPtr FindPopulatedListView() {
+    IntPtr best = IntPtr.Zero; int bestCount = -1;
+    IntPtr lv = FromDefView(FindWindow("Progman", null));
+    if (lv != IntPtr.Zero) { best = lv; bestCount = (int)SendMessage(lv, 0x1004, IntPtr.Zero, IntPtr.Zero); }
+    EnumWindows((hwnd, lp) => {
+      var sb = new StringBuilder(64);
+      GetClassName(hwnd, sb, 64);
+      if (sb.ToString() == "WorkerW") {
+        IntPtr v = FromDefView(hwnd);
+        if (v != IntPtr.Zero) {
+          int c = (int)SendMessage(v, 0x1004, IntPtr.Zero, IntPtr.Zero);
+          if (c > bestCount) { bestCount = c; best = v; }
+        }
+      }
+      return true;
+    }, IntPtr.Zero);
+    return best;
+  }
+}
+'@
+      $script:lvHwnd = [OkibaTestWin]::FindPopulatedListView()
+      if ($script:lvHwnd -ne [IntPtr]::Zero) {
+        $script:origStyle = [OkibaTestWin]::GetWindowLong($script:lvHwnd, -16)
+        Diag ("listview style before: 0x{0:X8}" -f $script:origStyle)
+        [void][OkibaTestWin]::SetWindowLong($script:lvHwnd, -16, ($script:origStyle -band (-bnot 0x1000)))
+        $script:styleCleared = $true
+        Start-Sleep -Milliseconds 600
+        $placed = Invoke-PosScript @('-ClientCoords', "$targetX", "$targetY", $name)
+        if (-not $placed) { Fail 'position retry produced no result' }
+      } else {
+        Diag 'could not locate the desktop listview from the test script'
+      }
+    } catch {
+      Diag "style-bit clearing failed: $($_.Exception.Message)"
+    }
+  }
+  if ($placed.status -eq 'autoarrange') {
+    Loud-Skip 'desktop auto-arrange is ON in this runner session and could not be cleared, positions cannot stick'
   }
   if ($placed.status -ne 'ok') {
     Fail "position invocation returned status=$($placed.status) detail=$($placed.detail)"
@@ -140,6 +208,12 @@ try {
   Flush-Diag
   exit 0
 } finally {
+  if ($script:styleCleared -and $script:lvHwnd -and $script:lvHwnd -ne [IntPtr]::Zero) {
+    try {
+      [void][OkibaTestWin]::SetWindowLong($script:lvHwnd, -16, $script:origStyle)
+      Diag 'restored the original desktop listview style'
+    } catch {}
+  }
   try { Remove-Item $dummy -Force -ErrorAction SilentlyContinue } catch {}
   Flush-Diag
 }
