@@ -50,6 +50,16 @@ jobs:
           }
           if ($failed) { throw 'PowerShell script check failed' }
 
+      # Real-desktop integration test: position-desktop-icons.ps1
+      # drives the runner's actual Explorer desktop listview (the
+      # v1.3.0 LVITEM-offset bug passed every stubbed test and only
+      # failed on a real PC). Fails the build when positioning does
+      # not stick; the only tolerated outcome besides PASS is the
+      # loud, documented no-desktop SKIP inside the test script.
+      - name: Desktop icon positioning on the REAL Explorer desktop
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/desktop-position-test.ps1
+
       - name: GUI end-to-end test (Playwright Electron, real UI operations)
         run: node tests/gui.e2e.js
         env:
@@ -87,4 +97,12 @@ jobs:
         with:
           name: gui-screenshots
           path: screenshots/*.png
+          if-no-files-found: ignore
+
+      - name: Upload desktop-position diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-position-diagnostics
+          path: desktop-position-diagnostics.txt
           if-no-files-found: ignore

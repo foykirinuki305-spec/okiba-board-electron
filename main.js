@@ -346,16 +346,34 @@ function registerIpc() {
           // never changes the move outcome.
           if (target.type === 'desktop' && r.moved.length && r.destinations.length) {
             const names = r.destinations.map((d) => path.basename(d));
-            result.position = { status: 'failed', positioned: 0 };
+            result.position = { status: 'script-error', positioned: 0, detail: 'not-run' };
             try {
               result.position = await positionDesktopIcons(x, y, names);
-            } catch (e) { /* keep the failed default */ }
+            } catch (e) {
+              result.position = {
+                status: 'script-error', positioned: 0,
+                detail: String((e && e.message) || e).slice(0, 200),
+              };
+            }
             result.positionNote = ip.statusNoteFor(result.position);
             dropLog.push({
               kind: 'position', x, y, names,
               status: result.position.status,
               positioned: result.position.positioned,
+              detail: result.position.detail || '',
             });
+            // Diagnostics: positioning must never fail silently
+            // again (v1.3.0's invisible bug). One line per drop in
+            // <base>\okiba.log with the full result + the args.
+            try {
+              const line = new Date().toISOString() +
+                ' drop-position status=' + result.position.status +
+                ' positioned=' + result.position.positioned +
+                ' detail=' + (result.position.detail || '') +
+                ' names=' + names.join(', ') +
+                ' drop=' + x + ',' + y + '\n';
+              fs.appendFileSync(path.join(BASE, 'okiba.log'), line);
+            } catch (e) { /* diagnostics must never break a move */ }
           }
         } else {
           result.resolved = { type: 'unknown' };

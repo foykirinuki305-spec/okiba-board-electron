@@ -317,13 +317,22 @@ function iconposMain() {
     ok(ip.isAutoArrange(0) === false, 'auto-arrange: zero style');
   }
 
-  // ---------- status note: only auto-arrange speaks up ----------
+  // ---------- status note: EVERY non-ok status speaks up ----------
   {
     ok(ip.statusNoteFor({ status: 'autoarrange' }).includes('自動整列'),
       'note: auto-arrange gets the note');
     ok(ip.statusNoteFor({ status: 'ok' }) === '', 'note: success is silent');
-    ok(ip.statusNoteFor({ status: 'failed' }) === '', 'note: failure is silent');
     ok(ip.statusNoteFor(null) === '', 'note: missing result is silent');
+    ok(ip.statusNoteFor({ status: 'no-item' }).includes('アイコン未検出'),
+      'note: no-item says icon not found');
+    ok(ip.statusNoteFor({ status: 'no-listview' }).includes('デスクトップ未検出'),
+      'note: no-listview says desktop not found');
+    ok(ip.statusNoteFor({ status: 'set-unverified' }).includes('固定できませんでした'),
+      'note: set-unverified says position did not stick');
+    ok(ip.statusNoteFor({ status: 'script-error' }).includes('エラー'),
+      'note: script-error says error');
+    ok(ip.statusNoteFor({ status: 'partial' }) !== '',
+      'note: partial is not silent');
   }
 
   // ---------- screen -> client conversion ----------
@@ -388,10 +397,19 @@ function iconposMain() {
     ok(o1.status === 'ok' && o1.positioned === 2, 'parsePos: ok with count');
     const o2 = ip.parsePositionOutput('noise\n{"status":"autoarrange","positioned":0}');
     ok(o2.status === 'autoarrange', 'parsePos: autoarrange (last line)');
-    ok(ip.parsePositionOutput('').status === 'failed', 'parsePos: empty -> failed');
-    ok(ip.parsePositionOutput('junk').status === 'failed', 'parsePos: garbage -> failed');
-    ok(ip.parsePositionOutput('{"status":"weird"}').status === 'failed',
-      'parsePos: unknown status -> failed');
+    ok(ip.parsePositionOutput('').status === 'script-error', 'parsePos: empty -> script-error');
+    ok(ip.parsePositionOutput('junk').status === 'script-error', 'parsePos: garbage -> script-error');
+    ok(ip.parsePositionOutput('{"status":"weird"}').status === 'script-error',
+      'parsePos: unknown status -> script-error');
+    ok(ip.parsePositionOutput('{"status":"no-item","positioned":0}').status === 'no-item',
+      'parsePos: no-item passes through');
+    ok(ip.parsePositionOutput('{"status":"no-listview","positioned":0}').status === 'no-listview',
+      'parsePos: no-listview passes through');
+    ok(ip.parsePositionOutput('{"status":"set-unverified","positioned":0}').status === 'set-unverified',
+      'parsePos: set-unverified passes through');
+    const oErr = ip.parsePositionOutput('{"status":"script-error","positioned":0,"detail":"boom"}');
+    ok(oErr.status === 'script-error' && oErr.detail === 'boom',
+      'parsePos: script-error keeps its detail');
   }
 
   // ---------- positioner creation: injection + env stub ----------
