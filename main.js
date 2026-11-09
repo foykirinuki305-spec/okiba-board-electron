@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const bf = require('./lib/boardfs');
 const dm = require('./lib/dropmove');
+const ip = require('./lib/iconpos');
 
 // ------------------------------------------------------------------ paths
 let BASE = null;
@@ -290,16 +291,24 @@ function registerIpc() {
   //    the ShellWindows Explorer window's folder path; else unknown)
   //   -> move the real files there with the intake rules.
   // Unknown target => nothing is moved. Ever.
-  function resolverScriptPath() {
-    // Packaged: the script ships via extraResources (PowerShell
-    // cannot -File a script from inside the asar archive).
+  function bundledScriptPath(fileName) {
+    // Packaged: scripts ship via extraResources (PowerShell cannot
+    // -File a script from inside the asar archive).
     try {
-      const packed = path.join(process.resourcesPath, 'scripts', 'resolve-drop.ps1');
+      const packed = path.join(process.resourcesPath, 'scripts', fileName);
       if (fs.existsSync(packed)) return packed;
     } catch (e) {}
-    return path.join(__dirname, 'scripts', 'resolve-drop.ps1');
+    return path.join(__dirname, 'scripts', fileName);
   }
-  const resolveDropTarget = dm.createResolver({ scriptPath: resolverScriptPath() });
+  const resolveDropTarget = dm.createResolver({
+    scriptPath: bundledScriptPath('resolve-drop.ps1'),
+  });
+  // Desktop icon positioning (v1.3): after a Desktop move, place the
+  // new icons at the drop point. Strictly best-effort — see
+  // lib/iconpos.js.
+  const positionDesktopIcons = ip.createPositioner({
+    scriptPath: bundledScriptPath('position-desktop-icons.ps1'),
+  });
 
   // Every resolution is logged so the GUI test-suite can verify the
   // new IPC path (renderer outside-release -> main resolve -> move)
@@ -309,7 +318,10 @@ function registerIpc() {
     const paths = (payload && Array.isArray(payload.paths)) ? payload.paths : [];
     const x = payload ? Number(payload.screenX) : NaN;
     const y = payload ? Number(payload.screenY) : NaN;
-    const result = { resolved: null, moved: [], skipped: [], failed: [], error: null };
+    const result = {
+      resolved: null, moved: [], skipped: [], failed: [], error: null,
+      position: null, positionNote: '',
+    };
     try {
       const target = (Number.isFinite(x) && Number.isFinite(y))
         ? await resolveDropTarget(x, y)
@@ -327,6 +339,23 @@ function registerIpc() {
           dropLog.push({ kind: 'move', target: target.path, moved: r.moved.length });
           if (r.moved.length && win && !win.isDestroyed()) {
             win.webContents.send('fs-changed');
+          }
+          // Desktop drops only: put the new icon(s) where the user
+          // actually dropped them. The move is already done — any
+          // positioning failure is reported in the log/result but
+          // never changes the move outcome.
+          if (target.type === 'desktop' && r.moved.length && r.destinations.length) {
+            const names = r.destinations.map((d) => path.basename(d));
+            result.position = { status: 'failed', positioned: 0 };
+            try {
+              result.position = await positionDesktopIcons(x, y, names);
+            } catch (e) { /* keep the failed default */ }
+            result.positionNote = ip.statusNoteFor(result.position);
+            dropLog.push({
+              kind: 'position', x, y, names,
+              status: result.position.status,
+              positioned: result.position.positioned,
+            });
           }
         } else {
           result.resolved = { type: 'unknown' };

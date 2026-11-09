@@ -20,6 +20,11 @@
  *      fires the resolve-drop IPC; with OKIBA_TEST_RESOLVER_DIR set,
  *      main resolves the target and really MOVES the file there.
  *      okiba.startDrag must no longer exist (mechanism removed).
+ *      Explorer-folder drops must NOT invoke desktop positioning.
+ *   -> DESKTOP DROP (v1.3): with OKIBA_TEST_RESOLVER_TYPE=desktop
+ *      and the positioner stubbed (OKIBA_TEST_POSITIONER=stub), an
+ *      outside release really MOVES the file and main logs the icon
+ *      positioning invocation (drop point + destination name).
  *   -> context-menu trash uses the real shell.trashItem (Windows)
  *   -> restart restores boards, positions (incl. group), percent,
  *      theme
@@ -119,6 +124,7 @@ async function main() {
     'グループB.txt': 'B',
     '占有.txt': 'blocker',
     '移動テスト.txt': 'move me please',
+    'デスクトップ移動.txt': 'to the desktop',
   };
   for (const [n, c] of Object.entries(seeds)) fs.writeFileSync(path.join(boardDir, n), c);
   fs.writeFileSync(path.join(boardDir, '.okiba-board.json'), JSON.stringify({
@@ -131,6 +137,7 @@ async function main() {
       'グループB.txt': { col: 2, row: 1 },
       '占有.txt': { col: 3, row: 0 },
       '移動テスト.txt': { col: 3, row: 2 },
+      'デスクトップ移動.txt': { col: 4, row: 0 },
     },
     notes: [],
   }, null, 2));
@@ -144,12 +151,13 @@ async function main() {
     OKIBA_BASE: base,
     OKIBA_OLD_BASE: oldBase,
     OKIBA_TEST_RESOLVER_DIR: landing,
+    OKIBA_TEST_POSITIONER: 'stub',
     OKIBA_TEST_HOOKS: '1',
     ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
   };
-  const launch = () => electron.launch({
+  const launch = (extraEnv) => electron.launch({
     args: [ROOT, '--no-sandbox'],
-    env,
+    env: extraEnv ? { ...env, ...extraEnv } : env,
     timeout: 60000,
   });
 
@@ -336,6 +344,9 @@ async function main() {
     return !ns.some((t) => t.includes('移動テスト'));
   }, 'moved item disappeared from the board');
   assert(true, 'outside release -> resolve -> real MOVE, with visible feedback');
+  const logAfterExplorer = await page.evaluate(() => window.okiba.dropLog());
+  assert(!logAfterExplorer.some((e) => e.kind === 'position'),
+    'explorer-folder drop does NOT invoke desktop icon positioning');
 
   if (process.platform === 'win32') {
     step('context-menu trash uses the real Recycle Bin (shell.trashItem)');
@@ -378,6 +389,50 @@ async function main() {
   assert(parseInt(posLeft, 10) > 60, 'item rendered at the dragged column');
   await page.screenshot({ path: path.join(SHOTS, 'board-restored.png') });
   await app2.close();
+
+  // ------------------------------------------------------------ run 3
+  step('desktop drop (v1.3): move + icon positioning is invoked');
+  const app3 = await launch({ OKIBA_TEST_RESOLVER_TYPE: 'desktop' });
+  page = await app3.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click(`#boardGrid .board-card[data-name="${boardName}"]`);
+  await page.waitForSelector('#boardView:not([hidden]) .item');
+  const deskItem = page.locator('.item', { hasText: 'デスクトップ移動' }).first();
+  const deskBox = await boxOf(deskItem, 'desktop item box');
+  await page.mouse.move(deskBox.x + deskBox.width / 2, deskBox.y + deskBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(deskBox.x + deskBox.width / 2 + 30, deskBox.y + deskBox.height / 2,
+    { steps: 5 });
+  // synthetic OUTSIDE release, same pattern as the explorer drop
+  await deskItem.evaluate((el) => {
+    el.dispatchEvent(new PointerEvent('pointerup', {
+      bubbles: true, cancelable: true, pointerId: 1,
+      clientX: -80, clientY: 120, screenX: -40, screenY: 200,
+    }));
+  });
+  await page.mouse.up();
+  await waitFor(() => fs.existsSync(path.join(landing, 'デスクトップ移動.txt')),
+    'desktop drop: file really landed in the Desktop target');
+  assert(!fs.existsSync(path.join(boardDir, 'デスクトップ移動.txt')),
+    'desktop drop: original left the board folder (a MOVE)');
+  await waitFor(async () => {
+    const log = await page.evaluate(() => window.okiba.dropLog());
+    return Array.isArray(log) && log.some((e) => e.kind === 'position' &&
+      e.status === 'ok' && e.x === -40 && e.y === 200 &&
+      Array.isArray(e.names) && e.names.includes('デスクトップ移動.txt'));
+  }, 'main logged the positioning invocation (drop point + destination name)');
+  assert(true, 'positioning script invoked with the drop point and landed name');
+  await waitFor(async () => {
+    const t = await page.evaluate(() => document.getElementById('toast').textContent);
+    return t.includes('デスクトップへ移動しました');
+  }, 'status line says デスクトップへ移動しました');
+  await waitFor(async () => {
+    const ns = await page.locator('.item .name').allTextContents();
+    return !ns.some((t) => t.includes('デスクトップ移動'));
+  }, 'moved item disappeared from the board');
+  const data3 = readJson(path.join(boardDir, '.okiba-board.json'));
+  assert(!data3.positions['デスクトップ移動.txt'], 'no stale position after desktop drop');
+  await app3.close();
 
   console.log('\nGUI E2E: all steps passed');
 }

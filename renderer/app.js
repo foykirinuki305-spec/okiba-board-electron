@@ -624,9 +624,12 @@ function itemPointer(e, el, key, fullPath) {
         }
       }
       await persistBoard();
-      toast(res.resolved && res.resolved.type === 'desktop'
-        ? 'デスクトップへ移動しました'
-        : 'フォルダへ移動しました');
+      const isDesktop = res.resolved && res.resolved.type === 'desktop';
+      let msg = isDesktop ? 'デスクトップへ移動しました' : 'フォルダへ移動しました';
+      // Positioning is best-effort; only the auto-arrange case adds
+      // a note (the move itself still succeeded).
+      if (isDesktop && res.positionNote) msg += '。' + res.positionNote;
+      toast(msg);
       refreshBoard();
     } else {
       // unknown target / failure: NOTHING was moved, items stay put.

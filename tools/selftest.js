@@ -207,6 +207,10 @@ async function dropmoveMain() {
       'moveOut: existing target file untouched');
     ok(fs.readFileSync(path.join(target, 'a (2).txt'), 'utf8') === 'AAA',
       'moveOut: landed as "a (2).txt"');
+    ok(r.destinations.length === 1 &&
+       path.basename(r.destinations[0]) === 'a (2).txt' &&
+       fs.existsSync(r.destinations[0]),
+      'moveOut: destination path reported (for icon positioning)');
   }
 
   // ---------- moveItemsOut: item already inside target is skipped ----------
@@ -271,6 +275,19 @@ async function dropmoveMain() {
     ok(scan.length === 0, 'e2e: board folder empty after move-out');
   }
 
+  // ---------- test resolver can play a Desktop target ----------
+  {
+    const dir = tmp();
+    const asExplorer = dm.testResolverFromEnv({ OKIBA_TEST_RESOLVER_DIR: dir });
+    const t1 = await asExplorer(0, 0);
+    ok(t1.type === 'explorer' && t1.path === dir, 'test resolver defaults to explorer');
+    const asDesktop = dm.testResolverFromEnv({
+      OKIBA_TEST_RESOLVER_DIR: dir, OKIBA_TEST_RESOLVER_TYPE: 'desktop',
+    });
+    const t2 = await asDesktop(0, 0);
+    ok(t2.type === 'desktop' && t2.path === dir, 'test resolver can resolve desktop');
+  }
+
   // ---------- unknown resolution moves NOTHING ----------
   {
     const board = tmp();
@@ -286,10 +303,116 @@ async function dropmoveMain() {
   }
 }
 
+// ------------------------------------------------ iconpos (sync)
+const ip = require('../lib/iconpos');
+
+function iconposMain() {
+  // ---------- auto-arrange decision from a style value ----------
+  {
+    ok(ip.LVS_AUTOARRANGE === 0x1000, 'LVS_AUTOARRANGE is 0x1000');
+    ok(ip.isAutoArrange(0x1000) === true, 'auto-arrange: bare bit set');
+    ok(ip.isAutoArrange(0x1000 | 0x0001 | 0x0200) === true,
+      'auto-arrange: bit set among other style bits');
+    ok(ip.isAutoArrange(0x0001 | 0x0200) === false, 'auto-arrange: bit clear');
+    ok(ip.isAutoArrange(0) === false, 'auto-arrange: zero style');
+  }
+
+  // ---------- status note: only auto-arrange speaks up ----------
+  {
+    ok(ip.statusNoteFor({ status: 'autoarrange' }).includes('自動整列'),
+      'note: auto-arrange gets the note');
+    ok(ip.statusNoteFor({ status: 'ok' }) === '', 'note: success is silent');
+    ok(ip.statusNoteFor({ status: 'failed' }) === '', 'note: failure is silent');
+    ok(ip.statusNoteFor(null) === '', 'note: missing result is silent');
+  }
+
+  // ---------- screen -> client conversion ----------
+  {
+    const c1 = ip.screenToClient({ x: 500, y: 300 }, { x: 120, y: 40 });
+    ok(c1.x === 380 && c1.y === 260, 'screenToClient: subtract the origin');
+    const c2 = ip.screenToClient({ x: 10, y: 10 }, { x: 120, y: 40 });
+    ok(c2.x === -110 && c2.y === -30, 'screenToClient: can go negative (multi-monitor)');
+  }
+
+  // ---------- icon text match candidates ----------
+  {
+    const c = ip.nameCandidates('写真 2024.jpg');
+    ok(c.length === 2 && c[0] === '写真 2024.jpg' && c[1] === '写真 2024',
+      'candidates: full name, then without extension');
+    ok(ip.nameCandidates('フォルダ').length === 1, 'candidates: no extension -> one');
+    const td = ip.nameCandidates('a.');
+    ok(td.length === 2 && td[1] === 'a', 'candidates: trailing dot strips to stem');
+  }
+
+  // ---------- layout: single icon centres on the drop point ----------
+  {
+    const pos = ip.layoutIconPositions({
+      anchor: { x: 200, y: 150 }, spacingX: 100, spacingY: 100,
+      clientWidth: 1920, clientHeight: 1080, count: 1,
+    });
+    ok(pos.length === 1 && pos[0].x === 150 && pos[0].y === 100,
+      'layout: drop point minus half spacing');
+  }
+
+  // ---------- layout: clamped into the client area ----------
+  {
+    const pos = ip.layoutIconPositions({
+      anchor: { x: 10, y: 10 }, spacingX: 100, spacingY: 100,
+      clientWidth: 1920, clientHeight: 1080, count: 1,
+    });
+    ok(pos[0].x === 0 && pos[0].y === 0, 'layout: top-left corner clamps to 0,0');
+    const pos2 = ip.layoutIconPositions({
+      anchor: { x: 5000, y: 5000 }, spacingX: 100, spacingY: 100,
+      clientWidth: 800, clientHeight: 600, count: 1,
+    });
+    ok(pos2[0].x === 700 && pos2[0].y === 500,
+      'layout: bottom-right clamps to client minus spacing');
+  }
+
+  // ---------- layout: multi-item vertical columns, desktop style ----------
+  {
+    // clientHeight 340, anchor y 150 -> first row at y=100, so only
+    // rows y=100,200 fit before wrapping ((340-100)/100 = 2 rows).
+    const pos = ip.layoutIconPositions({
+      anchor: { x: 200, y: 150 }, spacingX: 100, spacingY: 100,
+      clientWidth: 1920, clientHeight: 340, count: 5,
+    });
+    const want = [[150, 100], [150, 200], [250, 100], [250, 200], [350, 100]];
+    ok(pos.length === 5 && pos.every((p, i) => p.x === want[i][0] && p.y === want[i][1]),
+      'layout: fills a column, wraps to the next');
+  }
+
+  // ---------- position output parsing ----------
+  {
+    const o1 = ip.parsePositionOutput('{"status":"ok","positioned":2}');
+    ok(o1.status === 'ok' && o1.positioned === 2, 'parsePos: ok with count');
+    const o2 = ip.parsePositionOutput('noise\n{"status":"autoarrange","positioned":0}');
+    ok(o2.status === 'autoarrange', 'parsePos: autoarrange (last line)');
+    ok(ip.parsePositionOutput('').status === 'failed', 'parsePos: empty -> failed');
+    ok(ip.parsePositionOutput('junk').status === 'failed', 'parsePos: garbage -> failed');
+    ok(ip.parsePositionOutput('{"status":"weird"}').status === 'failed',
+      'parsePos: unknown status -> failed');
+  }
+
+  // ---------- positioner creation: injection + env stub ----------
+  {
+    const custom = async () => ({ status: 'partial', positioned: 1 });
+    ok(ip.createPositioner({ position: custom }) === custom,
+      'positioner: injected function passes through');
+    const stub = ip.testPositionerFromEnv({ OKIBA_TEST_POSITIONER: 'stub' });
+    ok(typeof stub === 'function', 'positioner: env stub exists when requested');
+    ok(ip.testPositionerFromEnv({}) === null, 'positioner: no stub without the env flag');
+    return stub(10, 20, ['a.txt', 'b.txt']).then((r) => {
+      ok(r.status === 'ok' && r.positioned === 2, 'positioner: stub reports positioned count');
+    });
+  }
+}
+
 (async () => {
   try {
     main();
     await dropmoveMain();
+    await iconposMain();
     console.log('\nselftest: ' + passed + ' checks passed');
   } catch (e) {
     console.error(e.message || e);
