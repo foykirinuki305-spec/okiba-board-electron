@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld('okiba', {
   dropFiles: (boardName, paths) => ipcRenderer.invoke('drop-files', boardName, paths),
 
   startDrag: (fullPath) => ipcRenderer.send('ondragstart', fullPath),
+  // test hook: read back the main process's startDrag invocation log
+  dragLog: () => ipcRenderer.invoke('test-draglog'),
 
   onFsChanged: (cb) => ipcRenderer.on('fs-changed', cb),
 });

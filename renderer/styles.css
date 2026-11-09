@@ -174,11 +174,12 @@ body {
 .item.selected { background: var(--accent-soft); box-shadow: inset 0 0 0 1.5px var(--sel), 0 0 18px var(--accent-soft); }
 .item.dragging { z-index: 60; transform: scale(1.06); background: rgba(255, 255, 255, .08); box-shadow: 0 16px 34px var(--shadow), 0 0 22px var(--accent-soft); transition: none; }
 .item .thumb {
+  position: relative;
   display: flex; align-items: center; justify-content: center;
   border-radius: 12px; overflow: hidden; flex: none;
   box-shadow: 0 5px 14px var(--shadow);
 }
-.item .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.item .thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
 .item .name {
   margin-top: 6px; width: 100%; text-align: center; line-height: 1.3;
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;

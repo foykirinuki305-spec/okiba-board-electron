@@ -333,17 +333,22 @@ function renderBoard() {
     thumb.style.width = m.thumb + 'px';
     thumb.style.height = m.thumb + 'px';
     if ((kind === 'image' || kind === 'video') && fullPath) {
-      const img = document.createElement('img');
-      img.alt = '';
-      thumb.appendChild(img);
+      const showImg = (url) => {
+        const t = thumb.querySelector('.tile');
+        if (t) t.remove();
+        const img = document.createElement('img');
+        img.alt = '';
+        img.src = url;
+        thumb.appendChild(img);
+      };
       const had = thumbCache.get(fullPath);
-      if (had) img.src = had;
+      if (had) showImg(had);
       else {
         // show a tile until the thumbnail arrives
         thumb.appendChild(tileFor(kind));
         api.thumb(fullPath).then((url) => {
           thumbCache.set(fullPath, url);
-          if (url && img.isConnected) { img.src = url; const t = thumb.querySelector('.tile'); if (t) t.remove(); }
+          if (url && thumb.isConnected) showImg(url);
         }).catch(() => {});
       }
     } else {
@@ -444,8 +449,10 @@ function itemPointer(e, el, key, fullPath) {
       Math.max(0, Math.round((el.offsetTop - ORIGIN) / m.cellH)),
     ];
     moveKeyTo(key, cellTarget);
-    renderBoard();
+    // persist FIRST: renderBoard() rebuilds cells from boardData,
+    // so saving after rendering would write back the old position.
     persistBoard();
+    renderBoard();
   };
   const cleanup = () => {
     el.removeEventListener('pointermove', onMove);

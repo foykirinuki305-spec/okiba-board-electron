@@ -16,9 +16,16 @@ jobs:
 
       - name: Install dependencies
         run: npm install
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
 
       - name: Headless self-test (pure fs logic)
         run: node tools/selftest.js
+
+      - name: GUI end-to-end test (Playwright Electron, real UI operations)
+        run: node tests/gui.e2e.js
+        env:
+          OKIBA_SHOTS: ${{ github.workspace }}\screenshots
 
       - name: Build portable exe
         run: npx electron-builder --win portable
@@ -45,3 +52,11 @@ jobs:
         with:
           name: OkibaBoard-exe
           path: dist/*.exe
+
+      - name: Upload GUI screenshots (design check)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-screenshots
+          path: screenshots/*.png
+          if-no-files-found: ignore

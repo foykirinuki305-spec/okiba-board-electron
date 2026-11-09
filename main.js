@@ -279,11 +279,24 @@ function registerIpc() {
   // renderer's dragstart handler via preload IPC.
   const DRAG_ICON = nativeImage.createFromDataURL(
     'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAmElEQVR4nO3QMREAIBDAsDeDDwTiGWRkoEP2Xmftc382OkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAO0BzG0B0vTUaKYAAAAASUVORK5CYII=');
+  // Every startDrag invocation is recorded so the GUI test-suite can
+  // verify the drag-out IPC path (renderer -> preload -> this handler)
+  // even though a real OS drag gesture cannot be automated.
+  const dragLog = [];
   ipcMain.on('ondragstart', (event, fullPath) => {
     // startDrag must be called synchronously inside this handler,
     // so the icon is a pre-built generic image (not an async thumb).
-    event.sender.startDrag({ file: fullPath, icon: DRAG_ICON });
+    let okFlag = true;
+    let errMsg = null;
+    try {
+      event.sender.startDrag({ file: fullPath, icon: DRAG_ICON });
+    } catch (e) {
+      okFlag = false;
+      errMsg = String((e && e.message) || e);
+    }
+    dragLog.push({ path: fullPath, ok: okFlag, err: errMsg });
   });
+  ipcMain.handle('test-draglog', () => dragLog);
 }
 
 app.whenReady().then(async () => {
