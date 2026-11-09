@@ -55,12 +55,18 @@ async function waitFor(fn, label, timeout = 12000) {
   }
 }
 function readJson(p) { return JSON.parse(fs.readFileSync(p, 'utf8')); }
+// boundingBox() can return null if a poll re-render lands exactly
+// during the call; retry briefly instead of flaking the whole run.
+async function boxOf(locator, label) {
+  let box = null;
+  await waitFor(async () => !!(box = await locator.boundingBox()), label || 'bounding box');
+  return box;
+}
 async function selectedNames(page) {
   return page.locator('.item.selected .name').allTextContents();
 }
 async function dragCenterTo(page, locator, dx, dy) {
-  const box = await locator.boundingBox();
-  if (!box) throw new Error('no bounding box for drag source');
+  const box = await boxOf(locator, 'drag source box');
   const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
   await page.mouse.move(cx, cy);
   await page.mouse.down();
@@ -202,13 +208,13 @@ async function main() {
   assert(true, 'item moved to cell (1,0) and position persisted');
 
   step('percent dropdown changes size and persists');
-  const thumbBefore = await page.locator('.item .thumb').first().boundingBox();
+  const thumbBefore = await boxOf(page.locator('.item .thumb').first(), 'thumb box before');
   await page.selectOption('#percentSel', '60');
   await waitFor(() => {
     const data = readJson(path.join(boardDir, '.okiba-board.json'));
     return data.size_percent === 60;
   }, 'size_percent=60 saved');
-  const thumbAfter = await page.locator('.item .thumb').first().boundingBox();
+  const thumbAfter = await boxOf(page.locator('.item .thumb').first(), 'thumb box after');
   assert(thumbAfter.width < thumbBefore.width, 'icons got smaller at 60%');
   // 60% grid metrics: cellW = round(164*.6) = 98, cellH = round(158*.6) = 95
   const CELL_W = 98, CELL_H = 95;
@@ -241,7 +247,7 @@ async function main() {
   assert(true, 'rename modal closed without changes');
 
   step('rubber-band (NO modifier) selects the enclosed items');
-  const areaBox = await page.locator('#boardArea').boundingBox();
+  const areaBox = await boxOf(page.locator('#boardArea'), 'board area box');
   // At 60%: A(2,0) spans area-x 212..310, B(2,1) 111.. in y.
   // Band (215,5)-(300,230) clips A and B only.
   await page.mouse.move(areaBox.x + 215, areaBox.y + 5);
@@ -281,7 +287,7 @@ async function main() {
 
   step('Ctrl+click toggles selection (auxiliary method)');
   const memo = page.locator('.item', { hasText: 'メモ帳' }).first();
-  const memoBox = await memo.boundingBox();
+  const memoBox = await boxOf(memo, 'memo item box');
   await page.keyboard.down('Control');
   await page.mouse.click(memoBox.x + memoBox.width / 2, memoBox.y + memoBox.height / 2);
   await page.keyboard.up('Control');
@@ -300,7 +306,7 @@ async function main() {
   await page.mouse.click(areaBox.x + 500, areaBox.y + 420);
   await waitFor(async () => (await selectedNames(page)).length === 0, 'selection cleared');
   const moveItem = page.locator('.item', { hasText: '移動テスト' }).first();
-  const mvBox = await moveItem.boundingBox();
+  const mvBox = await boxOf(moveItem, 'move item box');
   await page.mouse.move(mvBox.x + mvBox.width / 2, mvBox.y + mvBox.height / 2);
   await page.mouse.down();
   await page.mouse.move(mvBox.x + mvBox.width / 2 + 30, mvBox.y + mvBox.height / 2, { steps: 5 });
