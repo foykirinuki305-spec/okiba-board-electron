@@ -22,16 +22,23 @@
 #   {"status":"ok","x":<n>,"y":<n>,"sx":<n>,"sy":<n>,"count":<n>}
 #   or {"status":"no-listview"|"no-item","count":<n>}
 #
-# v1.3.1 notes — why positioning silently never worked in v1.3.0:
-# GetItemText staged its LVITEM with the item index at byte offset 8
-# and a zero at offset 12. Those are the iSubItem and state fields;
-# iItem lives at offset 4 (and was left 0), iSubItem at offset 8.
-# So the text request effectively asked for subitem <index> of the
-# item (or item 0's subitem), which only ever yields a real label
-# for index 0 — name matching failed on any normal desktop and the
-# caller treated the resulting "notfound" as silent. The offsets
-# below are the correct LVITEMW (x64) ones. On top of that, this
-# version enumerates ALL candidate desktop listviews and uses the
+# v1.3.1 notes — why positioning never worked in v1.3.0 (TWO bugs,
+# either one sufficient):
+# 1. THE STYLE GATE: the auto-arrange check tested style bit
+#    0x1000, but LVS_AUTOARRANGE is 0x0100 — 0x1000 is
+#    LVS_OWNERDATA, which is SET in the stock desktop listview
+#    style (0x56003A40, observed on a real Explorer desktop).
+#    So the script reported "autoarrange" on machines where
+#    auto-arrange was OFF, and bailed before doing anything.
+# 2. THE TEXT READ: GetItemText staged its LVITEM with the item
+#    index at byte offset 8 and a zero at offset 12. Those are the
+#    iSubItem and state fields; iItem lives at offset 4 (and was
+#    left 0), iSubItem at offset 8. The text request therefore
+#    only ever yields a real label for index 0 — name matching
+#    would have failed on any normal desktop even past the gate,
+#    and the caller treated the resulting "notfound" as silent.
+# This version fixes both (correct bit, correct LVITEMW offsets),
+# enumerates ALL candidate desktop listviews and uses the
 # populated one, polls up to ~8s for the icons to appear, tries
 # several name-match strategies, and VERIFIES each placement by
 # reading the position back (retrying up to 3 times), because
@@ -325,7 +332,7 @@ public static class OkibaDesk {
   # ================= position mode =================
   # ---- auto-arrange? positions will not stick; say so and stop ----
   $GWL_STYLE = -16
-  $LVS_AUTOARRANGE = 0x1000
+  $LVS_AUTOARRANGE = 0x0100 # commctrl.h — NOT 0x1000 (that is LVS_OWNERDATA)
   $style = [OkibaDesk]::GetWindowLong($lv, $GWL_STYLE)
   if (($style -band $LVS_AUTOARRANGE) -ne 0) { Out-Result 'autoarrange' 0 ''; exit 0 }
 

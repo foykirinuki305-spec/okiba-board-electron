@@ -309,12 +309,22 @@ const ip = require('../lib/iconpos');
 function iconposMain() {
   // ---------- auto-arrange decision from a style value ----------
   {
-    ok(ip.LVS_AUTOARRANGE === 0x1000, 'LVS_AUTOARRANGE is 0x1000');
-    ok(ip.isAutoArrange(0x1000) === true, 'auto-arrange: bare bit set');
-    ok(ip.isAutoArrange(0x1000 | 0x0001 | 0x0200) === true,
+    ok(ip.LVS_AUTOARRANGE === 0x0100, 'LVS_AUTOARRANGE is 0x0100 (commctrl.h)');
+    ok(ip.isAutoArrange(0x0100) === true, 'auto-arrange: bare bit set');
+    ok(ip.isAutoArrange(0x0100 | 0x0001 | 0x0200) === true,
       'auto-arrange: bit set among other style bits');
     ok(ip.isAutoArrange(0x0001 | 0x0200) === false, 'auto-arrange: bit clear');
     ok(ip.isAutoArrange(0) === false, 'auto-arrange: zero style');
+    // Regression (the v1.3.0 bug): 0x1000 is LVS_OWNERDATA, and it
+    // is SET in the stock desktop listview style 0x56003A40
+    // (observed on a real Explorer desktop) — that style must NOT
+    // be read as auto-arrange.
+    ok(ip.isAutoArrange(0x1000) === false,
+      'auto-arrange: LVS_OWNERDATA bit alone is not auto-arrange');
+    ok(ip.isAutoArrange(0x56003A40) === false,
+      'auto-arrange: stock desktop style 0x56003A40 is not auto-arrange');
+    ok(ip.isAutoArrange(0x56003A40 | 0x0100) === true,
+      'auto-arrange: stock desktop style + the real bit is auto-arrange');
   }
 
   // ---------- status note: EVERY non-ok status speaks up ----------

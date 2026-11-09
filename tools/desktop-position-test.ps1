@@ -116,13 +116,16 @@ try {
   $placed = Invoke-PosScript @('-ClientCoords', "$targetX", "$targetY", $name)
   if (-not $placed) { Fail 'position invocation produced no result' }
   if ($placed.status -eq 'autoarrange') {
-    # The hosted runner's desktop ships with auto-arrange ON, but
-    # the environment this feature targets (the user's PC) has it
-    # OFF. LVS_AUTOARRANGE is a plain listview style bit — the
-    # control itself does the arranging — so clear it on the
-    # desktop listview for this test session only (restored in the
-    # finally block) and retry. The production script is untouched.
-    Diag 'auto-arrange is ON in this runner session; clearing the LVS_AUTOARRANGE style bit on the desktop listview (test session only) to mirror the target environment and retrying'
+    # Safety net: if a future runner image ships with desktop
+    # auto-arrange ON, mirror the target environment (the user's
+    # PC: auto-arrange OFF) by clearing LVS_AUTOARRANGE (0x0100 —
+    # NOT 0x1000, which is LVS_OWNERDATA and was the v1.3.0 bug)
+    # on the desktop listview for this test session only (restored
+    # in the finally block) and retry. On the current runner image
+    # the stock desktop style 0x56003A40 already has 0x0100 clear,
+    # so this branch is not expected to run. The production script
+    # is untouched either way.
+    Diag 'auto-arrange reported ON in this runner session; clearing the LVS_AUTOARRANGE (0x0100) style bit on the desktop listview (test session only) to mirror the target environment and retrying'
     try {
       Add-Type -TypeDefinition @'
 using System;
@@ -166,8 +169,8 @@ public static class OkibaTestWin {
       $script:lvHwnd = [OkibaTestWin]::FindPopulatedListView()
       if ($script:lvHwnd -ne [IntPtr]::Zero) {
         $script:origStyle = [OkibaTestWin]::GetWindowLong($script:lvHwnd, -16)
-        Diag ("listview style before: 0x{0:X8}" -f $script:origStyle)
-        [void][OkibaTestWin]::SetWindowLong($script:lvHwnd, -16, ($script:origStyle -band (-bnot 0x1000)))
+        Diag ("listview style before: 0x{0:X8} (AUTOARRANGE 0x0100 bit: {1}; OWNERDATA 0x1000 bit: {2})" -f $script:origStyle, (($script:origStyle -band 0x0100) -ne 0), (($script:origStyle -band 0x1000) -ne 0))
+        [void][OkibaTestWin]::SetWindowLong($script:lvHwnd, -16, ($script:origStyle -band (-bnot 0x0100)))
         $script:styleCleared = $true
         Start-Sleep -Milliseconds 600
         $placed = Invoke-PosScript @('-ClientCoords', "$targetX", "$targetY", $name)
