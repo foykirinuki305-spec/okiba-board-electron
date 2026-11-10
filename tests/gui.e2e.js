@@ -1050,6 +1050,12 @@ async function main() {
   await waitFor(() => fs.existsSync(path.join(landing, '履歴リンク.txt')),
     'history: linked file moved out to the landing folder');
   const groupsAfterOut = await histGroupsFor(page);
+  if (groupsAfterOut.length !== 2) {
+    const allGroups = await page.evaluate(() => window.okiba.getMoveHistory());
+    console.log('  [diag] ALL history groups:', JSON.stringify(allGroups, null, 1));
+    const dl = await page.evaluate(() => window.okiba.dropLog());
+    console.log('  [diag] dropLog:', JSON.stringify(dl));
+  }
   assert(groupsAfterOut.length === 2,
     `history: two drag-outs recorded as two groups (got ${groupsAfterOut.length})`);
   assert(groupsAfterOut.some((g) => g.items[0].kind === 'resident') &&
