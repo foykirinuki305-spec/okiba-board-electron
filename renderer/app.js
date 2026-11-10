@@ -232,6 +232,10 @@ function renderHome() {
       showMenu(e.clientX, e.clientY, [
         { label: '名前を変更', action: () => renameBoardFlow(b.name) },
         { label: '場所を開く', action: () => api.openBoardFolder(b.name) },
+        { label: 'デスクトップにショートカットを作る', action: async () => {
+            await api.createBoardShortcut(b.name);
+            toast(`『${b.name}』のショートカットをデスクトップに作りました`);
+          } },
         { label: 'ゴミ箱へ削除', danger: true, action: async () => {
             await api.trashBoard(b.name); await refreshHome();
           } },
@@ -442,9 +446,10 @@ function renderBoard() {
       renderBoardSelection();
       if (selection.size > 1) {
         // ---- multi-selection menu: one combined "take out" action
-        // that applies each item's own semantics (linked: unlink —
-        // the file stays put and becomes visible again; resident:
-        // move to Desktop). Delete is the explicit real-file kind.
+        // — since v2.1 both kinds move to the Desktop for real
+        // (linked originals too, with their links detached). Plain
+        // removal without moving is the single-item ボードから外す.
+        // Delete is the explicit real-file kind.
         const hasOut = [...selection].some((k) =>
           k.startsWith('file:') || k.startsWith('link:'));
         const items = [{ label: `${selection.size}件を選択中`, action: () => {} }];
@@ -478,6 +483,7 @@ function renderBoard() {
             { label: '開く', action: () => api.openItem(fullPath) },
             { label: '名前を変更', action: () => renameLinkedFlow(key, link) },
             { label: '場所を開く', action: () => api.showItem(fullPath) },
+            { label: 'デスクトップへ移動', action: () => moveLinkedToDesktopFlow([fullPath]) },
             { label: 'ボードから外す', action: () => unlinkFlow([fullPath]) },
             { label: 'ファイルをゴミ箱へ削除', danger: true, action: async () => {
                 await api.trashLinked(boardData.name, fullPath); refreshBoard();
@@ -549,9 +555,10 @@ function planGroupMove(keys, dCol, dRow, rows) {
   return plan;
 }
 
-// Unregister linked items (shared by the menu action and drag-out).
-// Main removes the references and restores visibility; the renderer
-// then just reloads board state — the originals never moved.
+// Unregister linked items （ボードから外す menu action). Main
+// removes the references and restores visibility; the renderer then
+// just reloads board state — the originals never moved. (Drag-out
+// is a different gesture since v2.1: a real move, see onUp.)
 async function unlinkFlow(paths) {
   if (!paths.length) return;
   try { await api.unlinkItems(boardData.name, paths); }
@@ -559,10 +566,26 @@ async function unlinkFlow(paths) {
   refreshBoard();
 }
 
-// Combined "take the selection out of this board" — each item keeps
-// its own semantics: linked -> unlink (file stays at its original
-// path and becomes visible again); resident -> move to Desktop
-// (its previous "out" behaviour). Notes stay (a note has no file to
+// Move LINKED items' real files to the Desktop (menu version of
+// the v2.1 drag-out): the original leaves its home path for the
+// Desktop, the link is detached, and the file lands visible. This
+// is deliberately different from ボードから外す above, which only
+// unregisters and un-hides — the file stays where it always was.
+async function moveLinkedToDesktopFlow(paths) {
+  if (!paths.length) return;
+  try {
+    const r = await api.moveLinkedToDesktop(boardData.name, paths);
+    if (r && r.moved && r.moved.length) toast('デスクトップへ移動しました');
+    else toast('移動できませんでした');
+  } catch (e) { toast(String(e.message || e)); }
+  refreshBoard();
+}
+
+// Combined "take the selection out of this board": since v2.1 both
+// kinds land on the Desktop for real — resident files move there
+// (their long-standing "out"), and linked originals move there too
+// (with their links detached). Plain removal without moving is the
+// single-item ボードから外す. Notes stay (a note has no file to
 // take out; deleting notes is the trash action below).
 async function takeOutSelection() {
   const keys = [...selection];
@@ -570,7 +593,7 @@ async function takeOutSelection() {
   const residentPaths = keys.filter((k) => k.startsWith('file:'))
     .map(pathOfKey).filter(Boolean);
   if (linkedPaths.length) {
-    try { await api.unlinkItems(boardData.name, linkedPaths); }
+    try { await api.moveLinkedToDesktop(boardData.name, linkedPaths); }
     catch (e) { toast(String(e.message || e)); }
   }
   for (const p of residentPaths) {
@@ -633,7 +656,9 @@ function itemPointer(e, el, key, fullPath) {
     return {
       key: k, el: gel, cell: [cell[0], cell[1]],
       left: gel.offsetLeft, top: gel.offsetTop,
-      path: k.startsWith('file:') ? pathOfKey(k) : null,
+      // pathOfKey resolves BOTH resident ("file:") and linked
+      // ("link:") keys to their real file path; notes get null.
+      path: pathOfKey(k),
     };
   }).filter(Boolean);
   const anchor = group.find((g) => g.key === key) || group[0];
@@ -704,9 +729,13 @@ function itemPointer(e, el, key, fullPath) {
       }
     }
     // Partition the dragged group by item kind. Notes have no file
-    // at all; LINKED items must never be file-moved (their whole
-    // point is that the original path does not change); RESIDENT
-    // items keep the v1.2 self-implemented MOVE.
+    // at all. Since v2.1 BOTH file kinds perform the same real
+    // move on an outside release: resident files move out of the
+    // board folder, and LINKED originals move out of their home
+    // path (their link is detached, and they land visible). What
+    // changed vs v2.0: a linked drag-out is no longer "unlink
+    // wherever you drop it" — if the drop point does not resolve
+    // to a folder, the whole gesture cancels and nothing changes.
     const linkedPaths = group.filter((g) => g.key.startsWith('link:'))
       .map((g) => g.path).filter(Boolean);
     const residentPaths = group.filter((g) => g.key.startsWith('file:'))
@@ -715,41 +744,30 @@ function itemPointer(e, el, key, fullPath) {
       finishInternal();
       return;
     }
-    // ---- outside release ----
+    // ---- outside release: self-implemented MOVE (no startDrag) --
     renderBoard(); // items snap back while main works
-    let unlinked = false;
-    if (linkedPaths.length) {
-      // Drag-out of a linked item = take it off the board. The file
-      // itself does not move ANYWHERE, whatever the drop target was;
-      // it just becomes visible again at its original location.
-      try { await api.unlinkItems(boardData.name, linkedPaths); } catch (err) {}
-      for (const g of group) {
-        if (g.key.startsWith('link:')) {
-          cells.delete(g.key);
-          selection.delete(g.key);
-        }
-      }
-      boardData.links = boardData.links.filter((l) => !linkedPaths.includes(l.path));
-      unlinked = true;
-    }
-    if (!residentPaths.length) {
-      await persistBoard();
-      toast('ボードから外しました（ファイルは元の場所のままです）');
-      refreshBoard();
-      return;
-    }
-    // ---- resident items: self-implemented MOVE (no startDrag) ----
     toast('移動先を判定しています…', 15000);
     let res = null;
-    try { res = await api.resolveDropMove(residentPaths, screenPt.x, screenPt.y); }
-    catch (err) { res = null; }
+    try {
+      res = await api.resolveDropMove({
+        boardName: boardData.name,
+        paths: residentPaths,
+        linkedPaths,
+        screenX: screenPt.x,
+        screenY: screenPt.y,
+      });
+    } catch (err) { res = null; }
     if (res && res.moved && res.moved.length) {
       const movedSet = new Set(res.moved);
+      const movedLinked = new Set(linkedPaths.filter((p) => movedSet.has(p)));
       for (const g of group) {
         if (g.path && movedSet.has(g.path)) {
           cells.delete(g.key);
           selection.delete(g.key);
         }
+      }
+      if (movedLinked.size) {
+        boardData.links = boardData.links.filter((l) => !movedLinked.has(l.path));
       }
       await persistBoard();
       const isDesktop = res.resolved && res.resolved.type === 'desktop';
@@ -757,17 +775,11 @@ function itemPointer(e, el, key, fullPath) {
       // Positioning is best-effort; only the auto-arrange case adds
       // a note (the move itself still succeeded).
       if (isDesktop && res.positionNote) msg += '。' + res.positionNote;
-      if (unlinked) msg += '／リンクはボードから外しました';
       toast(msg);
       refreshBoard();
-    } else if (unlinked) {
-      // Residents stayed (unknown target), but the linked ones did
-      // leave the board — say exactly that.
-      await persistBoard();
-      toast('リンクはボードから外しました');
-      refreshBoard();
     } else {
-      // unknown target / failure: NOTHING was moved, items stay put.
+      // unknown target / failure: NOTHING was moved or unlinked.
+      // Plain removal without moving is the ボードから外す menu.
       toast('落とした場所が判定できませんでした');
       renderBoard();
     }
@@ -978,7 +990,25 @@ api.onFsChanged(() => { if (!busy && !dragging) (view === 'board' ? refreshBoard
 setInterval(() => { if (!busy && !dragging) (view === 'board' ? refreshBoard() : refreshHome()); }, 2000);
 window.addEventListener('focus', () => { if (!busy && !dragging) (view === 'board' ? refreshBoard() : refreshHome()); });
 
+// ------------------------------------------- board-shortcut routing
+// Launched from a board shortcut (--board-path), the app opens
+// directly into that board instead of the home screen; when the
+// board is gone, a one-line note explains it. The same route arrives
+// live whenever a shortcut is double-clicked while the app is
+// already running (main's second-instance handler forwards it).
+async function applyRoute(route) {
+  if (!route) return;
+  if (route.boardName) {
+    if (view === 'board' && boardData && boardData.name === route.boardName) return;
+    try { await openBoard(route.boardName); } catch (e) { /* stay home */ }
+  } else if (route.invalidBoard) {
+    toast('ショートカット先のボードが見つかりませんでした');
+  }
+}
+api.onOpenBoardRequest((route) => { applyRoute(route); });
+
 // ---------------------------------------------------------------- init
 (async () => {
   await refreshHome();
+  try { await applyRoute(await api.getStartupRoute()); } catch (e) {}
 })();

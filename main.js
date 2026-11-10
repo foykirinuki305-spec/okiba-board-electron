@@ -6,6 +6,7 @@ const bf = require('./lib/boardfs');
 const dm = require('./lib/dropmove');
 const ip = require('./lib/iconpos');
 const ln = require('./lib/links');
+const sc = require('./lib/shortcut');
 
 // Hidden-attribute runner for linked items (v2.0). Real attrib.exe
 // in production; OKIBA_TEST_ATTRIB=stub swaps in the counting stub.
@@ -239,6 +240,51 @@ function createWindow() {
   win.on('closed', () => { win = null; closeWatchers(); });
 }
 
+// ------------------------------------------- per-board shortcuts
+// Startup route from --board-path (lib/shortcut.js). Computed once
+// BASE is known; consumed by the renderer on load via
+// 'get-startup-route' and re-sent on every second-instance launch.
+let startupRoute = { boardName: null, invalidBoard: false };
+
+function shortcutDesktopDir() {
+  // OKIBA_SHORTCUT_DESKTOP redirects the shortcut target folder for
+  // tests, so the E2E can assert the .lnk without touching a real
+  // user's Desktop.
+  return process.env.OKIBA_SHORTCUT_DESKTOP || bf.desktopDir();
+}
+
+function focusMainWindow() {
+  if (!win || win.isDestroyed()) return false;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+  return true;
+}
+
+// Single instance: board shortcuts are meant to be double-clicked
+// while the app is already running, so a second launch must route
+// INTO the running window (focus + switch board) instead of opening
+// a duplicate app. The in-app self-test skips the lock: CI runs it
+// unattended and it must never be blocked by a stray instance.
+const SELFTEST_MODE = process.env.OKIBA_SELFTEST === '1';
+const gotSingleInstanceLock = SELFTEST_MODE ? true : app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else if (!SELFTEST_MODE) {
+  app.on('second-instance', (_e, argv) => {
+    if (!BASE) return;
+    const route = sc.routeFromArgv(argv, BASE);
+    if (focusMainWindow()) {
+      win.webContents.send('open-board-request', route);
+    } else {
+      // No window right now (e.g. macOS-style keep-alive): remember
+      // the route — a fresh window's renderer picks it up on load.
+      startupRoute = route;
+      if (app.isReady()) createWindow();
+    }
+  });
+}
+
 // ------------------------------------------------------------------- IPC
 function guardBoard(name) {
   if (!name || name.includes('/') || name.includes('\\') || name === '.' || name === '..') {
@@ -290,6 +336,50 @@ function registerIpc() {
     return true;
   });
 
+  // --------------------- per-board desktop shortcuts (v2.1)
+  // A board shortcut is a real Windows .lnk on the Desktop whose
+  // target is this exe with --board-path "<board folder>"; launching
+  // it routes straight into that board (see the startup/second-
+  // instance routing below). shell.writeShortcutLink writes it
+  // directly — no PowerShell involved.
+  ipcMain.handle('get-startup-route', () => startupRoute);
+  ipcMain.handle('create-board-shortcut', (_e, name) => {
+    const folder = guardBoard(name);
+    if (!fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) {
+      throw new Error('ボードが見つかりません');
+    }
+    const desk = shortcutDesktopDir();
+    try { fs.mkdirSync(desk, { recursive: true }); } catch (e) {}
+    const probe = (rel) => {
+      try {
+        const st = fs.statSync(path.join(desk, rel));
+        return st.isDirectory() ? 'dir' : 'file';
+      } catch (e) { return null; }
+    };
+    const fileName = sc.planShortcutFileName(name, probe);
+    const lnkPath = path.join(desk, fileName);
+    const written = shell.writeShortcutLink(lnkPath, 'create', {
+      target: process.execPath,
+      // "=" form on purpose: Chromium's command-line model detaches
+      // a two-token "--flag value" pair when it forwards a second
+      // instance's argv to the running app (the value comes back as
+      // a stray trailing argument and the flag reads as valueless).
+      // An attached value survives that round trip intact.
+      args: '--board-path="' + folder + '"',
+      cwd: folder,
+      description: name,
+      icon: process.execPath,
+      iconIndex: 0,
+    });
+    if (!written) throw new Error('ショートカットを作成できませんでした');
+    return { lnkPath, fileName };
+  });
+  // Read-back helper (used by the GUI tests to verify a written
+  // .lnk really points at this exe with the board's --board-path).
+  ipcMain.handle('read-shortcut', (_e, lnkPath) => {
+    try { return shell.readShortcutLink(lnkPath); } catch (e) { return null; }
+  });
+
   ipcMain.handle('save-home-positions', (_e, positions) => {
     bf.saveHome(BASE, positions);
     return true;
@@ -304,6 +394,18 @@ function registerIpc() {
     bf.saveBoard(guardBoard(name), positions, notes, sizePercent, links || []);
     return true;
   });
+
+  // moveFile adapter for ln.moveLinkedOut: a single-item move
+  // through the same engine resident items use (never overwrite).
+  // "Skipped" there means the file already lives directly inside
+  // the target folder (e.g. a Desktop file dropped onto the
+  // Desktop) — that folder IS its destination.
+  const moveFileViaDropmove = (src, dir) => {
+    const r = dm.moveItemsOut([src], dir);
+    if (r.destinations && r.destinations.length) return r.destinations[0];
+    if (r.skipped && r.skipped.includes(src)) return src;
+    return null;
+  };
 
   // ------------------------- linked items (v2.0 "link + hide")
   // Intake NO LONGER moves files into the board folder. The file
@@ -352,6 +454,28 @@ function registerIpc() {
     link.path = dest;
     bf.saveBoard(folder, data.positions, data.notes, data.sizePercent, data.links);
     return dest;
+  });
+  // Menu counterpart of the linked drag-out (v2.1): move the real
+  // file to the Desktop and detach the link. No drop point exists
+  // here, so the icon takes the Desktop's default placement.
+  ipcMain.handle('move-linked-to-desktop', async (_e, boardName, paths) => {
+    const folder = guardBoard(boardName);
+    const moved = [];
+    const destinations = [];
+    for (const lp of paths || []) {
+      const one = await ln.moveLinkedOut({
+        base: BASE, boardFolder: folder, targetPath: lp,
+        destDir: bf.desktopDir(), attrib, moveFile: moveFileViaDropmove,
+      });
+      if (one.moved) {
+        moved.push(lp);
+        if (one.dest) destinations.push(one.dest);
+      }
+    }
+    if (moved.length && win && !win.isDestroyed()) {
+      win.webContents.send('fs-changed');
+    }
+    return { moved, destinations };
   });
   ipcMain.handle('trash-linked', async (_e, boardName, targetPath) => {
     const folder = guardBoard(boardName);
@@ -469,16 +593,48 @@ function registerIpc() {
           result.moved = r.moved;
           result.skipped = r.skipped;
           result.failed = r.failed;
-          dropLog.push({ kind: 'move', target: target.path, moved: r.moved.length });
-          if (r.moved.length && win && !win.isDestroyed()) {
+          const allDestinations = [...r.destinations];
+          // LINKED items dragged out are a REAL move too (v2.1 —
+          // the user: 「ボードから外すをしなくても、ドラッグで
+          // デスクトップとかに移動できるように」). Each one goes
+          // through ln.moveLinkedOut: real move -> detach this
+          // board's link -> -H at the destination so it lands
+          // visible. An UNRESOLVED target never reaches this block,
+          // so a cancelled drop changes nothing for linked items
+          // either (plain removal stays the ボードから外す menu's
+          // job). Other boards linking the old path keep their
+          // record and will show it missing — intended.
+          const linkedPaths = (payload && Array.isArray(payload.linkedPaths))
+            ? payload.linkedPaths : [];
+          if (linkedPaths.length && payload.boardName) {
+            let folder = null;
+            try { folder = guardBoard(payload.boardName); } catch (e) { folder = null; }
+            if (folder) {
+              for (const lp of linkedPaths) {
+                const one = await ln.moveLinkedOut({
+                  base: BASE, boardFolder: folder, targetPath: lp,
+                  destDir: target.path, attrib, moveFile: moveFileViaDropmove,
+                });
+                if (one.moved) {
+                  result.moved.push(lp);
+                  if (one.dest) allDestinations.push(one.dest);
+                  dropLog.push({ kind: 'move-linked', target: target.path, path: lp, dest: one.dest });
+                } else {
+                  result.failed.push(lp);
+                }
+              }
+            }
+          }
+          dropLog.push({ kind: 'move', target: target.path, moved: result.moved.length });
+          if (result.moved.length && win && !win.isDestroyed()) {
             win.webContents.send('fs-changed');
           }
           // Desktop drops only: put the new icon(s) where the user
           // actually dropped them. The move is already done — any
           // positioning failure is reported in the log/result but
           // never changes the move outcome.
-          if (target.type === 'desktop' && r.moved.length && r.destinations.length) {
-            const names = r.destinations.map((d) => path.basename(d));
+          if (target.type === 'desktop' && result.moved.length && allDestinations.length) {
+            const names = allDestinations.map((d) => path.basename(d));
             result.position = { status: 'script-error', positioned: 0, detail: 'not-run' };
             try {
               result.position = await positionDesktopIcons(x, y, names);
@@ -536,6 +692,7 @@ function registerIpc() {
 }
 
 app.whenReady().then(async () => {
+  if (!gotSingleInstanceLock) return; // another instance owns the app
   if (process.env.OKIBA_SELFTEST === '1') {
     const resolved = bf.resolveBase();
     BASE = resolved.base;
@@ -547,6 +704,10 @@ app.whenReady().then(async () => {
   BASE = resolved.base;
   MIGRATED_COUNT = resolved.moved;
   bf.ensureBase(BASE);
+  // --board-path "<board folder>" (from a board shortcut) opens the
+  // app directly into that board; the renderer asks for this route
+  // once its home data has loaded.
+  startupRoute = sc.routeFromArgv(process.argv, BASE);
   registerIpc();
   createWindow();
   setupWatchers(null);

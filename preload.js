@@ -31,6 +31,15 @@ contextBridge.exposeInMainWorld('okiba', {
     ipcRenderer.invoke('trash-linked', boardName, targetPath),
   testAttrib: () => ipcRenderer.invoke('test-attrib'),
 
+  // per-board shortcuts (v2.1): write a Desktop .lnk that relaunches
+  // the app into one board; getStartupRoute/onOpenBoardRequest carry
+  // the --board-path routing at first launch and on second-instance.
+  createBoardShortcut: (name) => ipcRenderer.invoke('create-board-shortcut', name),
+  readShortcut: (lnkPath) => ipcRenderer.invoke('read-shortcut', lnkPath),
+  getStartupRoute: () => ipcRenderer.invoke('get-startup-route'),
+  onOpenBoardRequest: (cb) =>
+    ipcRenderer.on('open-board-request', (_e, route) => cb(route)),
+
   openItem: (p) => ipcRenderer.invoke('open-item', p),
   showItem: (p) => ipcRenderer.invoke('show-item', p),
   trashItem: (p) => ipcRenderer.invoke('trash-item', p),
@@ -41,9 +50,12 @@ contextBridge.exposeInMainWorld('okiba', {
   // drag-out (v1.2): self-implemented move on outside release.
   // resolveDropMove asks main to resolve the folder under the given
   // screen point (Desktop / Explorer window) and move the files
-  // there; cursorPoint is the OS cursor position (backup signal).
-  resolveDropMove: (paths, screenX, screenY) =>
-    ipcRenderer.invoke('resolve-drop-move', { paths, screenX, screenY }),
+  // there — resident files in `paths`, linked originals in
+  // `linkedPaths` (v2.1: a real move + detach for them too).
+  // cursorPoint is the OS cursor position (backup signal).
+  resolveDropMove: (payload) => ipcRenderer.invoke('resolve-drop-move', payload),
+  moveLinkedToDesktop: (boardName, paths) =>
+    ipcRenderer.invoke('move-linked-to-desktop', boardName, paths),
   cursorPoint: () => ipcRenderer.invoke('cursor-point'),
   // test hook: read back main's resolve/move invocation log
   dropLog: () => ipcRenderer.invoke('test-droplog'),

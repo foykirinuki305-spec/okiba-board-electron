@@ -28,6 +28,13 @@
  *   -> context-menu trash uses the real shell.trashItem (Windows)
  *   -> restart restores boards, positions (incl. group), percent,
  *      theme
+ *   -> PER-BOARD SHORTCUTS (v2.1): the home card menu writes a real
+ *      .lnk to a redirected Desktop (read back: target + args carry
+ *      the board path; re-creating refreshes it); a fresh launch
+ *      with --board-path opens that board directly; an invalid path
+ *      falls back to home with a one-line note; a second process
+ *      with --board-path hands over to the RUNNING window, which
+ *      switches boards (single-instance routing)
  *
  * Screenshots of home and board are written to $OKIBA_SHOTS (default
  * ./screenshots). Any failure exits non-zero, failing the CI build.
@@ -493,8 +500,8 @@ async function main() {
   assert(linkMenu.some((t) => t.includes('ボードから外す')), 'linked menu has ボードから外す');
   assert(linkMenu.some((t) => t.includes('ファイルをゴミ箱へ削除')),
     'linked menu has the explicit real-file delete');
-  assert(!linkMenu.some((t) => t.includes('デスクトップへ移動')),
-    'linked menu has NO desktop-move (the file must not move)');
+  assert(linkMenu.some((t) => t.includes('デスクトップへ移動')),
+    'linked menu has デスクトップへ移動 (v2.1: a real move, distinct from 外す)');
   await page.locator('#ctxMenu .ctx-item', { hasText: 'ボードから外す' })
     .dispatchEvent('mousedown');
   await waitFor(async () => {
@@ -540,6 +547,223 @@ async function main() {
     return !ns.some((t) => t.includes('外部素材'));
   }, 'missing card cleaned off the board');
   await app4.close();
+
+  // ------------------------------------------------------------ run 5
+  // v2.1 per-board shortcuts. The Desktop is redirected to a temp
+  // dir (OKIBA_SHORTCUT_DESKTOP) so the test never writes to a real
+  // user's Desktop. .lnk writing/reading is Windows-only shell work:
+  // on other platforms only the menu item is asserted.
+  const fakeDesktop = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-desktop-'));
+  step('board shortcut (v2.1): home menu creates a real .lnk');
+  const app5 = await launch({ OKIBA_SHORTCUT_DESKTOP: fakeDesktop });
+  page = await app5.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.locator(`#boardGrid .board-card[data-name="${boardName}"]`)
+    .click({ button: 'right' });
+  await page.waitForSelector('#ctxMenu:not([hidden]) .ctx-item');
+  const homeMenu = await page.locator('#ctxMenu .ctx-item').allTextContents();
+  assert(homeMenu.some((t) => t.includes('デスクトップにショートカットを作る')),
+    'home card menu has デスクトップにショートカットを作る');
+  if (process.platform === 'win32') {
+    await page.locator('#ctxMenu .ctx-item',
+      { hasText: 'デスクトップにショートカットを作る' }).dispatchEvent('mousedown');
+    const lnkPath = path.join(fakeDesktop, boardName + '.lnk');
+    await waitFor(() => fs.existsSync(lnkPath), '.lnk created on the redirected Desktop');
+    await waitFor(async () => {
+      const t = await page.evaluate(() => document.getElementById('toast').textContent);
+      return t.includes('ショートカットをデスクトップに作りました');
+    }, 'status line confirms the shortcut creation');
+    const info = await page.evaluate((p) => window.okiba.readShortcut(p), lnkPath);
+    assert(!!info && typeof info.target === 'string' && info.target.length > 0,
+      'shortcut target is a real exe path');
+    assert(typeof info.args === 'string' && info.args.includes('--board-path') &&
+           info.args.includes(boardDir),
+      'shortcut args carry --board-path with the board folder');
+    // creating it again refreshes the SAME .lnk (no suffix pile-up)
+    await page.locator(`#boardGrid .board-card[data-name="${boardName}"]`)
+      .click({ button: 'right' });
+    await page.waitForSelector('#ctxMenu:not([hidden]) .ctx-item');
+    await page.locator('#ctxMenu .ctx-item',
+      { hasText: 'デスクトップにショートカットを作る' }).dispatchEvent('mousedown');
+    await new Promise((r) => setTimeout(r, 600));
+    const lnks = fs.readdirSync(fakeDesktop).filter((n) => n.endsWith('.lnk'));
+    assert(lnks.length === 1 && lnks[0] === boardName + '.lnk',
+      're-creating refreshes the same .lnk instead of duplicating');
+  } else {
+    console.log('  skip - .lnk write/read-back runs on the Windows CI runner');
+    await page.evaluate(() => { document.getElementById('ctxMenu').hidden = true; });
+  }
+  await app5.close();
+
+  step('shortcut launch: --board-path opens the board directly');
+  const launchArgs = (extra) => electron.launch({
+    args: [ROOT, '--no-sandbox', ...extra],
+    env, timeout: 60000,
+  });
+  const app6 = await launchArgs(['--board-path', boardDir]);
+  page = await app6.firstWindow();
+  await page.waitForSelector('#boardView:not([hidden])', { timeout: 20000 });
+  const routeTitle = await page.locator('#boardTitle').textContent();
+  assert(routeTitle.includes(boardName), 'board screen for the shortcut board is shown');
+  assert(await page.evaluate(() => document.getElementById('homeView').hidden),
+    'home screen was skipped entirely');
+  await app6.close();
+
+  step('shortcut launch: invalid --board-path falls back to home with a note');
+  const app7 = await launchArgs(['--board-path', path.join(base, '存在しないボード')]);
+  page = await app7.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  assert(await page.evaluate(() => !document.getElementById('homeView').hidden),
+    'home is shown for a missing board');
+  await waitFor(async () => {
+    const t = await page.evaluate(() => document.getElementById('toast').textContent);
+    return t.includes('ショートカット先のボードが見つかりませんでした');
+  }, 'one-line not-found note is shown');
+  await app7.close();
+
+  // ------------------------------------------------------------ run 6
+  // Second-instance routing: with the app already running, a fresh
+  // process launched with --board-path must NOT open a duplicate —
+  // the running window comes to the front and switches boards.
+  step('second instance: shortcut click switches the RUNNING app');
+  const app8 = await launch();
+  page = await app8.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  {
+    const { spawn } = require('child_process');
+    const electronBin = require('electron');
+    const userData = await app8.evaluate(({ app }) => app.getPath('userData'));
+    const second = spawn(electronBin,
+      [ROOT, '--no-sandbox', '--user-data-dir=' + userData, '--board-path', boardDir],
+      { env, stdio: 'ignore' });
+    const exited = await Promise.race([
+      new Promise((r) => second.on('exit', (code) => r(code !== null ? 'exited' : 'signalled'))),
+      new Promise((r) => setTimeout(() => r('timeout'), 30000)),
+    ]);
+    if (exited === 'timeout') { try { second.kill(); } catch (e) {} }
+    assert(exited === 'exited' || exited === 'signalled',
+      'second process handed over to the running instance and exited');
+    await page.waitForSelector('#boardView:not([hidden])', { timeout: 20000 });
+    const switchedTitle = await page.locator('#boardTitle').textContent();
+    assert(switchedTitle.includes(boardName),
+      'running window switched into the shortcut board');
+  }
+  await app8.close();
+
+  // ------------------------------------------------------------ run 7
+  // v2.1 linked drag-out = REAL move. A linked item released outside
+  // over a resolved folder MOVES there for real (origin loses the
+  // file, the link detaches, the landed file is visible). Over an
+  // UNRESOLVED place the gesture cancels completely — no move, no
+  // unlink, still hidden. Plain removal stays the menu's job.
+  const dragOutSynthetic = async (itemLocator) => {
+    const box = await boxOf(itemLocator, 'linked drag-out item box');
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 30, box.y + box.height / 2, { steps: 5 });
+    await itemLocator.evaluate((el) => {
+      el.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true, cancelable: true, pointerId: 1,
+        clientX: -80, clientY: 120, screenX: -40, screenY: 200,
+      }));
+    });
+    await page.mouse.up();
+  };
+  const linkAndWaitCard = async (p, label) => {
+    await page.evaluate(
+      (arg) => window.okiba.linkFiles(arg.board, [arg.p]),
+      { board: boardName, p });
+    await waitFor(async () => {
+      const ns = await page.locator('.item .name').allTextContents();
+      return ns.some((t) => t.includes(label));
+    }, 'linked card appears for ' + label);
+  };
+
+  step('linked drag-out (v2.1): outside release MOVES the real file');
+  const origin7 = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-origin7-'));
+  const dragFile = path.join(origin7, '外部ドラッグ.txt');
+  fs.writeFileSync(dragFile, 'drag me out');
+  const app9 = await launch();
+  page = await app9.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click(`#boardGrid .board-card[data-name="${boardName}"]`);
+  await page.waitForSelector('#boardView:not([hidden]) .item');
+  await linkAndWaitCard(dragFile, '外部ドラッグ');
+  if (process.platform === 'win32') {
+    assert(attribHidden(dragFile) === true, 'origin hidden while linked (real attrib)');
+  }
+  await dragOutSynthetic(page.locator('.item', { hasText: '外部ドラッグ' }).first());
+  await waitFor(() => fs.existsSync(path.join(landing, '外部ドラッグ.txt')),
+    'linked file really landed in the resolved folder');
+  assert(!fs.existsSync(dragFile), 'linked file LEFT its origin (a real move)');
+  if (process.platform === 'win32') {
+    assert(attribHidden(path.join(landing, '外部ドラッグ.txt')) === false,
+      'landed file is VISIBLE (Hidden cleared at the destination)');
+  }
+  await waitFor(async () => {
+    const ns = await page.locator('.item .name').allTextContents();
+    return !ns.some((t) => t.includes('外部ドラッグ'));
+  }, 'card disappeared after the move (link detached)');
+  const jsonAfterDragOut = readJson(path.join(boardDir, '.okiba-board.json'));
+  assert(!(jsonAfterDragOut.links || []).some((l) => l.path === dragFile),
+    'json link removed after drag-out move');
+  await app9.close();
+
+  step('linked desktop drop (v2.1): move + icon positioning invoked');
+  const deskFile = path.join(origin7, '外部デスクトップ.txt');
+  fs.writeFileSync(deskFile, 'to the desktop cell');
+  const app10 = await launch({ OKIBA_TEST_RESOLVER_TYPE: 'desktop' });
+  page = await app10.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click(`#boardGrid .board-card[data-name="${boardName}"]`);
+  await page.waitForSelector('#boardView:not([hidden]) .item');
+  await linkAndWaitCard(deskFile, '外部デスクトップ');
+  await dragOutSynthetic(page.locator('.item', { hasText: '外部デスクトップ' }).first());
+  await waitFor(() => fs.existsSync(path.join(landing, '外部デスクトップ.txt')),
+    'linked desktop drop: file landed in the Desktop target');
+  assert(!fs.existsSync(deskFile), 'linked desktop drop: origin lost the file');
+  await waitFor(async () => {
+    const log = await page.evaluate(() => window.okiba.dropLog());
+    return Array.isArray(log) && log.some((e) => e.kind === 'position' &&
+      Array.isArray(e.names) && e.names.includes('外部デスクトップ.txt'));
+  }, 'dropLog records icon positioning for the ex-linked file');
+  await waitFor(async () => {
+    const log = await page.evaluate(() => window.okiba.dropLog());
+    return log.some((e) => e.kind === 'move-linked');
+  }, 'dropLog records the linked move itself');
+  await app10.close();
+
+  step('linked drag-out over UNKNOWN target: full cancel, nothing changes');
+  const cancelFile = path.join(origin7, '外部キャンセル.txt');
+  fs.writeFileSync(cancelFile, 'stay put');
+  const app11 = await launch({ OKIBA_TEST_RESOLVER_UNKNOWN: '1' });
+  page = await app11.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click(`#boardGrid .board-card[data-name="${boardName}"]`);
+  await page.waitForSelector('#boardView:not([hidden]) .item');
+  await linkAndWaitCard(cancelFile, '外部キャンセル');
+  if (process.platform === 'win32') {
+    assert(attribHidden(cancelFile) === true, 'cancel target: origin hidden while linked');
+  }
+  await dragOutSynthetic(page.locator('.item', { hasText: '外部キャンセル' }).first());
+  await waitFor(async () => {
+    const t = await page.evaluate(() => document.getElementById('toast').textContent);
+    return t.includes('判定できませんでした');
+  }, 'cancel: status line says the drop could not be resolved');
+  await new Promise((r) => setTimeout(r, 800)); // let any wrong move land
+  assert(fs.existsSync(cancelFile), 'cancel: file still at its origin');
+  assert(!fs.existsSync(path.join(landing, '外部キャンセル.txt')),
+    'cancel: nothing arrived in the landing folder');
+  const jsonAfterCancel = readJson(path.join(boardDir, '.okiba-board.json'));
+  assert((jsonAfterCancel.links || []).some((l) => l.path === cancelFile),
+    'cancel: link record intact (no silent unlink)');
+  const cancelNames = await page.locator('.item .name').allTextContents();
+  assert(cancelNames.some((t) => t.includes('外部キャンセル')),
+    'cancel: card still on the board');
+  if (process.platform === 'win32') {
+    assert(attribHidden(cancelFile) === true, 'cancel: origin still hidden afterwards');
+  }
+  await app11.close();
 
   console.log('\nGUI E2E: all steps passed');
 }

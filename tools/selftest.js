@@ -592,6 +592,234 @@ async function linksMain() {
     ok(rel.unhidden === 1 && !stub.isHidden(file) && fs.existsSync(file),
       'board delete: linked original unhidden and untouched');
   }
+
+  // ---------- linked drag-out = REAL move (v2.1 moveLinkedOut) ----
+  {
+    const base = tmp(); const origin = tmp(); const destDir = tmp();
+    const board = path.join(base, 'ボード'); fs.mkdirSync(board);
+    const file = path.join(origin, '素材.mp4');
+    fs.writeFileSync(file, 'data');
+    const stub = ln.createStubAttribRunner();
+    await ln.addLink({ base, boardFolder: board, targetPath: file, attrib: stub });
+    ok(stub.isHidden(file), 'v2.1 move: intake hid the origin');
+    const ops = [];
+    const moveFile = (src, dir) => {
+      ops.push('move:' + src);
+      const dest = path.join(dir, path.basename(src));
+      fs.renameSync(src, dest);
+      return dest;
+    };
+    const tracking = {
+      readHidden: (p) => stub.readHidden(p),
+      setHidden: (p, h) => { ops.push((h ? '+H:' : '-H:') + p); return stub.setHidden(p, h); },
+    };
+    const r = await ln.moveLinkedOut({
+      base, boardFolder: board, targetPath: file, destDir, attrib: tracking, moveFile,
+    });
+    const dest = path.join(destDir, '素材.mp4');
+    ok(r.moved === true && r.dest === dest, 'v2.1 move: reported moved with destination');
+    ok(ops[0] === 'move:' + file, 'v2.1 move: the REAL move happens FIRST');
+    ok(ops.includes('-H:' + dest) && ops.indexOf('-H:' + dest) > 0,
+      'v2.1 move: -H applied to the DESTINATION after the move');
+    ok(fs.existsSync(dest) && !fs.existsSync(file), 'v2.1 move: file really relocated');
+    ok(stub.isHidden(dest) === false, 'v2.1 move: destination is visible');
+    ok(bf.loadBoard(board).links.length === 0, 'v2.1 move: link detached from the board');
+  }
+  {
+    // wasHidden=true (user-hidden before intake): an explicit move
+    // still lands VISIBLE — the -H ignores wasHidden on purpose.
+    const base = tmp(); const origin = tmp(); const destDir = tmp();
+    const board = path.join(base, 'ボード'); fs.mkdirSync(board);
+    const file = path.join(origin, '隠し素材.txt');
+    fs.writeFileSync(file, 'secret');
+    bf.saveBoard(board, {}, [], 100, [{ path: file, col: 0, row: 0, wasHidden: true }]);
+    const stub = ln.createStubAttribRunner({ [file]: true });
+    ok(stub.isHidden(file), 'v2.1 move: origin starts hidden (pre-hidden)');
+    const moveFile = (src, dir) => {
+      const dest = path.join(dir, path.basename(src));
+      fs.renameSync(src, dest);
+      return dest;
+    };
+    const r = await ln.moveLinkedOut({
+      base, boardFolder: board, targetPath: file, destDir, attrib: stub, moveFile,
+    });
+    ok(r.moved === true && stub.isHidden(r.dest) === false,
+      'v2.1 move: wasHidden=true still lands visible (explicit move wins)');
+  }
+  {
+    // Move failure: NOTHING else may change (link intact, still
+    // hidden at the origin, no -H anywhere).
+    const base = tmp(); const origin = tmp(); const destDir = tmp();
+    const board = path.join(base, 'ボード'); fs.mkdirSync(board);
+    const file = path.join(origin, '失敗素材.txt');
+    fs.writeFileSync(file, 'stay');
+    const stub = ln.createStubAttribRunner();
+    await ln.addLink({ base, boardFolder: board, targetPath: file, attrib: stub });
+    const callsBefore = stub.calls.length;
+    const r = await ln.moveLinkedOut({
+      base, boardFolder: board, targetPath: file, destDir,
+      attrib: stub, moveFile: () => null,
+    });
+    ok(r.moved === false && r.reason === 'move-failed', 'v2.1 move: failure reported');
+    ok(bf.loadBoard(board).links.length === 1, 'v2.1 move: failed move keeps the link');
+    ok(fs.existsSync(file) && stub.isHidden(file),
+      'v2.1 move: failed move leaves the origin hidden and in place');
+    ok(stub.calls.slice(callsBefore).every((c) => c.op === 'read' || c.path === file),
+      'v2.1 move: failed move performs no -H on any destination');
+    const notLinked = await ln.moveLinkedOut({
+      base, boardFolder: board, targetPath: path.join(origin, '無い.txt'),
+      destDir, attrib: stub, moveFile: () => { throw new Error('must not be called'); },
+    });
+    ok(notLinked.moved === false && notLinked.reason === 'not-linked',
+      'v2.1 move: unlinked path is a clean no-op');
+  }
+  {
+    // Already inside the target (Desktop file dropped on the
+    // Desktop): moveFile returns the source itself; the item still
+    // detaches and becomes visible at home.
+    const base = tmp(); const home = tmp();
+    const board = path.join(base, 'ボード'); fs.mkdirSync(board);
+    const file = path.join(home, 'デスクトップ素材.txt');
+    fs.writeFileSync(file, 'desk');
+    const stub = ln.createStubAttribRunner();
+    await ln.addLink({ base, boardFolder: board, targetPath: file, attrib: stub });
+    const r = await ln.moveLinkedOut({
+      base, boardFolder: board, targetPath: file, destDir: home,
+      attrib: stub, moveFile: (src) => src,
+    });
+    ok(r.moved === true && r.dest === file && stub.isHidden(file) === false &&
+       bf.loadBoard(board).links.length === 0,
+      'v2.1 move: already-at-target still detaches and lands visible');
+  }
+}
+
+const sc = require('../lib/shortcut');
+
+function shortcutMain() {
+  // ---------- --board-path parsing ----------
+  {
+    const p = sc.parseBoardArg(['exe', '--board-path', 'C:\\OkibaBoards\\動画']);
+    ok(p.boardPath === 'C:\\OkibaBoards\\動画' && !p.malformed,
+      'shortcut: two-token --board-path parsed');
+    const eq = sc.parseBoardArg(['exe', '--board-path=D:\\Boards\\x']);
+    ok(eq.boardPath === 'D:\\Boards\\x' && !eq.malformed,
+      'shortcut: --board-path=<value> parsed');
+    const none = sc.parseBoardArg(['exe', '--no-sandbox']);
+    ok(none.boardPath === null && !none.malformed,
+      'shortcut: no flag -> no board, not malformed');
+    const tail = sc.parseBoardArg(['exe', '--board-path']);
+    ok(tail.boardPath === null && tail.malformed,
+      'shortcut: flag with NO value is malformed');
+    const flagVal = sc.parseBoardArg(['exe', '--board-path', '--other']);
+    ok(flagVal.boardPath === null && flagVal.malformed,
+      'shortcut: flag followed by another flag is malformed');
+    const emptyEq = sc.parseBoardArg(['exe', '--board-path=']);
+    ok(emptyEq.boardPath === null && emptyEq.malformed,
+      'shortcut: empty = value is malformed');
+    const amid = sc.parseBoardArg(['exe', '.', '--user-data-dir=/tmp/x', '--board-path', '/b/ボード', '--x']);
+    ok(amid.boardPath === '/b/ボード', 'shortcut: flag found amid other args');
+  }
+
+  // ---------- board-path validation against a temp base ----------
+  {
+    const base = tmp();
+    const boardDir = path.join(base, '素材ボード');
+    fs.mkdirSync(boardDir, { recursive: true });
+    ok(sc.validateBoardPath(base, boardDir) === '素材ボード',
+      'shortcut: direct child of base is a board (even without json)');
+    fs.writeFileSync(path.join(boardDir, bf.BOARD_FILENAME), '{}');
+    ok(sc.validateBoardPath(base, boardDir) === '素材ボード',
+      'shortcut: child of base WITH json is a board');
+
+    const outside = tmp();
+    const extDir = path.join(outside, '外部ボード');
+    fs.mkdirSync(extDir, { recursive: true });
+    ok(sc.validateBoardPath(base, extDir) === null,
+      'shortcut: plain folder outside base (no json) is NOT a board');
+    fs.writeFileSync(path.join(extDir, bf.BOARD_FILENAME), '{}');
+    ok(sc.validateBoardPath(base, extDir) === '外部ボード',
+      'shortcut: folder with board json is a board even outside base');
+
+    const filePath = path.join(base, 'file.txt');
+    fs.writeFileSync(filePath, 'x');
+    ok(sc.validateBoardPath(base, filePath) === null,
+      'shortcut: a file path is not a board');
+    ok(sc.validateBoardPath(base, path.join(base, '存在しない')) === null,
+      'shortcut: missing folder is not a board');
+    ok(sc.validateBoardPath(base, base) === null,
+      'shortcut: the base itself is not a board');
+    ok(sc.validateBoardPath(base, '') === null && sc.validateBoardPath(base, null) === null,
+      'shortcut: empty/null paths rejected');
+    ok(sc.validateBoardPath(base, boardDir + path.sep) === '素材ボード',
+      'shortcut: trailing separator tolerated');
+  }
+
+  // ---------- routing decisions ----------
+  {
+    const base = tmp();
+    const boardDir = path.join(base, 'ボードA');
+    fs.mkdirSync(boardDir, { recursive: true });
+    const good = sc.routeFromArgv(['exe', '--board-path', boardDir], base);
+    ok(good.boardName === 'ボードA' && !good.invalidBoard,
+      'shortcut: valid path routes into the board');
+    const plain = sc.routeFromArgv(['exe'], base);
+    ok(plain.boardName === null && !plain.invalidBoard,
+      'shortcut: no flag routes home quietly');
+    const gone = sc.routeFromArgv(['exe', '--board-path', path.join(base, '消えた')], base);
+    ok(gone.boardName === null && gone.invalidBoard,
+      'shortcut: deleted board routes home WITH the not-found note');
+    const malformed = sc.routeFromArgv(['exe', '--board-path'], base);
+    ok(malformed.boardName === null && malformed.invalidBoard,
+      'shortcut: malformed flag routes home WITH the not-found note');
+
+    // Chromium detaches a two-token value when forwarding a second
+    // instance's argv (observed live on the real handler): the flag
+    // arrives bare, the value trails as the last positional. The
+    // router must recover the board from the stray token — and must
+    // NOT mistake the app path positional for a board.
+    const appRoot = tmp(); // exists, but is not a board folder
+    const detached = sc.routeFromArgv(
+      ['exe', '--no-sandbox', '--user-data-dir=/tmp/x', '--board-path',
+       '--allow-file-access-from-files', appRoot, boardDir], base);
+    ok(detached.boardName === 'ボードA' && !detached.invalidBoard,
+      'shortcut: detached second-instance argv still routes into the board');
+    const detachedEq = sc.routeFromArgv(
+      ['exe', '--no-sandbox', '--board-path=' + boardDir, appRoot], base);
+    ok(detachedEq.boardName === 'ボードA' && !detachedEq.invalidBoard,
+      'shortcut: = form survives forwarding untouched');
+    const detachedGone = sc.routeFromArgv(
+      ['exe', '--board-path', '--some-switch', appRoot], base);
+    ok(detachedGone.boardName === null && detachedGone.invalidBoard,
+      'shortcut: detached argv with NO valid board token -> not-found note');
+    const p2 = sc.parseBoardArg(['exe', '--board-path', '/x']);
+    ok(p2.flagSeen === true && sc.parseBoardArg(['exe']).flagSeen === false,
+      'shortcut: parse reports flagSeen');
+  }
+
+  // ---------- shortcut file-name planning ----------
+  {
+    const empty = () => null;
+    ok(sc.planShortcutFileName('動画素材', empty) === '動画素材.lnk',
+      'shortcut name: plain name when the Desktop is free');
+    ok(sc.planShortcutFileName('動画素材', () => 'file') === '動画素材.lnk',
+      'shortcut name: existing FILES never block (only the .lnk is written)');
+    const lnkExists = (n) => (n === '動画素材.lnk' ? 'file' : null);
+    ok(sc.planShortcutFileName('動画素材', lnkExists) === '動画素材.lnk',
+      'shortcut name: same-name .lnk is refreshed, not suffixed');
+    const folderClash = (n) => (n === '動画素材' ? 'dir' : null);
+    ok(sc.planShortcutFileName('動画素材', folderClash) === '動画素材 (OkibaBoard).lnk',
+      'shortcut name: folder with the board name -> (OkibaBoard) suffix');
+    const lnkDir = (n) => (n === '動画素材.lnk' ? 'dir' : null);
+    ok(sc.planShortcutFileName('動画素材', lnkDir) === '動画素材 (OkibaBoard).lnk',
+      'shortcut name: folder literally named X.lnk -> suffix');
+    const bothClash = (n) => (n === '動画素材' || n === '動画素材 (OkibaBoard)' ? 'dir' : null);
+    ok(sc.planShortcutFileName('動画素材', bothClash) === '動画素材 (OkibaBoard 2).lnk',
+      'shortcut name: double folder clash -> second suffix');
+    ok(sc.planShortcutFileName('a/b:c', empty) === 'abc.lnk',
+      'shortcut name: invalid filename chars are stripped');
+    ok(sc.sanitizeShortcutName('  名前.  ') === '名前',
+      'shortcut name: trailing dot/spaces stripped');
+  }
 }
 
 (async () => {
@@ -600,6 +828,7 @@ async function linksMain() {
     await dropmoveMain();
     await iconposMain();
     await linksMain();
+    shortcutMain();
     console.log('\nselftest: ' + passed + ' checks passed');
   } catch (e) {
     console.error(e.message || e);
