@@ -1049,6 +1049,11 @@ async function main() {
   await dragOutSynthetic(page.locator('.item', { hasText: '履歴リンク' }).first());
   await waitFor(() => fs.existsSync(path.join(landing, '履歴リンク.txt')),
     'history: linked file moved out to the landing folder');
+  // Poll: a linked move-out lands its file BEFORE the history
+  // record is written (the handler still awaits the attrib -H at
+  // the destination), so an immediate read can beat the record.
+  await waitFor(async () => (await histGroupsFor(page)).length === 2,
+    'history: two drag-outs recorded as two groups');
   const groupsAfterOut = await histGroupsFor(page);
   if (groupsAfterOut.length !== 2) {
     const allGroups = await page.evaluate(() => window.okiba.getMoveHistory());
@@ -1154,6 +1159,10 @@ async function main() {
   await waitFor(() => fs.existsSync(path.join(landing, '履歴グループ1.txt')) &&
     fs.existsSync(path.join(landing, '履歴グループ2.txt')),
     'history group: both files moved out in one gesture');
+  await waitFor(async () => {
+    const gs = await histGroupsFor(page);
+    return gs.length === 1 && gs[0].items.length === 2;
+  }, 'history group: ONE group holds both files');
   const bulkGroups = await histGroupsFor(page);
   assert(bulkGroups.length === 1 && bulkGroups[0].items.length === 2,
     `history group: ONE group holds both files (got ${bulkGroups.length} groups)`);
