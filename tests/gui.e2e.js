@@ -522,8 +522,12 @@ async function main() {
   assert(!(jsonAfterUnlink.links || []).some((l) => l.path === originFile),
     'json link removed after unlink');
   if (process.platform === 'win32') {
-    assert(attribHidden(originFile) === false,
+    // Poll: the card disappears when the board json is saved, which
+    // happens just BEFORE the attrib -H lands inside the same IPC —
+    // an immediate read-back races it (same pattern as run 7).
+    await waitFor(() => attribHidden(originFile) === false,
       'Hidden attribute cleared after unlink (real attrib)');
+    assert(true, 'Hidden attribute cleared after unlink (real attrib)');
   }
 
   step('missing state: external deletion greys the card; cleanup via menu');
