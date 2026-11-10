@@ -19,7 +19,7 @@
     "nsis": {
       "oneClick": true,
       "perMachine": false,
-      "createDesktopShortcut": true,
+      "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "runAfterFinish": false,
       "artifactName": "OkibaBoard-Setup-${version}.exe"
@@ -66,5 +66,5 @@
     "test:gui": "node tests/gui.e2e.js",
     "start": "electron ."
   },
-  "version": "2.2.0"
+  "version": "2.2.1"
 }

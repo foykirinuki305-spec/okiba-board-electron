@@ -9,6 +9,8 @@ const ln = require('./lib/links');
 const sc = require('./lib/shortcut');
 const pl = require('./lib/placement');
 const sh = require('./lib/shellhelper');
+const mh = require('./lib/movehistory');
+const cu = require('./lib/cleanup');
 
 // Hidden-attribute runner for linked items (v2.0). Real attrib.exe
 // in production; OKIBA_TEST_ATTRIB=stub swaps in the counting stub.
@@ -17,6 +19,9 @@ const attrib = ln.attribRunnerFromEnv();
 // ------------------------------------------------------------------ paths
 let BASE = null;
 let MIGRATED_COUNT = 0;
+// Files removed/healed by the once-per-version update cleanup
+// (v2.2.1, Job 2); surfaced on the home screen as one status line.
+let CLEANED_COUNT = 0;
 // Warm shell helper client (v2.2, Job A): one long-lived PowerShell
 // process serving resolveDrop / positionIcons / getDesktopPositions.
 // Created in registerIpc(); null when disabled or off-Windows, in
@@ -157,6 +162,7 @@ function homeState() {
     theme: home.theme || bf.DEFAULT_THEME,
     positions: home.positions,
     migrated: MIGRATED_COUNT,
+    cleaned: CLEANED_COUNT,
   };
 }
 
@@ -292,6 +298,98 @@ if (!gotSingleInstanceLock) {
   });
 }
 
+// ------------------------------------------- auto-cleanup (v2.2.1)
+// Runs ONCE per version change, after the window is up: loose
+// OkibaBoard exes left in Desktop/Downloads by chat deliveries
+// are deleted, stale app shortcuts are deleted, and board
+// shortcuts from older builds are healed onto the current exe
+// (lib/cleanup.js holds the pure decisions). Failures never block
+// startup; every action lands in <base>\okiba.log, one line each.
+function cleanupScanDirs() {
+  // OKIBA_CLEANUP_DESKTOP / OKIBA_CLEANUP_DOWNLOADS redirect the
+  // scanned folders for the GUI E2E (same pattern as
+  // OKIBA_SHORTCUT_DESKTOP) so tests never touch a real Desktop.
+  let desktop = null;
+  let downloads = null;
+  try { desktop = process.env.OKIBA_CLEANUP_DESKTOP || app.getPath('desktop'); } catch (e) {}
+  try { downloads = process.env.OKIBA_CLEANUP_DOWNLOADS || app.getPath('downloads'); } catch (e) {}
+  return { desktop, downloads };
+}
+
+function listCleanupFiles(dir) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true })
+      .filter((e) => { try { return e.isFile(); } catch (err) { return false; } })
+      .map((e) => path.join(dir, e.name));
+  } catch (e) { return []; }
+}
+
+function runVersionCleanup() {
+  try {
+    const current = app.getVersion();
+    const home = bf.loadHome(BASE);
+    if (!cu.shouldRunCleanup(current, home.appVersion)) return;
+    const dirs = cleanupScanDirs();
+    const desktopFiles = dirs.desktop ? listCleanupFiles(dirs.desktop) : [];
+    const downloadsFiles = dirs.downloads ? listCleanupFiles(dirs.downloads) : [];
+    const shortcuts = [];
+    for (const lnkPath of desktopFiles.filter((p) => p.toLowerCase().endsWith('.lnk'))) {
+      let info = null;
+      try { info = shell.readShortcutLink(lnkPath); } catch (e) { info = null; }
+      if (info && info.target) {
+        shortcuts.push({
+          lnkPath, target: info.target, args: info.args || '',
+          icon: info.icon || '', iconIndex: info.iconIndex || 0,
+          cwd: info.cwd || '', description: info.description || '',
+        });
+      }
+    }
+    const plan = cu.planCleanup({
+      desktopFiles, downloadsFiles, shortcuts, execPath: process.execPath,
+    });
+    const logLine = (s) => {
+      try {
+        fs.appendFileSync(path.join(BASE, 'okiba.log'),
+          new Date().toISOString() + ' cleanup ' + s + '\n');
+      } catch (e) { /* diagnostics must never break the app */ }
+    };
+    let acted = 0;
+    for (const p of plan.deleteFiles) {
+      try {
+        fs.rmSync(p, { force: true });
+        if (!fs.existsSync(p)) { acted++; logLine('delete ' + p); }
+      } catch (e) { /* locked/in-use files are skipped silently */ }
+    }
+    for (const p of plan.deleteShortcuts) {
+      try {
+        fs.rmSync(p, { force: true });
+        if (!fs.existsSync(p)) { acted++; logLine('delete-shortcut ' + p); }
+      } catch (e) { /* skipped silently */ }
+    }
+    for (const h of plan.healShortcuts) {
+      try {
+        const written = shell.writeShortcutLink(h.lnkPath, 'replace', {
+          target: process.execPath,
+          args: h.args,
+          cwd: h.cwd || undefined,
+          description: h.description || undefined,
+          icon: h.icon || process.execPath,
+          iconIndex: h.iconIndex || 0,
+        });
+        if (written) { acted++; logLine('heal-shortcut ' + h.lnkPath + ' -> ' + process.execPath); }
+      } catch (e) { /* skipped silently */ }
+    }
+    CLEANED_COUNT = acted;
+    // Stamp the marker LAST (positions/theme preserved), so the
+    // cleanup runs exactly once per version change.
+    try {
+      const fresh = bf.loadHome(BASE);
+      bf.saveHome(BASE, fresh.positions, fresh.theme, current);
+    } catch (e) { /* a failed stamp only means a retry next launch */ }
+    if (acted > 0 && win && !win.isDestroyed()) win.webContents.send('fs-changed');
+  } catch (e) { /* cleanup must never block startup */ }
+}
+
 // ------------------------------------------------------------------- IPC
 function guardBoard(name) {
   if (!name || name.includes('/') || name.includes('\\') || name === '.' || name === '..') {
@@ -414,6 +512,42 @@ function registerIpc() {
     return null;
   };
 
+  // ------------------------- move-out history (v2.2.1, Job 3)
+  // Every REAL move-out is recorded as ONE group per operation so
+  // the file can be found again (「場所を開く」) or restored
+  // (「ボードに戻す」). Recording must never break the move itself:
+  // every call is wrapped and failures are swallowed.
+  function snapshotBoard(boardName) {
+    // Cells as they were BEFORE a move: resident positions by file
+    // name, link records by path. Null when the board is unknown.
+    try {
+      const folder = guardBoard(boardName);
+      const data = bf.loadBoard(folder);
+      return { folder, positions: data.positions || {}, links: data.links || [] };
+    } catch (e) { return null; }
+  }
+  function cellOfPos(pos) {
+    return Array.isArray(pos) ? [pos[0], pos[1]] : [null, null];
+  }
+  function cellOfLink(links, targetPath) {
+    const l = (links || []).find((x) => ln.samePath(x.path, targetPath));
+    if (!l) return [null, null];
+    return [
+      Number.isFinite(l.col) ? l.col : null,
+      Number.isFinite(l.row) ? l.row : null,
+    ];
+  }
+  function recordHistory(boardName, snap, items, groupId) {
+    try {
+      if (!boardName || !items || !items.length) return;
+      const folder = snap ? snap.folder : guardBoard(boardName);
+      mh.recordItems(BASE, {
+        id: groupId || undefined,
+        boardName, boardFolder: folder, items,
+      });
+    } catch (e) { /* history is a rescue net, never a blocker */ }
+  }
+
   // ------------------------- linked items (v2.0 "link + hide")
   // Intake NO LONGER moves files into the board folder. The file
   // stays at its original path; the board stores a reference and the
@@ -514,10 +648,12 @@ function registerIpc() {
   // Menu counterpart of the linked drag-out (v2.1): move the real
   // file to the Desktop and detach the link. No drop point exists
   // here, so the icon takes the Desktop's default placement.
-  ipcMain.handle('move-linked-to-desktop', async (_e, boardName, paths) => {
+  ipcMain.handle('move-linked-to-desktop', async (_e, boardName, paths, groupId) => {
     const folder = guardBoard(boardName);
+    const snap = snapshotBoard(boardName);
     const moved = [];
     const destinations = [];
+    const histItems = [];
     for (const lp of paths || []) {
       const one = await ln.moveLinkedOut({
         base: BASE, boardFolder: folder, targetPath: lp,
@@ -525,9 +661,17 @@ function registerIpc() {
       });
       if (one.moved) {
         moved.push(lp);
-        if (one.dest) destinations.push(one.dest);
+        if (one.dest) {
+          destinations.push(one.dest);
+          const [c, r] = cellOfLink(snap ? snap.links : [], lp);
+          histItems.push({
+            kind: 'linked', destPath: one.dest,
+            fileName: path.basename(one.dest), col: c, row: r,
+          });
+        }
       }
     }
+    recordHistory(boardName, snap, histItems, groupId);
     if (moved.length && win && !win.isDestroyed()) {
       win.webContents.send('fs-changed');
     }
@@ -568,7 +712,8 @@ function registerIpc() {
     fs.renameSync(fullPath, dest);
     return dest;
   });
-  ipcMain.handle('move-to-desktop', (_e, fullPath) => {
+  ipcMain.handle('move-to-desktop', (_e, fullPath, boardName, groupId) => {
+    const snap = boardName ? snapshotBoard(boardName) : null;
     const dest = bf.uniqueDestination(bf.desktopDir(), path.basename(fullPath));
     // placeDroppedItems applies the same never-overwrite rule; call the
     // move directly so a same-drive Desktop move always MOVES.
@@ -582,6 +727,13 @@ function registerIpc() {
         fs.copyFileSync(fullPath, dest);
         fs.rmSync(fullPath, { force: true });
       }
+    }
+    if (boardName) {
+      const [c, r] = cellOfPos(snap ? snap.positions[path.basename(fullPath)] : null);
+      recordHistory(boardName, snap, [{
+        kind: 'resident', destPath: dest,
+        fileName: path.basename(dest), col: c, row: r,
+      }], groupId);
     }
     return dest;
   });
@@ -731,6 +883,153 @@ function registerIpc() {
     return coldPositionIcons(x, y, names);
   }
 
+  // ------------------------- move-out history IPC (v2.2.1, Job 3)
+  function historyForRenderer() {
+    const deskDirs = [bf.desktopDir()];
+    try {
+      const d = app.getPath('desktop');
+      if (d) deskDirs.push(d);
+    } catch (e) {}
+    const isDesktopDir = (dir) => deskDirs.some((d) => {
+      try {
+        return path.resolve(d).toLowerCase() === path.resolve(dir).toLowerCase();
+      } catch (e) { return false; }
+    });
+    return mh.loadHistory(BASE).map((g) => ({
+      ...g,
+      items: g.items.map((it) => {
+        const dir = path.dirname(it.destPath);
+        return {
+          ...it,
+          exists: fs.existsSync(it.destPath),
+          destDir: dir,
+          destDirName: path.basename(dir),
+          onDesktop: isDesktopDir(dir),
+        };
+      }),
+    }));
+  }
+
+  // Restore a set of items from one history group (the whole group
+  // for 「まとめてボードに戻す」, or a single item). Residents are
+  // real-moved back into the board folder; linked items are
+  // re-linked at their current path and hidden again. Placement
+  // replays the original cells through lib/placement.js (occupied
+  // cells scan forward to the nearest free one, layout preserved).
+  // Items whose destination vanished stay in the history.
+  async function restoreHistoryItems(group, scope) {
+    const folder = group.boardFolder || (() => {
+      try { return guardBoard(group.boardName); } catch (e) { return null; }
+    })();
+    if (!folder || !fs.existsSync(folder)) {
+      return { restored: [], missing: scope.map((i) => i.fileName), error: 'board-missing' };
+    }
+    const { restorable, missing } = mh.planRestore(
+      { items: scope }, (p) => fs.existsSync(p));
+    if (!restorable.length) {
+      return { restored: [], missing: missing.map((i) => i.fileName) };
+    }
+    const residentItems = restorable.filter((i) => i.kind === 'resident');
+    const linkedItems = restorable.filter((i) => i.kind === 'linked');
+    // 1) residents: real move back into the board folder.
+    const actualDest = new Map();
+    if (residentItems.length) {
+      const placed = bf.placeDroppedItems(
+        residentItems.map((i) => i.destPath), folder);
+      let pi = 0;
+      for (const item of residentItems) {
+        if (path.resolve(path.dirname(item.destPath)) === path.resolve(folder)) {
+          actualDest.set(item, item.destPath); // already inside (edge)
+        } else {
+          actualDest.set(item, placed[pi++] || null);
+        }
+      }
+    }
+    // 2) one placement pass for everything, original layout order.
+    let rowsPerCol = 8;
+    for (const i of restorable) {
+      if (i.row != null) rowsPerCol = Math.max(rowsPerCol, i.row + 1);
+    }
+    const data = bf.loadBoard(folder);
+    const restoredNames = new Set(
+      [...actualDest.values()].filter(Boolean).map((p) => path.basename(p)));
+    const { occupied } = pl.computeCells({
+      entries: bf.scanFolder(folder).filter((e) => !restoredNames.has(e.name)),
+      positions: Object.fromEntries(Object.entries(data.positions)
+        .filter(([n]) => !restoredNames.has(n))),
+      notes: data.notes, links: data.links, rowsPerCol,
+    });
+    const ordered = restorable.map((item, idx) => ({ item, idx }))
+      .sort((a, b) => {
+        const ka = (a.item.col == null || a.item.row == null)
+          ? null : a.item.col * 10000 + a.item.row;
+        const kb = (b.item.col == null || b.item.row == null)
+          ? null : b.item.col * 10000 + b.item.row;
+        if (ka === null && kb === null) return a.idx - b.idx;
+        if (ka === null) return 1;
+        if (kb === null) return -1;
+        return ka - kb || a.idx - b.idx;
+      })
+      .map((x) => x.item);
+    const firstCell = ordered.find((i) => i.col != null && i.row != null);
+    const anchor = firstCell ? [firstCell.col, firstCell.row] : [0, 0];
+    const offsets = ordered.map((item, i) => (
+      (item.col != null && item.row != null)
+        ? [item.col - anchor[0], item.row - anchor[1]]
+        : [0, i]));
+    const cells = pl.placeItems({
+      occupied, anchor, offsets, count: ordered.length, rowsPerCol,
+    });
+    const cellFor = new Map(ordered.map((item, i) => [item, cells[i]]));
+    // 3) linked: re-link at the current path, hidden again.
+    for (const item of linkedItems) {
+      await ln.addLink({
+        base: BASE, boardFolder: folder, targetPath: item.destPath,
+        attrib, cell: cellFor.get(item),
+      });
+    }
+    // 4) residents: save their cells (reload first so step 3's
+    // board saves are not clobbered).
+    if (residentItems.length) {
+      const data2 = bf.loadBoard(folder);
+      for (const item of residentItems) {
+        const dest = actualDest.get(item);
+        if (dest) data2.positions[path.basename(dest)] = cellFor.get(item);
+      }
+      bf.saveBoard(folder, data2.positions, data2.notes,
+        data2.sizePercent, data2.links);
+    }
+    // 5) restored items leave the history; missing ones stay.
+    mh.removeItems(BASE, group.id, restorable.map((i) => i.destPath));
+    if (win && !win.isDestroyed()) win.webContents.send('fs-changed');
+    return {
+      restored: restorable.map((i) => i.fileName),
+      missing: missing.map((i) => i.fileName),
+    };
+  }
+
+  ipcMain.handle('get-move-history', () => historyForRenderer());
+  ipcMain.handle('restore-history-group', async (_e, groupId) => {
+    const group = mh.findGroup(BASE, groupId);
+    if (!group) return { restored: [], missing: [], error: 'not-found' };
+    return restoreHistoryItems(group, group.items);
+  });
+  ipcMain.handle('restore-history-item', async (_e, groupId, destPath) => {
+    const group = mh.findGroup(BASE, groupId);
+    if (!group) return { restored: [], missing: [], error: 'not-found' };
+    const item = group.items.find((i) => i.destPath === destPath);
+    if (!item) return { restored: [], missing: [], error: 'not-found' };
+    return restoreHistoryItems(group, [item]);
+  });
+  ipcMain.handle('discard-history-item', (_e, groupId, destPath) => {
+    mh.removeItems(BASE, groupId, [destPath]);
+    return historyForRenderer();
+  });
+  ipcMain.handle('discard-history-group', (_e, groupId) => {
+    mh.removeGroup(BASE, groupId);
+    return historyForRenderer();
+  });
+
   // Every resolution is logged so the GUI test-suite can verify the
   // new IPC path (renderer outside-release -> main resolve -> move)
   // even though a real OS drop gesture cannot be automated.
@@ -743,6 +1042,10 @@ function registerIpc() {
       resolved: null, moved: [], skipped: [], failed: [], error: null,
       position: null, positionNote: '',
     };
+    // History snapshot: cells BEFORE anything moves (v2.2.1 Job 3).
+    const histSnap = (payload && payload.boardName)
+      ? snapshotBoard(payload.boardName) : null;
+    const histItems = [];
     try {
       const target = (Number.isFinite(x) && Number.isFinite(y))
         ? await resolveDropTarget(x, y)
@@ -758,6 +1061,14 @@ function registerIpc() {
           result.skipped = r.skipped;
           result.failed = r.failed;
           const allDestinations = [...r.destinations];
+          for (const pair of r.pairs || []) {
+            const [c, rr] = cellOfPos(histSnap
+              ? histSnap.positions[path.basename(pair.src)] : null);
+            histItems.push({
+              kind: 'resident', destPath: pair.dest,
+              fileName: path.basename(pair.dest), col: c, row: rr,
+            });
+          }
           // LINKED items dragged out are a REAL move too (v2.1 —
           // the user: 「ボードから外すをしなくても、ドラッグで
           // デスクトップとかに移動できるように」). Each one goes
@@ -781,13 +1092,23 @@ function registerIpc() {
                 });
                 if (one.moved) {
                   result.moved.push(lp);
-                  if (one.dest) allDestinations.push(one.dest);
+                  if (one.dest) {
+                    allDestinations.push(one.dest);
+                    const [c, rr] = cellOfLink(histSnap ? histSnap.links : [], lp);
+                    histItems.push({
+                      kind: 'linked', destPath: one.dest,
+                      fileName: path.basename(one.dest), col: c, row: rr,
+                    });
+                  }
                   dropLog.push({ kind: 'move-linked', target: target.path, path: lp, dest: one.dest });
                 } else {
                   result.failed.push(lp);
                 }
               }
             }
+          }
+          if (histItems.length && payload.boardName) {
+            recordHistory(payload.boardName, histSnap, histItems);
           }
           dropLog.push({ kind: 'move', target: target.path, moved: result.moved.length });
           if (result.moved.length && win && !win.isDestroyed()) {
@@ -881,6 +1202,9 @@ app.whenReady().then(async () => {
   registerIpc();
   createWindow();
   setupWatchers(null);
+  // Once-per-version update cleanup (v2.2.1): fire and forget —
+  // it runs after the window is up and never blocks startup.
+  runVersionCleanup();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

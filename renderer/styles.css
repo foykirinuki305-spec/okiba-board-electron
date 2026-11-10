@@ -260,6 +260,29 @@ body {
 .modal-area { resize: vertical; }
 .modal-error { color: #ff9a8a; font-size: 12.5px; min-height: 16px; margin: 8px 0 0; white-space: pre-wrap; }
 .modal-buttons { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+/* move-out history (v2.2.1) */
+.modal-wide { width: 660px; }
+.history-list {
+  display: flex; flex-direction: column; gap: 10px;
+  max-height: 56vh; overflow-y: auto; padding-right: 2px;
+}
+.history-group {
+  border: 1px solid var(--card-border); border-radius: 13px;
+  background: rgba(255, 255, 255, .04); padding: 11px 13px;
+}
+.history-title { font-size: 14.5px; font-weight: 600; }
+.history-meta { color: var(--dim); font-size: 12px; margin-top: 3px; }
+.history-actions { display: flex; gap: 8px; margin-top: 9px; flex-wrap: wrap; }
+.pill-small { padding: 5px 12px; font-size: 12.5px; }
+.pill[disabled] { opacity: .45; cursor: default; }
+.history-items { margin-top: 8px; border-top: 1px solid var(--card-border); }
+.history-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 0 0 8px;
+}
+.history-item-name { flex: 1; min-width: 0; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-item.missing { opacity: .55; }
+.history-missing { color: #ff9a8a; font-size: 12.5px; white-space: nowrap; }
 .toast {
   position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
   z-index: 400; background: rgba(15, 17, 28, .94); color: var(--fg);

@@ -894,6 +894,273 @@ async function main() {
     `warm helper: resolve+position went through the helper (requests=${hstats && hstats.requests})`);
   await app13.close();
 
+  // ------------------------------------------------------------ run 10
+  // v2.2.1 auto-cleanup (Job 2): with the version marker bumped,
+  // loose old exes in (redirected) Desktop/Downloads are deleted,
+  // a stale shortcut is deleted, a board shortcut pointing at a
+  // fake old exe is HEALED onto the running exe, keepers survive,
+  // the marker is stamped, and a relaunch changes nothing.
+  step('auto-cleanup (v2.2.1): old versions tidied on version change');
+  const cleanupDesktop = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-clean-desk-'));
+  const cleanupDownloads = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-clean-dl-'));
+  fs.writeFileSync(path.join(cleanupDownloads, 'OkibaBoard.exe'), 'old portable');
+  fs.writeFileSync(path.join(cleanupDesktop, 'OkibaBoard-Setup-2.1.0.exe'), 'old setup');
+  fs.writeFileSync(path.join(cleanupDesktop, '関係ない.txt'), 'keep me');
+  fs.writeFileSync(path.join(cleanupDownloads, 'keep.txt'), 'keep me too');
+  const boardLnkPath = path.join(cleanupDesktop, boardName + '.lnk');
+  const staleLnkPath = path.join(cleanupDesktop, 'OkibaBoard.lnk');
+  if (process.platform === 'win32') {
+    const fakeOldExe = path.join(cleanupDesktop, 'old', 'OkibaBoard.exe');
+    const esc = (s) => s.replace(/'/g, "''");
+    const psLines = [
+      '$ws = New-Object -ComObject WScript.Shell',
+      `$s = $ws.CreateShortcut('${esc(staleLnkPath)}'); $s.TargetPath = '${esc(fakeOldExe)}'; $s.Arguments = ''; $s.Save()`,
+      `$s = $ws.CreateShortcut('${esc(boardLnkPath)}'); $s.TargetPath = '${esc(fakeOldExe)}'; $s.Arguments = '--board-path="${esc(boardDir)}"'; $s.Save()`,
+      `$s = $ws.CreateShortcut('${esc(path.join(cleanupDesktop, 'メモ帳.lnk'))}'); $s.TargetPath = 'C:\\Windows\\System32\\notepad.exe'; $s.Arguments = ''; $s.Save()`,
+    ].join('\n');
+    const psFile = path.join(os.tmpdir(), 'okiba-gui-mklnk-' + Date.now() + '.ps1');
+    fs.writeFileSync(psFile, '﻿' + psLines, 'utf8');
+    require('child_process').execFileSync('powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psFile]);
+    assert(fs.existsSync(staleLnkPath) && fs.existsSync(boardLnkPath),
+      'cleanup: seed shortcuts created (stale app + board)');
+  }
+  {
+    const homeJsonPath = path.join(base, '.home.json');
+    const homeJson = readJson(homeJsonPath);
+    homeJson.appVersion = '2.2.0'; // older than the package version
+    fs.writeFileSync(homeJsonPath, JSON.stringify(homeJson, null, 2));
+  }
+  const pkgVersion = require('../package.json').version;
+  const app14 = await launch({
+    OKIBA_CLEANUP_DESKTOP: cleanupDesktop,
+    OKIBA_CLEANUP_DOWNLOADS: cleanupDownloads,
+  });
+  page = await app14.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await waitFor(() => !fs.existsSync(path.join(cleanupDownloads, 'OkibaBoard.exe')),
+    'cleanup: old portable exe deleted from Downloads');
+  await waitFor(() => !fs.existsSync(path.join(cleanupDesktop, 'OkibaBoard-Setup-2.1.0.exe')),
+    'cleanup: old Setup exe deleted from Desktop');
+  assert(fs.existsSync(path.join(cleanupDesktop, '関係ない.txt')) &&
+         fs.existsSync(path.join(cleanupDownloads, 'keep.txt')),
+    'cleanup: unrelated files untouched');
+  await waitFor(() => {
+    const h = readJson(path.join(base, '.home.json'));
+    return h.appVersion === pkgVersion;
+  }, 'cleanup: version marker stamped to the current version');
+  if (process.platform === 'win32') {
+    assert(!fs.existsSync(staleLnkPath), 'cleanup: stale app shortcut deleted');
+    assert(fs.existsSync(path.join(cleanupDesktop, 'メモ帳.lnk')),
+      'cleanup: unrelated shortcut untouched');
+    const execPath = await app14.evaluate(() => process.execPath);
+    await waitFor(async () => {
+      const info = await page.evaluate((p) => window.okiba.readShortcut(p), boardLnkPath);
+      return info && info.target === execPath;
+    }, 'cleanup: board shortcut healed onto the running exe');
+    const healed = await page.evaluate((p) => window.okiba.readShortcut(p), boardLnkPath);
+    assert(healed.args.includes('--board-path') && healed.args.includes(boardDir),
+      'cleanup: healed shortcut kept its --board-path args');
+  } else {
+    console.log('  skip - shortcut heal/delete assertions run on the Windows CI runner');
+  }
+  await waitFor(async () => {
+    const n = await page.evaluate(() => {
+      const el = document.getElementById('cleanupNotice');
+      return { hidden: el.hidden, text: el.textContent };
+    });
+    return !n.hidden && n.text.includes('片付けました');
+  }, 'cleanup: home shows the one-line tidied notice');
+  await app14.close();
+
+  step('auto-cleanup (v2.2.1): relaunch with a current marker changes nothing');
+  const app15 = await launch({
+    OKIBA_CLEANUP_DESKTOP: cleanupDesktop,
+    OKIBA_CLEANUP_DOWNLOADS: cleanupDownloads,
+  });
+  page = await app15.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await new Promise((r) => setTimeout(r, 1500)); // let any wrong cleanup run
+  const noticeAfterRelaunch = await page.evaluate(() => {
+    const el = document.getElementById('cleanupNotice');
+    return { hidden: el.hidden, text: el.textContent };
+  });
+  assert(noticeAfterRelaunch.hidden === true,
+    'cleanup: no notice on a same-version relaunch');
+  assert(fs.existsSync(path.join(cleanupDesktop, '関係ない.txt')),
+    'cleanup: keepers still present after relaunch');
+  if (process.platform === 'win32') {
+    const execPath2 = await app15.evaluate(() => process.execPath);
+    const info2 = await page.evaluate((p) => window.okiba.readShortcut(p), boardLnkPath);
+    assert(info2 && info2.target === execPath2,
+      'cleanup: healed shortcut still points at the current exe');
+  }
+  await app15.close();
+
+  // ------------------------------------------------------------ run 11
+  // v2.2.1 move-out history (Job 3): two separate drag-outs (one
+  // resident, one linked) record two groups; restoring each from
+  // the home history modal brings the item back (resident: real
+  // file + original cell; linked: re-linked + hidden again).
+  step('move history (v2.2.1): drag-outs recorded, restored from the list');
+  const histBoard = '履歴ボード';
+  const histDir = path.join(base, histBoard);
+  fs.mkdirSync(histDir, { recursive: true });
+  fs.writeFileSync(path.join(histDir, '履歴レジデント.txt'), 'resident hist');
+  fs.writeFileSync(path.join(histDir, '.okiba-board.json'), JSON.stringify({
+    version: 6, size_percent: 100,
+    positions: { '履歴レジデント.txt': { col: 5, row: 0 } },
+    links: [], notes: [],
+  }, null, 2));
+  const origin11 = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-origin11-'));
+  const histLinkFile = path.join(origin11, '履歴リンク.txt');
+  fs.writeFileSync(histLinkFile, 'linked hist');
+  const histGroupsFor = async (pg) => {
+    const all = await pg.evaluate(() => window.okiba.getMoveHistory());
+    return all.filter((g) => g.boardName === histBoard);
+  };
+  const app16 = await launch();
+  page = await app16.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click(`#boardGrid .board-card[data-name="${histBoard}"]`);
+  await page.waitForSelector('#boardView:not([hidden]) .item');
+  await page.evaluate(
+    (arg) => window.okiba.linkFiles(arg.board, [arg.p]),
+    { board: histBoard, p: histLinkFile });
+  await waitFor(async () => {
+    const ns = await page.locator('.item .name').allTextContents();
+    return ns.some((t) => t.includes('履歴リンク'));
+  }, 'history: linked card appears');
+  await dragOutSynthetic(page.locator('.item', { hasText: '履歴レジデント' }).first());
+  await waitFor(() => fs.existsSync(path.join(landing, '履歴レジデント.txt')),
+    'history: resident file moved out to the landing folder');
+  await dragOutSynthetic(page.locator('.item', { hasText: '履歴リンク' }).first());
+  await waitFor(() => fs.existsSync(path.join(landing, '履歴リンク.txt')),
+    'history: linked file moved out to the landing folder');
+  const groupsAfterOut = await histGroupsFor(page);
+  assert(groupsAfterOut.length === 2,
+    `history: two drag-outs recorded as two groups (got ${groupsAfterOut.length})`);
+  assert(groupsAfterOut.some((g) => g.items[0].kind === 'resident') &&
+         groupsAfterOut.some((g) => g.items[0].kind === 'linked'),
+    'history: one resident group and one linked group');
+  await page.click('#backBtn');
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click('#historyBtn');
+  await page.waitForSelector('#historyOverlay:not([hidden])');
+  const resGroup = page.locator('.history-group', { hasText: '履歴レジデント' }).first();
+  await resGroup.locator('[data-act="restore-group"]').click();
+  await waitFor(() => fs.existsSync(path.join(histDir, '履歴レジデント.txt')),
+    'history: resident restored into the board folder');
+  await waitFor(async () => (await histGroupsFor(page)).length === 1,
+    'history: resident group consumed by the restore');
+  const restoredJson = readJson(path.join(histDir, '.okiba-board.json'));
+  const resPos = (restoredJson.positions || {})['履歴レジデント.txt'];
+  assert(resPos && resPos.col === 5 && resPos.row === 0,
+    'history: resident restored at its original cell (5,0)');
+  const linkGroup = page.locator('.history-group', { hasText: '履歴リンク' }).first();
+  await linkGroup.locator('[data-act="restore-group"]').click();
+  await waitFor(() => {
+    const j = readJson(path.join(histDir, '.okiba-board.json'));
+    return (j.links || []).some((l) => l.path === path.join(landing, '履歴リンク.txt'));
+  }, 'history: linked item re-linked at its moved-out path');
+  if (process.platform === 'win32') {
+    await waitFor(
+      () => attribHidden(path.join(landing, '履歴リンク.txt')) === true,
+      'history: restored link is hidden again (real attrib)');
+  }
+  await waitFor(async () => (await histGroupsFor(page)).length === 0,
+    'history: empty after both restores');
+  await page.click('#historyClose');
+  await app16.close();
+
+  step('move history (v2.2.1): vanished destination shows 見つかりません');
+  {
+    const j = readJson(path.join(histDir, '.okiba-board.json'));
+    j.positions['履歴ミッシング.txt'] = { col: 5, row: 1 };
+    fs.writeFileSync(path.join(histDir, '.okiba-board.json'), JSON.stringify(j, null, 2));
+    fs.writeFileSync(path.join(histDir, '履歴ミッシング.txt'), 'will vanish');
+  }
+  const app17 = await launch();
+  page = await app17.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click(`#boardGrid .board-card[data-name="${histBoard}"]`);
+  await page.waitForSelector('#boardView:not([hidden]) .item');
+  await dragOutSynthetic(page.locator('.item', { hasText: '履歴ミッシング' }).first());
+  await waitFor(() => fs.existsSync(path.join(landing, '履歴ミッシング.txt')),
+    'history: missing-case file moved out');
+  fs.rmSync(path.join(landing, '履歴ミッシング.txt')); // renamed/deleted by hand
+  await page.click('#backBtn');
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click('#historyBtn');
+  await page.waitForSelector('#historyOverlay:not([hidden])');
+  const missGroup = page.locator('.history-group', { hasText: '履歴ミッシング' }).first();
+  await waitFor(async () => {
+    const t = await missGroup.evaluate((el) => el.textContent);
+    return t.includes('見つかりません');
+  }, 'history: vanished file row shows 見つかりません');
+  await missGroup.locator('[data-act="discard-item"]').click();
+  await waitFor(async () => (await histGroupsFor(page)).length === 0,
+    'history: missing entry discarded from the list');
+  await page.click('#historyClose');
+  await app17.close();
+
+  // ------------------------------------------------------------ run 12
+  // Grouped history: ONE multi-select drag-out of two residents is
+  // ONE history group ("ほか 1 件"); the group restore brings both
+  // back at their original cells in one action.
+  step('move history (v2.2.1): bulk move-out is ONE group, restored together');
+  {
+    const j = readJson(path.join(histDir, '.okiba-board.json'));
+    j.positions['履歴グループ1.txt'] = { col: 5, row: 2 };
+    j.positions['履歴グループ2.txt'] = { col: 5, row: 3 };
+    fs.writeFileSync(path.join(histDir, '.okiba-board.json'), JSON.stringify(j, null, 2));
+    fs.writeFileSync(path.join(histDir, '履歴グループ1.txt'), 'g1');
+    fs.writeFileSync(path.join(histDir, '履歴グループ2.txt'), 'g2');
+  }
+  const app18 = await launch();
+  page = await app18.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click(`#boardGrid .board-card[data-name="${histBoard}"]`);
+  await page.waitForSelector('#boardView:not([hidden]) .item');
+  const g1 = page.locator('.item', { hasText: '履歴グループ1' }).first();
+  const g2 = page.locator('.item', { hasText: '履歴グループ2' }).first();
+  const g1Box = await boxOf(g1, 'group item 1 box');
+  await page.mouse.click(g1Box.x + g1Box.width / 2, g1Box.y + g1Box.height / 2);
+  const g2Box = await boxOf(g2, 'group item 2 box');
+  await page.keyboard.down('Control');
+  await page.mouse.click(g2Box.x + g2Box.width / 2, g2Box.y + g2Box.height / 2);
+  await page.keyboard.up('Control');
+  await waitFor(async () => (await selectedNames(page)).length === 2,
+    'history group: both items selected');
+  await dragOutSynthetic(g1);
+  await waitFor(() => fs.existsSync(path.join(landing, '履歴グループ1.txt')) &&
+    fs.existsSync(path.join(landing, '履歴グループ2.txt')),
+    'history group: both files moved out in one gesture');
+  const bulkGroups = await histGroupsFor(page);
+  assert(bulkGroups.length === 1 && bulkGroups[0].items.length === 2,
+    `history group: ONE group holds both files (got ${bulkGroups.length} groups)`);
+  await page.click('#backBtn');
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click('#historyBtn');
+  await page.waitForSelector('#historyOverlay:not([hidden])');
+  const bulkGroupEl = page.locator('.history-group', { hasText: '履歴グループ1' }).first();
+  const bulkTitle = await bulkGroupEl.locator('.history-title').textContent();
+  assert(bulkTitle.includes('ほか 1 件'),
+    'history group: row shows the representative name + ほか 1 件');
+  await bulkGroupEl.locator('[data-act="restore-group"]').click();
+  await waitFor(() => fs.existsSync(path.join(histDir, '履歴グループ1.txt')) &&
+    fs.existsSync(path.join(histDir, '履歴グループ2.txt')),
+    'history group: both files restored together');
+  const bulkJson = readJson(path.join(histDir, '.okiba-board.json'));
+  const bp1 = (bulkJson.positions || {})['履歴グループ1.txt'];
+  const bp2 = (bulkJson.positions || {})['履歴グループ2.txt'];
+  assert(bp1 && bp1.col === 5 && bp1.row === 2 && bp2 && bp2.col === 5 && bp2.row === 3,
+    'history group: original cells restored (5,2) and (5,3)');
+  await waitFor(async () => (await histGroupsFor(page)).length === 0,
+    'history group: group consumed by the restore');
+  await page.click('#historyClose');
+  await app18.close();
+
   console.log('\nGUI E2E: all steps passed');
 }
 

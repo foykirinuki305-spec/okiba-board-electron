@@ -8,6 +8,36 @@
 # purpose (console codepages); the client \u-escapes non-ASCII.
 # Keep the cold-spawn scripts in sync behaviour-wise: they are the
 # fallback when this helper is unavailable.
+#
+# v2.2.1 (Job 1 regression fix): the desktop listview code below is
+# now a FAITHFUL PORT of scripts/position-desktop-icons.ps1
+# (v1.3.1, user-confirmed on a real PC). The v2.2 helper had drifted
+# from it in ways that made drops land in the wrong place:
+#   - GetItemText staged a 48-byte LVITEM with the text buffer
+#     INSIDE the struct allocation (cold: an 88-byte LVITEM plus a
+#     SEPARATE text buffer) and opened Explorer with
+#     PROCESS_ALL_ACCESS (0x001F0FFF), which can be denied where
+#     the cold script's minimal VM rights succeed -> empty labels
+#     -> no name match -> 'no-item' -> icon left wherever
+#     Explorer's default placement put it.
+#   - positionIcons never converted the drop point with
+#     ScreenToClient: the screen coordinates main passes were
+#     treated as listview client coordinates verbatim.
+#   - the populated-listview pick returned the FIRST candidate
+#     with items (cold: the one with the LARGEST item count), so a
+#     stale WorkerW listview could win over the real desktop.
+#   - name matching used case-insensitive equality for the 'exact'
+#     pass and a REVERSED starts-with test (cold: case-sensitive
+#     exact/noext, starts-with = label.StartsWith(name)).
+#   - layout: rowsPerCol used the full client height (cold: the
+#     height REMAINING below the anchor) and per-icon targets were
+#     never clamped into the client area; set verification used a
+#     strict < spacing test after a 60ms settle (cold: <= spacing
+#     after 180ms).
+# All of those now match the cold script exactly. The only
+# deliberate difference left is the icon-appear poll: it still
+# starts immediately and runs at ~50ms (the speed fix that was the
+# point of the warm helper), instead of the cold script's 200ms.
 $ErrorActionPreference = 'Stop'
 try {
   [Console]::InputEncoding = [System.Text.Encoding]::UTF8
@@ -35,7 +65,11 @@ public static class OkibaWin32 {
 }
 '@
 
-# ---- Desktop listview interop (same as position-desktop-icons.ps1)
+# ---- Desktop listview interop -------------------------------------
+# FAITHFUL PORT of position-desktop-icons.ps1's OkibaDesk (v1.3.1):
+# same signatures, same LVITEMW offsets, same minimal process
+# rights, plus GetSpacingX/Y, SetItemPosition and ToClient helpers
+# the helper's other commands need.
 Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -43,176 +77,224 @@ using System.Runtime.InteropServices;
 using System.Text;
 
 public static class OkibaDesk {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct POINT { public int X; public int Y; }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
   public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
 
-  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lp);
-  [DllImport("user32.dll")] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string win);
-  [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int GetClassName(IntPtr hwnd, StringBuilder sb, int max);
-  [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr hwnd, out int pid);
-  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
-  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
-  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hwnd, int index);
-  [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(int access, bool inherit, int pid);
-  [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
-  [DllImport("kernel32.dll")] public static extern IntPtr VirtualAllocEx(IntPtr h, IntPtr addr, int size, int type, int protect);
-  [DllImport("kernel32.dll")] public static extern bool VirtualFreeEx(IntPtr h, IntPtr addr, int size, int type);
-  [DllImport("kernel32.dll")] public static extern bool WriteProcessMemory(IntPtr h, IntPtr addr, byte[] buf, int size, out int written);
-  [DllImport("kernel32.dll")] public static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, int size, out int read);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern IntPtr FindWindow(string cls, string win);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string win);
+  [DllImport("user32.dll")]
+  public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lp);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern int GetClassName(IntPtr hwnd, StringBuilder sb, int max);
+  [DllImport("user32.dll")]
+  public static extern int GetWindowLong(IntPtr hwnd, int index);
+  [DllImport("user32.dll")]
+  public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+  [DllImport("user32.dll")]
+  public static extern bool ScreenToClient(IntPtr hwnd, ref POINT pt);
+  [DllImport("user32.dll")]
+  public static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wp, IntPtr lp);
+  [DllImport("user32.dll")]
+  public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
 
-  [StructLayout(LayoutKind.Sequential)]
-  public struct RECT { public int Left, Top, Right, Bottom; }
+  [DllImport("kernel32.dll")]
+  public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+  [DllImport("kernel32.dll")]
+  public static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll")]
+  public static extern IntPtr VirtualAllocEx(IntPtr proc, IntPtr addr, uint size, uint type, uint protect);
+  [DllImport("kernel32.dll")]
+  public static extern bool VirtualFreeEx(IntPtr proc, IntPtr addr, uint size, uint type);
+  [DllImport("kernel32.dll")]
+  public static extern bool WriteProcessMemory(IntPtr proc, IntPtr addr, byte[] buf, uint size, out UIntPtr written);
+  [DllImport("kernel32.dll")]
+  public static extern bool ReadProcessMemory(IntPtr proc, IntPtr addr, byte[] buf, uint size, out UIntPtr read);
 
-  public static string ClassOf(IntPtr hwnd) {
-    var sb = new StringBuilder(256);
-    GetClassName(hwnd, sb, 256);
-    return sb.ToString();
+  static IntPtr FromDefView(IntPtr parent) {
+    if (parent == IntPtr.Zero) return IntPtr.Zero;
+    IntPtr dv = FindWindowEx(parent, IntPtr.Zero, "SHELLDLL_DefView", null);
+    if (dv == IntPtr.Zero) return IntPtr.Zero;
+    return FindWindowEx(dv, IntPtr.Zero, "SysListView32", null);
   }
 
-  // Every desktop-icons listview: Progman's SHELLDLL_DefView plus
-  // each WorkerW's (the wallpaper layer creates one; only one of
-  // them actually hosts the icons).
+  // Every desktop-icons listview candidate (Progman + each
+  // WorkerW); the caller picks the populated one (largest count).
   public static IntPtr[] FindDesktopListViews() {
-    var found = new List<IntPtr>();
-    IntPtr progman = FindWindowEx(IntPtr.Zero, IntPtr.Zero, "Progman", null);
-    if (progman != IntPtr.Zero) {
-      IntPtr def = FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
-      if (def != IntPtr.Zero) {
-        IntPtr lv = FindWindowEx(def, IntPtr.Zero, "SysListView32", null);
-        if (lv != IntPtr.Zero) found.Add(lv);
-      }
-    }
-    EnumWindows((top, lp) => {
-      if (ClassOf(top) == "WorkerW") {
-        IntPtr def = FindWindowEx(top, IntPtr.Zero, "SHELLDLL_DefView", null);
-        if (def != IntPtr.Zero) {
-          IntPtr lv = FindWindowEx(def, IntPtr.Zero, "SysListView32", null);
-          if (lv != IntPtr.Zero) found.Add(lv);
-        }
+    var list = new List<IntPtr>();
+    IntPtr lv = FromDefView(FindWindow("Progman", null));
+    if (lv != IntPtr.Zero) list.Add(lv);
+    EnumWindows((hwnd, lp) => {
+      var sb = new StringBuilder(64);
+      GetClassName(hwnd, sb, 64);
+      if (sb.ToString() == "WorkerW") {
+        IntPtr v = FromDefView(hwnd);
+        if (v != IntPtr.Zero && !list.Contains(v)) list.Add(v);
       }
       return true;
     }, IntPtr.Zero);
-    return found.ToArray();
+    return list.ToArray();
   }
 
-  public static int GetItemCount(IntPtr lv) {
-    return SendMessage(lv, 0x1004, IntPtr.Zero, IntPtr.Zero).ToInt32(); // LVM_GETITEMCOUNT
+  public const int LVM_FIRST = 0x1000;
+  public const int LVM_GETITEMCOUNT = LVM_FIRST + 4;    // 0x1004
+  public const int LVM_GETITEMPOSITION = LVM_FIRST + 16; // 0x1010
+  public const int LVM_GETITEMTEXTW = LVM_FIRST + 115;   // 0x1073
+  public const int LVM_SETITEMPOSITION = LVM_FIRST + 15; // 0x100F
+  public const int LVM_GETITEMSPACING = LVM_FIRST + 51;  // 0x1033
+
+  const uint PROCESS_VM = 0x0400 | 0x0008 | 0x0010 | 0x0020; // QUERY_INFO|VM_OPERATION|VM_READ|VM_WRITE
+  const uint MEM_COMMIT_RESERVE = 0x1000 | 0x2000;
+  const uint MEM_RELEASE = 0x8000;
+  const uint PAGE_RW = 0x04;
+
+  public static int GetItemCount(IntPtr hwnd) {
+    return (int)SendMessage(hwnd, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero);
   }
 
   // LVM_GETITEMSPACING: low word = cx, high word = cy.
   public static int GetSpacingX(IntPtr lv) {
-    int v = SendMessage(lv, 0x1033, IntPtr.Zero, IntPtr.Zero).ToInt32();
+    int v = SendMessage(lv, LVM_GETITEMSPACING, IntPtr.Zero, IntPtr.Zero).ToInt32();
     return v & 0xFFFF;
   }
   public static int GetSpacingY(IntPtr lv) {
-    int v = SendMessage(lv, 0x1033, IntPtr.Zero, IntPtr.Zero).ToInt32();
+    int v = SendMessage(lv, LVM_GETITEMSPACING, IntPtr.Zero, IntPtr.Zero).ToInt32();
     return (v >> 16) & 0xFFFF;
   }
 
-  public const int LVM_FIRST = 0x1000;
+  // Screen -> listview client coordinates (the cold script calls
+  // ScreenToClient the same way; v2.2 skipped this entirely).
+  public static int[] ToClient(IntPtr hwnd, int x, int y) {
+    POINT pt; pt.X = x; pt.Y = y;
+    ScreenToClient(hwnd, ref pt);
+    return new int[] { pt.X, pt.Y };
+  }
 
-  // Read item text cross-process (LVITEMW x64 layout: mask 0,
-  // iItem 4, iSubItem 8, state 12, stateMask 16, pad 20,
-  // pszText 24, cchTextMax 32).
-  public static string GetItemText(IntPtr lv, int index) {
-    int pid;
-    GetWindowThreadProcessId(lv, out pid);
-    IntPtr h = OpenProcess(0x001F0FFF, false, pid);
-    if (h == IntPtr.Zero) return "";
+  // Read item text cross-process. LVITEMW (x64) byte offsets —
+  // VERIFIED against commctrl.h: mask@0, iItem@4, iSubItem@8,
+  // state@12, stateMask@16, pszText@24, cchTextMax@32. The struct
+  // is 88 bytes and the text buffer is a SEPARATE allocation
+  // (v2.2 used a 48-byte struct with the buffer inside it).
+  public static string GetItemText(IntPtr hwnd, int item) {
+    const int MAXCHARS = 260;
+    const int ITEMSIZE = 88;
+    uint pid;
+    GetWindowThreadProcessId(hwnd, out pid);
+    IntPtr proc = OpenProcess(PROCESS_VM, false, pid);
+    if (proc == IntPtr.Zero) return null;
+    IntPtr remoteItem = IntPtr.Zero, remoteText = IntPtr.Zero;
     try {
-      int textBytes = 520;
-      IntPtr remote = VirtualAllocEx(h, IntPtr.Zero, 48 + textBytes, 0x3000, 0x04);
-      if (remote == IntPtr.Zero) return "";
-      try {
-        IntPtr textPtr = (IntPtr)(remote.ToInt64() + 48);
-        byte[] item = new byte[48];
-        BitConverter.GetBytes((int)0x0001).CopyTo(item, 0);           // LVIF_TEXT
-        BitConverter.GetBytes(index).CopyTo(item, 4);                 // iItem
-        BitConverter.GetBytes(0).CopyTo(item, 8);                     // iSubItem
-        BitConverter.GetBytes(textPtr.ToInt64()).CopyTo(item, 24);    // pszText
-        BitConverter.GetBytes(textBytes / 2).CopyTo(item, 32);        // cchTextMax
-        int w;
-        WriteProcessMemory(h, remote, item, item.Length, out w);
-        SendMessage(lv, 0x1073, (IntPtr)index, remote);               // LVM_GETITEMTEXTW
-        byte[] buf = new byte[textBytes];
-        int r;
-        ReadProcessMemory(h, textPtr, buf, buf.Length, out r);
-        return Encoding.Unicode.GetString(buf).TrimEnd('\0');
-      } finally {
-        VirtualFreeEx(h, remote, 0, 0x8000);
-      }
+      remoteItem = VirtualAllocEx(proc, IntPtr.Zero, ITEMSIZE, MEM_COMMIT_RESERVE, PAGE_RW);
+      remoteText = VirtualAllocEx(proc, IntPtr.Zero, MAXCHARS * 2, MEM_COMMIT_RESERVE, PAGE_RW);
+      if (remoteItem == IntPtr.Zero || remoteText == IntPtr.Zero) return null;
+      byte[] data = new byte[ITEMSIZE];
+      BitConverter.GetBytes((uint)0x0001).CopyTo(data, 0);           // mask = LVIF_TEXT
+      BitConverter.GetBytes(item).CopyTo(data, 4);                    // iItem
+      BitConverter.GetBytes((int)0).CopyTo(data, 8);                  // iSubItem = 0 (the label)
+      BitConverter.GetBytes(remoteText.ToInt64()).CopyTo(data, 24);   // pszText
+      BitConverter.GetBytes(MAXCHARS).CopyTo(data, 32);               // cchTextMax
+      UIntPtr written;
+      if (!WriteProcessMemory(proc, remoteItem, data, ITEMSIZE, out written)) return null;
+      SendMessage(hwnd, LVM_GETITEMTEXTW, new IntPtr(item), remoteItem);
+      byte[] textBuf = new byte[MAXCHARS * 2];
+      UIntPtr read;
+      if (!ReadProcessMemory(proc, remoteText, textBuf, (uint)textBuf.Length, out read)) return null;
+      string text = Encoding.Unicode.GetString(textBuf, 0, (int)read.ToUInt32());
+      int nul = text.IndexOf('\0');
+      return nul >= 0 ? text.Substring(0, nul) : text;
     } finally {
-      CloseHandle(h);
+      if (remoteItem != IntPtr.Zero) VirtualFreeEx(proc, remoteItem, 0, MEM_RELEASE);
+      if (remoteText != IntPtr.Zero) VirtualFreeEx(proc, remoteText, 0, MEM_RELEASE);
+      CloseHandle(proc);
     }
   }
 
-  // MAKELPARAM(x, y) as the LVM_GETITEMPOSITION out-point.
-  public static int[] GetItemPosition(IntPtr lv, int index) {
-    int pid;
-    GetWindowThreadProcessId(lv, out pid);
-    IntPtr h = OpenProcess(0x001F0FFF, false, pid);
-    if (h == IntPtr.Zero) return null;
+  // Read an item's current position (client coords of its
+  // top-left); null when the read fails. Same cross-process
+  // technique and minimal rights as the cold script.
+  public static int[] GetItemPosition(IntPtr hwnd, int item) {
+    uint pid;
+    GetWindowThreadProcessId(hwnd, out pid);
+    IntPtr proc = OpenProcess(PROCESS_VM, false, pid);
+    if (proc == IntPtr.Zero) return null;
+    IntPtr remote = IntPtr.Zero;
     try {
-      IntPtr remote = VirtualAllocEx(h, IntPtr.Zero, 8, 0x3000, 0x04);
+      remote = VirtualAllocEx(proc, IntPtr.Zero, 8, MEM_COMMIT_RESERVE, PAGE_RW);
       if (remote == IntPtr.Zero) return null;
-      try {
-        SendMessage(lv, LVM_FIRST + 16, (IntPtr)index, remote);       // LVM_GETITEMPOSITION
-        byte[] buf = new byte[8];
-        int r;
-        ReadProcessMemory(h, remote, buf, buf.Length, out r);
-        return new int[] { BitConverter.ToInt32(buf, 0), BitConverter.ToInt32(buf, 4) };
-      } finally {
-        VirtualFreeEx(h, remote, 0, 0x8000);
-      }
+      IntPtr res = SendMessage(hwnd, LVM_GETITEMPOSITION, new IntPtr(item), remote);
+      if (res == IntPtr.Zero) return null;
+      byte[] buf = new byte[8];
+      UIntPtr read;
+      if (!ReadProcessMemory(proc, remote, buf, (uint)buf.Length, out read)) return null;
+      return new int[] { BitConverter.ToInt32(buf, 0), BitConverter.ToInt32(buf, 4) };
     } finally {
-      CloseHandle(h);
+      if (remote != IntPtr.Zero) VirtualFreeEx(proc, remote, 0, MEM_RELEASE);
+      CloseHandle(proc);
     }
   }
 
   public static void SetItemPosition(IntPtr lv, int index, int x, int y) {
     int lp = ((y & 0xFFFF) << 16) | (x & 0xFFFF);
-    SendMessage(lv, LVM_FIRST + 15, (IntPtr)index, (IntPtr)lp);         // LVM_SETITEMPOSITION
+    SendMessage(lv, LVM_SETITEMPOSITION, (IntPtr)index, (IntPtr)lp);
   }
 }
 '@
 
-# ---- Shared listview helpers (as in position-desktop-icons.ps1) ---
-function Find-PopulatedListView {
+# ---- Shared listview helpers (ported from the cold script) --------
+# Pick the candidate with the LARGEST item count (cold script
+# behaviour; v2.2 took the first non-empty one).
+function Find-BestListView {
+  $best = [IntPtr]::Zero
+  $bestCount = -1
   foreach ($cand in [OkibaDesk]::FindDesktopListViews()) {
-    if ([OkibaDesk]::GetItemCount($cand) -gt 0) { return $cand }
+    try { $c = [OkibaDesk]::GetItemCount($cand) } catch { $c = -1 }
+    if ($c -gt $bestCount) { $bestCount = $c; $best = $cand }
   }
-  return [IntPtr]::Zero
+  return $best
+}
+
+# Name matching, strategies in strict order — identical to the
+# cold script's Test-NameMatch (case-SENSITIVE exact/noext first;
+# starts-with tests the LABEL against the name, not the reverse).
+function Test-NameMatch($text, $name, $strategy) {
+  if ($null -eq $text -or $text -eq '') { return $false }
+  $noExt = [System.IO.Path]::GetFileNameWithoutExtension($name)
+  switch ($strategy) {
+    'exact'      { return $text -ceq $name }
+    'noext'      { return ($noExt -and ($text -ceq $noExt)) }
+    'ci'         { return ($text -ieq $name) -or ($noExt -and ($text -ieq $noExt)) }
+    'startswith' { return $text.StartsWith($name) -or ($noExt -and $text.StartsWith($noExt)) }
+  }
+  return $false
 }
 
 function Find-Matches([IntPtr]$lv, [string[]]$Names, [int]$count) {
-  $texts = @()
+  $texts = @{}
   for ($i = 0; $i -lt $count; $i++) {
     $t = [OkibaDesk]::GetItemText($lv, $i)
-    if ($null -eq $t) { $t = '' }
-    $texts += $t
+    if ($null -ne $t) { $texts[$i] = $t }
   }
-  $used = @{}
   $slots = @{}
-  $strategies = @('exact', 'noext', 'ci', 'startswith')
-  foreach ($strategy in $strategies) {
+  $used = @{}
+  foreach ($strategy in @('exact', 'noext', 'ci', 'startswith')) {
     for ($s = 0; $s -lt $Names.Count; $s++) {
       if ($slots.ContainsKey($s)) { continue }
-      $name = $Names[$s]
-      $base = [IO.Path]::GetFileNameWithoutExtension($name)
-      for ($i = 0; $i -lt $count; $i++) {
+      foreach ($i in $texts.Keys) {
         if ($used.ContainsKey($i)) { continue }
-        $t = $texts[$i]
-        $hit = $false
-        switch ($strategy) {
-          'exact'      { $hit = ($t -eq $name) }
-          'noext'      { $hit = ($base -ne '' -and $t -eq $base) }
-          'ci'         { $hit = ($t -ieq $name -or ($base -ne '' -and $t -ieq $base)) }
-          'startswith' { $hit = ($t -ne '' -and ($name.StartsWith($t) -or ($base -ne '' -and $base.StartsWith($t)))) }
+        if (Test-NameMatch $texts[$i] $Names[$s] $strategy) {
+          $slots[$s] = $i
+          $used[$i] = $true
+          break
         }
-        if ($hit) { $slots[$s] = $i; $used[$i] = $true; break }
       }
     }
+    if ($slots.Count -ge $Names.Count) { break }
   }
-  return @{ Slots = $slots; Texts = $texts }
+  return @{ Slots = $slots; Texts = @($texts.Values) }
 }
 
 # ---- resolveDrop (as in resolve-drop.ps1) -------------------------
@@ -246,27 +328,49 @@ function Resolve-DropTarget([int]$X, [int]$Y) {
   return @{ type = 'unknown' }
 }
 
-# ---- positionIcons (as in position-desktop-icons.ps1, tightened) --
-# Same layout rule, auto-arrange gate and set->readback->retry
-# verification, but the icon-appear poll starts immediately and runs
-# at ~50ms (the cold script polls at 200ms after a 150ms settle),
-# because after a local move the icon normally shows up at once.
+# ---- positionIcons -------------------------------------------------
+# Faithful port of position-desktop-icons.ps1's position mode:
+# ScreenToClient conversion, clamped layout anchored at the drop
+# point, rowsPerCol from the height REMAINING below the anchor,
+# auto-arrange gate on LVS_AUTOARRANGE (0x0100), and set ->
+# read-back -> retry verification with the cold script's 180ms
+# settle and <= spacing tolerance. X/Y arrive as SCREEN
+# coordinates (exactly what main passes the cold script).
+# Only the icon-appear poll differs: immediate first poll, then
+# ~50ms (the warm-helper speed point), capped at ~8s like cold.
 function Position-Icons([int]$X, [int]$Y, [string[]]$Names) {
-  $result = @{ status = 'ok'; positioned = 0 }
-  $lv = Find-PopulatedListView
-  if ($lv -eq [IntPtr]::Zero) { $result.status = 'no-listview'; return $result }
+  $result = @{ status = 'ok'; positioned = 0; detail = '' }
+  $lv = Find-BestListView
+  if ($lv -eq [IntPtr]::Zero) { $result.status = 'no-listview'; $result.detail = 'no desktop listview found'; return $result }
 
   $style = [OkibaDesk]::GetWindowLong($lv, -16) # GWL_STYLE
   if (($style -band 0x0100) -ne 0) { $result.status = 'autoarrange'; return $result }
 
   $sx = [OkibaDesk]::GetSpacingX($lv)
   $sy = [OkibaDesk]::GetSpacingY($lv)
-  if ($sx -le 0) { $sx = 78 }
-  if ($sy -le 0) { $sy = 98 }
+  if ($sx -le 0) { $sx = 100 }
+  if ($sy -le 0) { $sy = 100 }
 
-  # Wait for the moved icons to exist, first poll immediate, then
-  # ~50ms, capped like the cold script (~8s).
-  $count = 0
+  $rect = New-Object OkibaDesk+RECT
+  [void][OkibaDesk]::GetClientRect($lv, [ref]$rect)
+  $cw = $rect.Right - $rect.Left
+  $ch = $rect.Bottom - $rect.Top
+  if ($cw -le 0 -or $ch -le 0) {
+    $result.status = 'script-error'; $result.detail = 'listview has no client area'; return $result
+  }
+
+  # Layout (same rule as the cold script / lib/iconpos.js).
+  $client = [OkibaDesk]::ToClient($lv, $X, $Y)
+  $anchorX = $client[0]; $anchorY = $client[1]
+  $maxX = [Math]::Max(0, $cw - $sx)
+  $maxY = [Math]::Max(0, $ch - $sy)
+  $ax = [int][Math]::Max(0, [Math]::Min($maxX, [Math]::Round($anchorX - $sx / 2)))
+  $ay = [int][Math]::Max(0, [Math]::Min($maxY, [Math]::Round($anchorY - $sy / 2)))
+  $rowsPerCol = [int][Math]::Floor(($ch - $ay) / $sy)
+  if ($rowsPerCol -lt 1) { $rowsPerCol = 1 }
+
+  # Wait for the moved icons to appear (first poll immediate,
+  # then ~50ms, ~8s cap — cold polls at 200ms to the same cap).
   $found = $null
   $deadline = [DateTime]::UtcNow.AddSeconds(8)
   while ($true) {
@@ -282,45 +386,41 @@ function Position-Icons([int]$X, [int]$Y, [string[]]$Names) {
     return $result
   }
 
-  $rect = New-Object OkibaDesk+RECT
-  [void][OkibaDesk]::GetClientRect($lv, [ref]$rect)
-  if ($rect.Right -le 0) { $rect.Right = 1920 }
-  if ($rect.Bottom -le 0) { $rect.Bottom = 1080 }
-  $rowsPerCol = [Math]::Max(1, [Math]::Floor($rect.Bottom / $sy))
-
-  $ox = $X - [Math]::Floor($sx / 2)
-  $oy = $Y - [Math]::Floor($sy / 2)
-  if ($ox -lt 0) { $ox = 0 }
-  if ($oy -lt 0) { $oy = 0 }
-
-  # Each set is verified by reading the position back; a miss is
-  # retried twice with a short settle (cold script: 180ms).
-  for ($k = 0; $k -lt $Names.Count; $k++) {
-    if (-not $found.Slots.ContainsKey($k)) { continue }
-    $slot = [int]$found.Slots[$k]
-    $tx = $ox + [Math]::Floor($k / $rowsPerCol) * $sx
-    $ty = $oy + ($k % $rowsPerCol) * $sy
-    $okSet = $false
-    for ($attempt = 0; $attempt -lt 3 -and -not $okSet; $attempt++) {
-      [OkibaDesk]::SetItemPosition($lv, $slot, $tx, $ty)
-      Start-Sleep -Milliseconds 60
-      $pos = [OkibaDesk]::GetItemPosition($lv, $slot)
-      if ($null -ne $pos -and [Math]::Abs($pos[0] - $tx) -lt $sx -and [Math]::Abs($pos[1] - $ty) -lt $sy) {
-        $okSet = $true
+  # Place each icon, then READ BACK and retry until it sticks
+  # (align-to-grid snaps to the grid: within one spacing is a hit).
+  $verified = 0
+  foreach ($entry in $found.Slots.GetEnumerator()) {
+    $slot = [int]$entry.Key
+    $idx = [int]$entry.Value
+    $col = [Math]::Floor($slot / $rowsPerCol)
+    $row = $slot % $rowsPerCol
+    $tx = [int][Math]::Max(0, [Math]::Min($maxX, $ax + $col * $sx))
+    $ty = [int][Math]::Max(0, [Math]::Min($maxY, $ay + $row * $sy))
+    $stuck = $false
+    for ($try = 0; $try -lt 3 -and -not $stuck; $try++) {
+      [OkibaDesk]::SetItemPosition($lv, $idx, $tx, $ty)
+      Start-Sleep -Milliseconds 180
+      $pos = [OkibaDesk]::GetItemPosition($lv, $idx)
+      if ($null -ne $pos -and [Math]::Abs($pos[0] - $tx) -le $sx -and [Math]::Abs($pos[1] - $ty) -le $sy) {
+        $stuck = $true
       }
     }
-    if ($okSet) { $result.positioned += 1 }
-    else { $result["failed_$k"] = $Names[$k] }
+    if ($stuck) { $verified++ }
   }
-  if ($result.positioned -eq 0) { $result.status = 'set-unverified' }
-  elseif ($result.positioned -lt $Names.Count) { $result.status = 'partial' }
+  $result.positioned = $verified
+  if ($verified -eq 0) {
+    $result.status = 'set-unverified'
+    $result.detail = 'positions did not stick after retries'
+  } elseif ($verified -lt $Names.Count) {
+    $result.status = 'partial'
+  }
   return $result
 }
 
-# ---- getDesktopPositions (new in v2.2; intake layout lookup) ------
+# ---- getDesktopPositions (intake layout lookup) -------------------
 function Get-DesktopPositions([string[]]$Names) {
-  $out = @{ positions = @{}; sx = 78; sy = 98 }
-  $lv = Find-PopulatedListView
+  $out = @{ positions = @{}; sx = 100; sy = 100 }
+  $lv = Find-BestListView
   if ($lv -eq [IntPtr]::Zero) { return $out }
   $sx = [OkibaDesk]::GetSpacingX($lv)
   $sy = [OkibaDesk]::GetSpacingY($lv)

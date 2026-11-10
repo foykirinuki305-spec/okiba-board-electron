@@ -45,6 +45,15 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/desktop-position-test.ps1
 
+      # v2.2.1 (Job 1): the WARM HELPER path gets the same
+      # real-desktop standard. v2.2 shipped a helper whose desktop
+      # interop had drifted from the cold script and misplaced
+      # icons on the user's PC while CI only tested the cold
+      # script; a failing helper path now fails the build.
+      - name: Desktop icon positioning THROUGH the warm helper (real desktop)
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/helper-position-test.ps1
+
       - name: GUI end-to-end test (Playwright Electron, real UI operations)
         run: node tests/gui.e2e.js
         env:
@@ -114,6 +123,31 @@ jobs:
           if (-not (Test-Path $dataBoard)) { throw 'self-test did not create the data board' }
           Write-Host "Data board created at $dataBoard"
 
+          # v2.2.1: the desktop shortcut must come back on EVERY
+          # install (nsis.createDesktopShortcut: "always"). The
+          # user deleted his shortcut; an update (reinstall) has
+          # to restore it. Delete it and reinstall to prove it.
+          $desktopPath = [Environment]::GetFolderPath('Desktop')
+          function Find-AppShortcut {
+            Get-ChildItem -Path $desktopPath -Filter '*.lnk' -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -like '*OkibaBoard*' } | Select-Object -First 1
+          }
+          $lnk1 = Find-AppShortcut
+          if (-not $lnk1) { throw 'desktop shortcut was not created by the install' }
+          Write-Host "Desktop shortcut created: $($lnk1.FullName)"
+          Remove-Item $lnk1.FullName -Force
+          if (Test-Path $lnk1.FullName) { throw 'could not delete the desktop shortcut for the reinstall check' }
+          Write-Host 'Desktop shortcut deleted; reinstalling (update simulation) ...'
+          Start-Process -FilePath $setup.FullName -ArgumentList '/S', "/D=$installDir" -Wait
+          $deadline = (Get-Date).AddSeconds(90)
+          $lnk2 = $null
+          while (-not $lnk2) {
+            if ((Get-Date) -gt $deadline) { throw 'desktop shortcut was NOT recreated by the reinstall' }
+            Start-Sleep -Seconds 2
+            $lnk2 = Find-AppShortcut
+          }
+          Write-Host "Desktop shortcut recreated by reinstall: $($lnk2.FullName)"
+
           $uninstaller = Get-ChildItem -Path $installDir -Filter 'Uninstall*.exe' |
             Select-Object -First 1
           if (-not $uninstaller) { throw 'uninstaller not found in install dir' }
@@ -148,5 +182,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: desktop-position-diagnostics
-          path: desktop-position-diagnostics.txt
+          path: |
+            desktop-position-diagnostics.txt
+            helper-position-diagnostics.txt
           if-no-files-found: ignore

@@ -17,6 +17,7 @@
         <span class="brand-title">ボード</span>
       </div>
       <div class="topbar-actions">
+        <button id="historyBtn" class="pill">最近出したファイル</button>
         <button id="addBoardBtn" class="pill pill-accent">＋ ボード</button>
         <button id="homeThemeBtn" class="pill">テーマ: 紺</button>
       </div>
@@ -25,6 +26,7 @@
       <h1 class="home-heading">あなたのボード</h1>
       <p id="homeSub" class="home-sub"></p>
       <p id="migratedNotice" class="notice" hidden></p>
+      <p id="cleanupNotice" class="notice" hidden></p>
       <div id="boardGrid" class="board-grid"></div>
     </main>
   </section>
@@ -66,6 +68,17 @@
       <div class="modal-buttons">
         <button id="modalCancel" class="pill">キャンセル</button>
         <button id="modalOk" class="pill pill-accent">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="historyOverlay" class="modal-overlay" hidden>
+    <div class="modal modal-wide">
+      <h2 class="modal-title">最近出したファイル</h2>
+      <p class="modal-note">ボードから出したファイルの履歴です（最新の5回分まで）。「場所を開く」で、エクスプローラーで場所を確認できます。</p>
+      <div id="historyList" class="history-list"></div>
+      <div class="modal-buttons">
+        <button id="historyClose" class="pill">閉じる</button>
       </div>
     </div>
   </div>

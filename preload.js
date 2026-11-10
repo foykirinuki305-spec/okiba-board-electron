@@ -45,7 +45,8 @@ contextBridge.exposeInMainWorld('okiba', {
   showItem: (p) => ipcRenderer.invoke('show-item', p),
   trashItem: (p) => ipcRenderer.invoke('trash-item', p),
   renameItem: (p, newName) => ipcRenderer.invoke('rename-item', p, newName),
-  moveToDesktop: (p) => ipcRenderer.invoke('move-to-desktop', p),
+  moveToDesktop: (p, boardName, groupId) =>
+    ipcRenderer.invoke('move-to-desktop', p, boardName, groupId),
   dropFiles: (boardName, paths, placeOpts) =>
     ipcRenderer.invoke('drop-files', boardName, paths, placeOpts),
 
@@ -56,8 +57,20 @@ contextBridge.exposeInMainWorld('okiba', {
   // `linkedPaths` (v2.1: a real move + detach for them too).
   // cursorPoint is the OS cursor position (backup signal).
   resolveDropMove: (payload) => ipcRenderer.invoke('resolve-drop-move', payload),
-  moveLinkedToDesktop: (boardName, paths) =>
-    ipcRenderer.invoke('move-linked-to-desktop', boardName, paths),
+  moveLinkedToDesktop: (boardName, paths, groupId) =>
+    ipcRenderer.invoke('move-linked-to-desktop', boardName, paths, groupId),
+
+  // move-out history (v2.2.1): grouped by move operation (newest 5).
+  // 「場所を開く」 reuses showItem above (shell.showItemInFolder).
+  getMoveHistory: () => ipcRenderer.invoke('get-move-history'),
+  restoreHistoryGroup: (groupId) =>
+    ipcRenderer.invoke('restore-history-group', groupId),
+  restoreHistoryItem: (groupId, destPath) =>
+    ipcRenderer.invoke('restore-history-item', groupId, destPath),
+  discardHistoryItem: (groupId, destPath) =>
+    ipcRenderer.invoke('discard-history-item', groupId, destPath),
+  discardHistoryGroup: (groupId) =>
+    ipcRenderer.invoke('discard-history-group', groupId),
   cursorPoint: () => ipcRenderer.invoke('cursor-point'),
   // test hook: read back main's resolve/move invocation log
   dropLog: () => ipcRenderer.invoke('test-droplog'),

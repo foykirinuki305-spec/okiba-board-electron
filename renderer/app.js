@@ -201,6 +201,11 @@ function renderHome() {
     notice.hidden = false;
     notice.textContent = `前の版から ${homeData.migrated} 件のボードを引き継ぎました`;
   } else notice.hidden = true;
+  const cnotice = $('cleanupNotice');
+  if (homeData.cleaned > 0) {
+    cnotice.hidden = false;
+    cnotice.textContent = `古いバージョンのファイルを ${homeData.cleaned} 件片付けました`;
+  } else cnotice.hidden = true;
   boardGrid.innerHTML = '';
   for (const b of boards) {
     const card = document.createElement('div');
@@ -496,7 +501,7 @@ function renderBoard() {
           { label: '名前を変更', action: () => renameItemFlow(key, fullPath, label) },
           { label: '場所を開く', action: () => api.showItem(fullPath) },
           { label: 'デスクトップへ移動', action: async () => {
-              await api.moveToDesktop(fullPath); refreshBoard();
+              await api.moveToDesktop(fullPath, boardData.name); refreshBoard();
             } },
           { label: 'ゴミ箱へ削除', danger: true, action: async () => {
               await api.trashItem(fullPath); refreshBoard();
@@ -592,12 +597,18 @@ async function takeOutSelection() {
   const linkedPaths = keys.filter((k) => k.startsWith('link:')).map((k) => k.slice(5));
   const residentPaths = keys.filter((k) => k.startsWith('file:'))
     .map(pathOfKey).filter(Boolean);
+  // One user operation = ONE history group (v2.2.1): a shared
+  // operation id threads through every IPC call this take-out
+  // makes, and main merges them into a single history entry.
+  const groupId = 'op-' + Date.now().toString(36) + '-' +
+    Math.floor(Math.random() * 0xffffff).toString(36);
   if (linkedPaths.length) {
-    try { await api.moveLinkedToDesktop(boardData.name, linkedPaths); }
+    try { await api.moveLinkedToDesktop(boardData.name, linkedPaths, groupId); }
     catch (e) { toast(String(e.message || e)); }
   }
   for (const p of residentPaths) {
-    try { await api.moveToDesktop(p); } catch (e) { toast(String(e.message || e)); }
+    try { await api.moveToDesktop(p, boardData.name, groupId); }
+    catch (e) { toast(String(e.message || e)); }
   }
   refreshBoard();
 }
@@ -879,7 +890,179 @@ async function openBoard(name) {
   renderBoard();
 }
 
+// ==================================================== MOVE HISTORY
+// 「最近出したファイル」 (v2.2.1): one row per move OPERATION
+// (a group — a bulk move-out is one row, not one per file). The
+// primary per-file action is 「場所を開く」 (Explorer opens with
+// the file selected — the direct answer to 「どこに行ったか
+// 分からない」); 「まとめてボードに戻す」 restores the whole
+// group at its original cells, and expanding a row allows
+// per-file restore. Files that vanished from their recorded
+// destination show 「見つかりません」 and can only be discarded.
+function fmtHistoryDate(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${d.getMonth() + 1}/${d.getDate()} ` +
+    `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+function historyDestLabel(item) {
+  return item.onDesktop ? 'デスクトップ' : `${item.destDirName}（${item.destDir}）`;
+}
+
+async function renderHistory() {
+  let groups = [];
+  try { groups = await api.getMoveHistory(); } catch (e) { groups = []; }
+  const list = $('historyList');
+  list.innerHTML = '';
+  if (!groups.length) {
+    const p = document.createElement('p');
+    p.className = 'modal-note';
+    p.textContent = 'まだ履歴はありません';
+    list.appendChild(p);
+    return;
+  }
+  for (const g of groups) list.appendChild(historyGroupEl(g));
+}
+
+function historyGroupEl(g) {
+  const wrap = document.createElement('div');
+  wrap.className = 'history-group';
+  wrap.dataset.gid = g.id;
+  const head = document.createElement('div');
+  head.className = 'history-head';
+  const title = document.createElement('div');
+  title.className = 'history-title';
+  const first = g.items[0];
+  title.textContent = first.fileName +
+    (g.items.length > 1 ? ` ほか ${g.items.length - 1} 件` : '');
+  title.title = g.items.map((i) => i.fileName).join('\n');
+  const meta = document.createElement('div');
+  meta.className = 'history-meta';
+  const sameDir = g.items.every((i) => i.destDir === first.destDir);
+  meta.textContent = `${fmtHistoryDate(g.at)} ・ 行き先: ` +
+    (sameDir ? historyDestLabel(first) : '複数のフォルダ') +
+    ` ・ 元のボード: ${g.boardName}`;
+  head.append(title, meta);
+
+  const actions = document.createElement('div');
+  actions.className = 'history-actions';
+  const restoreBtn = document.createElement('button');
+  restoreBtn.className = 'pill pill-accent pill-small';
+  restoreBtn.dataset.act = 'restore-group';
+  restoreBtn.textContent = `まとめてボードに戻す（${g.boardName}）`;
+  restoreBtn.disabled = !g.items.some((i) => i.exists);
+  restoreBtn.addEventListener('click', async () => {
+    restoreBtn.disabled = true;
+    try {
+      const r = await api.restoreHistoryGroup(g.id);
+      if (r && r.restored && r.restored.length) {
+        toast(`${r.restored.length} 件を『${g.boardName}』に戻しました`);
+      } else if (r && r.error === 'board-missing') {
+        toast('元のボードが見つかりませんでした');
+      } else {
+        toast('戻せるファイルがありませんでした');
+      }
+      if (r && r.missing && r.missing.length && r.restored && r.restored.length) {
+        toast(`${r.restored.length} 件を戻しました（${r.missing.length} 件は見つかりませんでした）`);
+      }
+    } catch (e) { toast(String(e.message || e)); }
+    await renderHistory();
+    refreshHome();
+  });
+  const toggleBtn = document.createElement('button');
+  toggleBtn.className = 'pill pill-small';
+  toggleBtn.dataset.act = 'toggle';
+  toggleBtn.textContent = '中身を見る';
+  const discardBtn = document.createElement('button');
+  discardBtn.className = 'pill pill-small';
+  discardBtn.dataset.act = 'discard-group';
+  discardBtn.textContent = 'この履歴を消す';
+  discardBtn.addEventListener('click', async () => {
+    try { await api.discardHistoryGroup(g.id); } catch (e) {}
+    await renderHistory();
+  });
+  actions.append(restoreBtn, toggleBtn, discardBtn);
+
+  const itemsBox = document.createElement('div');
+  itemsBox.className = 'history-items';
+  itemsBox.hidden = g.items.length !== 1; // single-item groups start open
+  if (g.items.length === 1) toggleBtn.textContent = '閉じる';
+  toggleBtn.addEventListener('click', () => {
+    itemsBox.hidden = !itemsBox.hidden;
+    toggleBtn.textContent = itemsBox.hidden ? '中身を見る' : '閉じる';
+  });
+  for (const item of g.items) itemsBox.appendChild(historyItemEl(g, item));
+  wrap.append(head, actions, itemsBox);
+  return wrap;
+}
+
+function historyItemEl(g, item) {
+  const row = document.createElement('div');
+  row.className = 'history-item' + (item.exists ? '' : ' missing');
+  const nm = document.createElement('span');
+  nm.className = 'history-item-name';
+  nm.textContent = item.fileName;
+  nm.title = item.destPath;
+  row.appendChild(nm);
+  if (item.exists) {
+    const openBtn = document.createElement('button');
+    openBtn.className = 'pill pill-accent pill-small';
+    openBtn.dataset.act = 'open-loc';
+    openBtn.textContent = '場所を開く';
+    openBtn.addEventListener('click', () => {
+      api.showItem(item.destPath).catch((e) => toast(String(e.message || e)));
+    });
+    const backBtn = document.createElement('button');
+    backBtn.className = 'pill pill-small';
+    backBtn.dataset.act = 'restore-item';
+    backBtn.textContent = 'このファイルだけ戻す';
+    backBtn.addEventListener('click', async () => {
+      backBtn.disabled = true;
+      try {
+        const r = await api.restoreHistoryItem(g.id, item.destPath);
+        if (r && r.restored && r.restored.length) {
+          toast(`『${item.fileName}』を『${g.boardName}』に戻しました`);
+        } else toast('戻せませんでした');
+      } catch (e) { toast(String(e.message || e)); }
+      await renderHistory();
+      refreshHome();
+    });
+    row.append(openBtn, backBtn);
+  } else {
+    const miss = document.createElement('span');
+    miss.className = 'history-missing';
+    miss.textContent = '見つかりません';
+    const delBtn = document.createElement('button');
+    delBtn.className = 'pill pill-small';
+    delBtn.dataset.act = 'discard-item';
+    delBtn.textContent = '履歴から消す';
+    delBtn.addEventListener('click', async () => {
+      try { await api.discardHistoryItem(g.id, item.destPath); } catch (e) {}
+      await renderHistory();
+    });
+    row.append(miss, delBtn);
+  }
+  return row;
+}
+
+async function openHistory() {
+  busy = true;
+  $('historyOverlay').hidden = false;
+  await renderHistory();
+}
+function closeHistory() {
+  $('historyOverlay').hidden = true;
+  busy = false;
+}
+
 // ------------------------------------------------------------ events
+$('historyBtn').addEventListener('click', () => {
+  openHistory().catch(() => { busy = false; });
+});
+$('historyClose').addEventListener('click', closeHistory);
+$('historyOverlay').addEventListener('mousedown', (e) => {
+  if (e.target === $('historyOverlay')) closeHistory();
+});
 $('backBtn').addEventListener('click', async () => {
   view = 'home';
   boardView.hidden = true;

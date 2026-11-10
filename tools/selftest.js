@@ -133,6 +133,22 @@ function main() {
     ok(bf.loadHome(base).theme === '紫夜', 'theme preserved on position-only save');
   }
 
+  // ---------- home appVersion marker (v2.2.1 cleanup trigger) ----------
+  {
+    const base = tmp();
+    ok(bf.loadHome(base).appVersion === null, 'appVersion absent on a fresh base');
+    bf.saveHome(base, {}, '紺', '2.2.0');
+    ok(bf.loadHome(base).appVersion === '2.2.0', 'appVersion roundtrips');
+    bf.saveHome(base, { 'ボード1': [1, 1] }); // no version arg -> preserved
+    ok(bf.loadHome(base).appVersion === '2.2.0',
+      'appVersion preserved on a plain position save');
+    bf.saveHome(base, {}, undefined, '2.2.1'); // the cleanup stamp
+    ok(bf.loadHome(base).appVersion === '2.2.1', 'appVersion stamp overwrites');
+    const raw = JSON.parse(fs.readFileSync(path.join(base, bf.HOME_FILENAME), 'utf8'));
+    ok(raw.appVersion === '2.2.1' && raw.theme === '紺',
+      'appVersion stored alongside theme in .home.json');
+  }
+
   // ---------- intake: unique name " (2)" ----------
   {
     const folder = tmp();
@@ -211,6 +227,9 @@ async function dropmoveMain() {
        path.basename(r.destinations[0]) === 'a (2).txt' &&
        fs.existsSync(r.destinations[0]),
       'moveOut: destination path reported (for icon positioning)');
+    ok(Array.isArray(r.pairs) && r.pairs.length === 1 &&
+       r.pairs[0].src === src && r.pairs[0].dest === r.destinations[0],
+      'moveOut: src->dest pairs reported (for the move history)');
   }
 
   // ---------- moveItemsOut: item already inside target is skipped ----------
@@ -1001,6 +1020,185 @@ async function shellhelperMain() {
   delete process.env.OKIBA_FAKE_LANDING;
 }
 
+// ------------------------------------------------ cleanup (v2.2.1 Job 2)
+const cu = require('../lib/cleanup');
+
+function cleanupMain() {
+  console.log('\n[cleanup] update auto-cleanup decisions (v2.2.1, Job 2)');
+  // ---------- version gate ----------
+  {
+    ok(cu.shouldRunCleanup('2.2.1', null) === true, 'cleanup gate: no marker -> run (first run)');
+    ok(cu.shouldRunCleanup('2.2.1', '2.2.0') === true, 'cleanup gate: version changed -> run');
+    ok(cu.shouldRunCleanup('2.2.1', '2.2.1') === false, 'cleanup gate: same version -> no-op');
+    ok(cu.shouldRunCleanup('', null) === false, 'cleanup gate: unknown current version -> never run');
+  }
+  // ---------- loose exe files ----------
+  {
+    const plan = cu.planCleanup({
+      desktopFiles: [
+        '/desk/OkibaBoard.exe',
+        '/desk/OkibaBoard-Setup-2.0.0.exe',
+        '/desk/other.txt',
+        '/desk/OkibaBoard-Setup.exe', // no "-<version>" part: NOT ours
+        '/desk/okibaboard.exe', // case differs: not an exact name
+      ],
+      downloadsFiles: ['/dl/OkibaBoard.exe', '/dl/OkibaBoard-Setup-2.2.0.exe'],
+      shortcuts: [],
+      execPath: '/apps/installed/OkibaBoard.exe',
+    });
+    ok(plan.deleteFiles.length === 4 &&
+       plan.deleteFiles.includes('/desk/OkibaBoard.exe') &&
+       plan.deleteFiles.includes('/desk/OkibaBoard-Setup-2.0.0.exe') &&
+       plan.deleteFiles.includes('/dl/OkibaBoard.exe') &&
+       plan.deleteFiles.includes('/dl/OkibaBoard-Setup-2.2.0.exe'),
+      'cleanup plan: loose portable + setup exes in both folders are deleted');
+    ok(!plan.deleteFiles.includes('/desk/other.txt') &&
+       !plan.deleteFiles.includes('/desk/OkibaBoard-Setup.exe') &&
+       !plan.deleteFiles.includes('/desk/okibaboard.exe'),
+      'cleanup plan: unrelated and near-miss names are kept');
+  }
+  // ---------- portable self-preservation ----------
+  {
+    const plan = cu.planCleanup({
+      desktopFiles: ['/desk/OkibaBoard.exe'],
+      downloadsFiles: ['/dl/OkibaBoard.exe'],
+      shortcuts: [],
+      execPath: '/desk/OkibaBoard.exe', // the portable IS the runner
+    });
+    ok(plan.deleteFiles.length === 1 && plan.deleteFiles[0] === '/dl/OkibaBoard.exe',
+      'cleanup plan: the running portable exe itself is never deleted');
+  }
+  // ---------- shortcuts: stale delete / board heal / current keep ----------
+  {
+    const execPath = '/apps/installed/OkibaBoard.exe';
+    const plan = cu.planCleanup({
+      desktopFiles: [], downloadsFiles: [],
+      shortcuts: [
+        { lnkPath: '/desk/OkibaBoard.lnk', target: '/old/OkibaBoard.exe', args: '' },
+        { lnkPath: '/desk/素材ボード.lnk', target: '/old/OkibaBoard.exe',
+          args: '--board-path="C:\\OkibaBoards\\素材ボード"', icon: '/old/OkibaBoard.exe' },
+        { lnkPath: '/desk/現行ボード.lnk', target: execPath,
+          args: '--board-path="C:\\OkibaBoards\\現行"' },
+        { lnkPath: '/desk/インストーラー.lnk', target: '/dl/OkibaBoard-Setup-2.0.0.exe', args: '' },
+        { lnkPath: '/desk/無関係.lnk', target: '/other/app.exe', args: '--board-path="C:\\x"' },
+        // The shortcut the NSIS installer just created: target IS
+        // the running exe -> keep (v2.2.1 shortcut spec, point 2).
+        { lnkPath: '/desk/OkibaBoard現行.lnk', target: execPath, args: '' },
+      ],
+      execPath,
+    });
+    ok(plan.deleteShortcuts.length === 2 &&
+       plan.deleteShortcuts.includes('/desk/OkibaBoard.lnk') &&
+       plan.deleteShortcuts.includes('/desk/インストーラー.lnk'),
+      'cleanup plan: stale app + installer shortcuts are deleted');
+    ok(plan.healShortcuts.length === 1 &&
+       plan.healShortcuts[0].lnkPath === '/desk/素材ボード.lnk' &&
+       plan.healShortcuts[0].args.includes('--board-path'),
+      'cleanup plan: an old board shortcut is HEALED, args preserved');
+    const touched = [...plan.deleteShortcuts, ...plan.healShortcuts.map((h) => h.lnkPath)];
+    ok(!touched.includes('/desk/現行ボード.lnk') &&
+       !touched.includes('/desk/無関係.lnk') &&
+       !touched.includes('/desk/OkibaBoard現行.lnk'),
+      'cleanup plan: current-exe shortcuts (incl. the installer-made one) and unrelated shortcuts are untouched');
+  }
+}
+
+// ------------------------------------------------ move history (v2.2.1 Job 3)
+const mhist = require('../lib/movehistory');
+
+function movehistoryMain() {
+  console.log('\n[movehistory] grouped move-out history (v2.2.1, Job 3)');
+  const item = (name, kind) => ({
+    kind: kind || 'resident',
+    destPath: '/landing/' + name,
+    fileName: name, col: 1, row: 2,
+  });
+  // ---------- record + persistence ----------
+  {
+    const base = tmp();
+    mhist.recordItems(base, {
+      boardName: 'ボードA', boardFolder: '/base/ボードA',
+      items: [item('a.txt')],
+    });
+    ok(fs.existsSync(path.join(base, mhist.HISTORY_FILENAME)),
+      'history: stored in .move-history.json under the base');
+    const loaded = mhist.loadHistory(base);
+    ok(loaded.length === 1 && loaded[0].boardName === 'ボードA' &&
+       loaded[0].items.length === 1 && loaded[0].items[0].col === 1 &&
+       loaded[0].items[0].row === 2 && loaded[0].items[0].kind === 'resident',
+      'history: one group roundtrips with board, kind and cell');
+  }
+  // ---------- cap: newest 5 OPERATIONS (groups), not 5 files ----------
+  {
+    const base = tmp();
+    for (let i = 1; i <= 6; i++) {
+      mhist.recordItems(base, {
+        id: 'g' + i, boardName: 'B', boardFolder: '/b',
+        items: [item('f' + i + '.txt'), item('f' + i + 'b.txt'), item('f' + i + 'c.txt')],
+      });
+    }
+    const loaded = mhist.loadHistory(base);
+    ok(loaded.length === 5 && mhist.MAX_GROUPS === 5,
+      'history: cap is the newest 5 operations');
+    ok(loaded[0].id === 'g6' && loaded[4].id === 'g2',
+      'history: oldest operation is pushed out, newest first');
+    ok(loaded.every((g) => g.items.length === 3),
+      'history: a 3-file group counts as ONE operation');
+  }
+  // ---------- shared operation id merges into ONE group ----------
+  {
+    const base = tmp();
+    mhist.recordItems(base, {
+      id: 'op-1', boardName: 'B', boardFolder: '/b', items: [item('linked.txt', 'linked')],
+    });
+    mhist.recordItems(base, {
+      id: 'op-1', boardName: 'B', boardFolder: '/b', items: [item('resident.txt')],
+    });
+    const loaded = mhist.loadHistory(base);
+    ok(loaded.length === 1 && loaded[0].items.length === 2 &&
+       loaded[0].items[0].kind === 'linked' && loaded[0].items[1].kind === 'resident',
+      'history: one multi-part operation (linked + resident calls) is ONE group');
+  }
+  // ---------- restore planning: exists partition ----------
+  {
+    const group = {
+      id: 'x', boardName: 'B', boardFolder: '/b',
+      items: [item('here.txt'), item('gone.txt', 'linked')],
+    };
+    const plan = mhist.planRestore(group, (p) => p.endsWith('here.txt'));
+    ok(plan.restorable.length === 1 && plan.restorable[0].fileName === 'here.txt' &&
+       plan.missing.length === 1 && plan.missing[0].fileName === 'gone.txt',
+      'history: planRestore splits restorable vs 見つかりません');
+  }
+  // ---------- removal: restored items leave, empty groups vanish ----------
+  {
+    const base = tmp();
+    mhist.recordItems(base, {
+      id: 'rm', boardName: 'B', boardFolder: '/b',
+      items: [item('one.txt'), item('two.txt')],
+    });
+    mhist.removeItems(base, 'rm', ['/landing/one.txt']);
+    let loaded = mhist.loadHistory(base);
+    ok(loaded.length === 1 && loaded[0].items.length === 1 &&
+       loaded[0].items[0].fileName === 'two.txt',
+      'history: restoring one item keeps the rest of its group');
+    mhist.removeItems(base, 'rm', ['/landing/two.txt']);
+    loaded = mhist.loadHistory(base);
+    ok(loaded.length === 0, 'history: a group emptied by restores disappears');
+    mhist.recordItems(base, { id: 'rm2', boardName: 'B', boardFolder: '/b', items: [item('z.txt')] });
+    mhist.removeGroup(base, 'rm2');
+    ok(mhist.loadHistory(base).length === 0, 'history: removeGroup discards a whole entry');
+    ok(mhist.findGroup(base, 'rm2') === null, 'history: findGroup misses a discarded group');
+  }
+  // ---------- corrupted file never breaks loading ----------
+  {
+    const base = tmp();
+    fs.writeFileSync(path.join(base, mhist.HISTORY_FILENAME), '{oops');
+    ok(Array.isArray(mhist.loadHistory(base)) && mhist.loadHistory(base).length === 0,
+      'history: corrupted json loads as empty');
+  }
+}
+
 (async () => {
   try {
     main();
@@ -1010,6 +1208,8 @@ async function shellhelperMain() {
     shortcutMain();
     placementMain();
     await shellhelperMain();
+    cleanupMain();
+    movehistoryMain();
     console.log('\nselftest: ' + passed + ' checks passed');
   } catch (e) {
     console.error(e.message || e);
