@@ -16,10 +16,23 @@
     "portable": {
       "artifactName": "OkibaBoard.exe"
     },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "runAfterFinish": false,
+      "artifactName": "OkibaBoard-Setup-${version}.exe"
+    },
     "productName": "OkibaBoard",
     "win": {
-      "artifactName": "OkibaBoard.exe",
       "target": [
+        {
+          "arch": [
+            "x64"
+          ],
+          "target": "nsis"
+        },
         {
           "arch": [
             "x64"
@@ -48,10 +61,10 @@
   "main": "main.js",
   "name": "okiba-board",
   "scripts": {
-    "build": "electron-builder --win portable",
+    "build": "electron-builder --win",
     "selftest": "node tools/selftest.js",
     "test:gui": "node tests/gui.e2e.js",
     "start": "electron ."
   },
-  "version": "1.3.1"
+  "version": "2.0.0"
 }

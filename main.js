@@ -5,6 +5,11 @@ const path = require('path');
 const bf = require('./lib/boardfs');
 const dm = require('./lib/dropmove');
 const ip = require('./lib/iconpos');
+const ln = require('./lib/links');
+
+// Hidden-attribute runner for linked items (v2.0). Real attrib.exe
+// in production; OKIBA_TEST_ATTRIB=stub swaps in the counting stub.
+const attrib = ln.attribRunnerFromEnv();
 
 // ------------------------------------------------------------------ paths
 let BASE = null;
@@ -77,22 +82,63 @@ async function thumbnailFor(fullPath, px) {
   return url;
 }
 
+// Startup speed: the home screen must paint BEFORE thumbnails are
+// generated (a cold thumbnail cache used to block the first render
+// of the board list). peekThumb returns only what is already cached
+// and schedules real generation in the background; when a fresh
+// thumbnail lands, a debounced fs-changed lets the renderer swap the
+// fallback tiles for the collage.
+let thumbNotifyTimer = null;
+function notifyThumbsReady() {
+  clearTimeout(thumbNotifyTimer);
+  thumbNotifyTimer = setTimeout(() => {
+    if (win && !win.isDestroyed()) win.webContents.send('fs-changed');
+  }, 300);
+}
+function peekThumb(fullPath, px) {
+  let stat;
+  try { stat = fs.statSync(fullPath); } catch (e) { return null; }
+  if (!stat.isFile()) return null;
+  const key = fullPath + '|' + stat.mtimeMs + '|' + px;
+  if (thumbCache.has(key)) return thumbCache.get(key);
+  thumbnailFor(fullPath, px)
+    .then((url) => { if (url) notifyThumbsReady(); })
+    .catch(() => {});
+  return null;
+}
+
 async function boardPreview(boardName) {
   const folder = path.join(BASE, boardName);
   let entries = [];
   try { entries = bf.scanFolder(folder); } catch (e) {}
+  let data = { links: [] };
+  try { data = bf.loadBoard(folder); } catch (e) {}
+  // Unified item list: residents (physical, from the folder scan)
+  // first, then linked items (references to original paths; skip
+  // missing ones for the collage).
+  const items = entries.map((e) => ({
+    name: e.name, isDir: e.isDir, fullPath: path.join(folder, e.name),
+  }));
+  for (const l of data.links || []) {
+    const st = ln.statLink(l.path);
+    if (!st.exists) continue;
+    items.push({ name: path.basename(l.path), isDir: st.isDir, fullPath: l.path });
+  }
   const thumbs = [];
   const kinds = [];
-  for (const e of entries) {
+  for (const e of items) {
     if (kinds.length < 6) kinds.push(kindOf(e.name, e.isDir));
     if (thumbs.length >= 6) continue;
     const kind = kindOf(e.name, e.isDir);
     if (kind === 'image' || kind === 'video') {
-      const url = await thumbnailFor(path.join(folder, e.name), 220);
+      // Cache-first (see peekThumb): never block first paint on
+      // thumbnail generation; missing ones arrive via fs-changed.
+      const url = peekThumb(e.fullPath, 220);
       if (url) thumbs.push(url);
     }
   }
-  return { name: boardName, count: entries.length, thumbs, kinds };
+  const count = entries.length + (data.links || []).length;
+  return { name: boardName, count, thumbs, kinds };
 }
 
 // ----------------------------------------------------------------- state
@@ -124,7 +170,22 @@ function boardState(boardName) {
     entries: entries.map((e) => Object.assign(e, {
       kind: kindOf(e.name, e.isDir),
       path: path.join(folder, e.name),
+      itemKind: 'resident',
     })),
+    links: (data.links || []).map((l) => {
+      const st = ln.statLink(l.path);
+      const name = path.basename(l.path);
+      return {
+        path: l.path,
+        name,
+        isDir: st.isDir,
+        kind: kindOf(name, st.isDir),
+        exists: st.exists,
+        wasHidden: !!l.wasHidden,
+        col: l.col, row: l.row,
+        itemKind: 'linked',
+      };
+    }),
     positions: data.positions,
     notes: data.notes,
     sizePercent: data.sizePercent,
@@ -213,7 +274,15 @@ function registerIpc() {
     return boardsState();
   });
   ipcMain.handle('trash-board', async (_e, name) => {
-    await shell.trashItem(guardBoard(name));
+    const folder = guardBoard(name);
+    // Linked originals are NOT in the folder and must survive board
+    // deletion untouched — but their Hidden attribute (if we set it)
+    // is released once no remaining board links them.
+    let heldLinks = [];
+    try { heldLinks = bf.loadBoard(folder).links; } catch (e) {}
+    await shell.trashItem(folder);
+    try { await ln.releaseBoardLinks({ base: BASE, links: heldLinks, attrib }); }
+    catch (e) { /* releasing visibility must never block deletion */ }
     return boardsState();
   });
   ipcMain.handle('open-board-folder', async (_e, name) => {
@@ -231,8 +300,72 @@ function registerIpc() {
     return true;
   });
 
-  ipcMain.handle('save-board', (_e, name, positions, notes, sizePercent) => {
-    bf.saveBoard(guardBoard(name), positions, notes, sizePercent);
+  ipcMain.handle('save-board', (_e, name, positions, notes, sizePercent, links) => {
+    bf.saveBoard(guardBoard(name), positions, notes, sizePercent, links || []);
+    return true;
+  });
+
+  // ------------------------- linked items (v2.0 "link + hide")
+  // Intake NO LONGER moves files into the board folder. The file
+  // stays at its original path; the board stores a reference and the
+  // original gets the Hidden attribute so it disappears visually.
+  ipcMain.handle('link-files', async (_e, boardName, paths) => {
+    const folder = guardBoard(boardName);
+    const result = { added: [], duplicates: [], skipped: [], attribFailed: [] };
+    for (const p of paths || []) {
+      if (!p || !fs.existsSync(p)) { result.skipped.push(p); continue; }
+      // A file already physically inside this board folder is a
+      // resident — it is already on the board, nothing to link.
+      if (path.resolve(path.dirname(p)) === path.resolve(folder)) {
+        result.skipped.push(p);
+        continue;
+      }
+      const r = await ln.addLink({ base: BASE, boardFolder: folder, targetPath: p, attrib });
+      if (r.duplicate) result.duplicates.push(p);
+      else {
+        result.added.push(p);
+        if (!r.attribOk) result.attribFailed.push(p);
+      }
+    }
+    if (result.added.length && win && !win.isDestroyed()) {
+      win.webContents.send('fs-changed');
+    }
+    return result;
+  });
+  ipcMain.handle('unlink-items', async (_e, boardName, paths) => {
+    const folder = guardBoard(boardName);
+    const results = await ln.removeLinks({
+      base: BASE, boardFolder: folder, targetPaths: paths || [], attrib,
+    });
+    if (win && !win.isDestroyed()) win.webContents.send('fs-changed');
+    return results;
+  });
+  ipcMain.handle('rename-linked', async (_e, boardName, oldPath, newName) => {
+    const folder = guardBoard(boardName);
+    const cleaned = bf.validateBoardName(newName); // same invalid-char rules
+    const dest = path.join(path.dirname(oldPath), cleaned);
+    if (fs.existsSync(dest)) throw new Error('同じ名前のものがあります');
+    const data = bf.loadBoard(folder);
+    const link = data.links.find((l) => ln.samePath(l.path, oldPath));
+    if (!link) throw new Error('リンクが見つかりません');
+    fs.renameSync(oldPath, dest); // real rename of the original file
+    link.path = dest;
+    bf.saveBoard(folder, data.positions, data.notes, data.sizePercent, data.links);
+    return dest;
+  });
+  ipcMain.handle('trash-linked', async (_e, boardName, targetPath) => {
+    const folder = guardBoard(boardName);
+    // Explicit REAL-file delete (distinct from ボードから外す）:
+    // trash the original, then drop the reference. No unhide needed
+    // or wanted — the file itself is gone.
+    await shell.trashItem(targetPath);
+    const data = bf.loadBoard(folder);
+    const before = data.links.length;
+    data.links = data.links.filter((l) => !ln.samePath(l.path, targetPath));
+    if (data.links.length !== before) {
+      bf.saveBoard(folder, data.positions, data.notes, data.sizePercent, data.links);
+    }
+    if (win && !win.isDestroyed()) win.webContents.send('fs-changed');
     return true;
   });
 
@@ -391,6 +524,15 @@ function registerIpc() {
     try { return screen.getCursorScreenPoint(); } catch (e) { return null; }
   });
   ipcMain.handle('test-droplog', () => dropLog);
+  // Test hook: when the attrib runner is the stub, expose its call
+  // log so tests can verify +H / -H without a Windows shell.
+  ipcMain.handle('test-attrib', () => {
+    if (!attrib || !Array.isArray(attrib.calls)) return null;
+    return {
+      calls: attrib.calls,
+      hidden: Object.fromEntries(attrib.state || []),
+    };
+  });
 }
 
 app.whenReady().then(async () => {

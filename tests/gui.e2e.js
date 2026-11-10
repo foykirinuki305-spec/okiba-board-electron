@@ -434,6 +434,109 @@ async function main() {
   assert(!data3.positions['デスクトップ移動.txt'], 'no stale position after desktop drop');
   await app3.close();
 
+  // ------------------------------------------------------------ run 4
+  // v2.0 "link + hide": intake registers a reference; the original
+  // file NEVER moves. On the Windows runner the REAL attrib command
+  // is used, so the Hidden attribute is set/cleared for real and
+  // read back here.
+  const attribHidden = (p) => {
+    const { execFileSync } = require('child_process');
+    const out = execFileSync('attrib', [p], { encoding: 'utf8' });
+    const idx = out.toLowerCase().indexOf(p.toLowerCase());
+    const prefix = idx >= 0 ? out.slice(0, idx) : out.slice(0, 12);
+    return prefix.toUpperCase().includes('H');
+  };
+  const originDir = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-origin-'));
+  const originFile = path.join(originDir, '外部素材.txt');
+  fs.writeFileSync(originFile, 'linked material');
+
+  step('linked intake (v2.0): file stays at origin, card appears');
+  const app4 = await launch();
+  page = await app4.firstWindow();
+  page.on('pageerror', (e) => console.log('  [pageerror]', e.message));
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click(`#boardGrid .board-card[data-name="${boardName}"]`);
+  await page.waitForSelector('#boardView:not([hidden]) .item');
+  const linkRes = await page.evaluate(
+    (arg) => window.okiba.linkFiles(arg.board, [arg.p]),
+    { board: boardName, p: originFile });
+  assert(linkRes.added.length === 1, 'linkFiles registered the intake');
+  assert(linkRes.attribFailed.length === (process.platform === 'win32' ? 0 : linkRes.attribFailed.length),
+    'attrib outcome recorded');
+  assert(fs.existsSync(originFile), 'origin file still exists (NOT moved)');
+  assert(!fs.existsSync(path.join(boardDir, '外部素材.txt')),
+    'file was NOT copied/moved into the board folder');
+  await waitFor(async () => {
+    const ns = await page.locator('.item .name').allTextContents();
+    return ns.some((t) => t.includes('外部素材'));
+  }, 'linked card appears on the board');
+  const jsonAfterLink = readJson(path.join(boardDir, '.okiba-board.json'));
+  const linkRec = (jsonAfterLink.links || []).find((l) => l.path === originFile);
+  assert(!!linkRec && typeof linkRec.wasHidden === 'boolean',
+    'json link recorded with a wasHidden flag');
+  assert(linkRec.wasHidden === false, 'wasHidden=false for a normal visible file');
+  if (process.platform === 'win32') {
+    assert(attribHidden(originFile) === true,
+      'origin carries the Hidden attribute (real attrib)');
+  } else {
+    console.log('  skip - real attrib read-back runs on the Windows CI runner');
+  }
+
+  step('unlink via context menu: card gone, origin intact, hidden cleared');
+  await page.locator('.item', { hasText: '外部素材' }).first().click({ button: 'right' });
+  await page.waitForSelector('#ctxMenu:not([hidden]) .ctx-item');
+  const linkMenu = await page.locator('#ctxMenu .ctx-item').allTextContents();
+  assert(linkMenu.some((t) => t.includes('ボードから外す')), 'linked menu has ボードから外す');
+  assert(linkMenu.some((t) => t.includes('ファイルをゴミ箱へ削除')),
+    'linked menu has the explicit real-file delete');
+  assert(!linkMenu.some((t) => t.includes('デスクトップへ移動')),
+    'linked menu has NO desktop-move (the file must not move)');
+  await page.locator('#ctxMenu .ctx-item', { hasText: 'ボードから外す' })
+    .dispatchEvent('mousedown');
+  await waitFor(async () => {
+    const ns = await page.locator('.item .name').allTextContents();
+    return !ns.some((t) => t.includes('外部素材'));
+  }, 'card removed after unlink');
+  assert(fs.existsSync(originFile), 'origin file still exists after unlink');
+  const jsonAfterUnlink = readJson(path.join(boardDir, '.okiba-board.json'));
+  assert(!(jsonAfterUnlink.links || []).some((l) => l.path === originFile),
+    'json link removed after unlink');
+  if (process.platform === 'win32') {
+    assert(attribHidden(originFile) === false,
+      'Hidden attribute cleared after unlink (real attrib)');
+  }
+
+  step('missing state: external deletion greys the card; cleanup via menu');
+  await page.evaluate(
+    (arg) => window.okiba.linkFiles(arg.board, [arg.p]),
+    { board: boardName, p: originFile });
+  await waitFor(async () => {
+    const ns = await page.locator('.item .name').allTextContents();
+    return ns.some((t) => t.includes('外部素材'));
+  }, 'linked card re-appears');
+  fs.rmSync(originFile); // the original vanishes behind the app's back
+  await waitFor(async () => {
+    const el = page.locator('.item', { hasText: '外部素材' }).first();
+    if ((await el.count()) === 0) return false;
+    const cls = await el.evaluate((n) => n.className);
+    return cls.includes('missing');
+  }, 'card switches to the missing state', 20000);
+  const badgeTexts = await page.locator('.item .badge-missing').allTextContents();
+  assert(badgeTexts.some((t) => t.includes('元の場所にありません')),
+    'missing badge 「元の場所にありません」 is shown');
+  await page.locator('.item', { hasText: '外部素材' }).first().click({ button: 'right' });
+  await page.waitForSelector('#ctxMenu:not([hidden]) .ctx-item');
+  const missMenu = await page.locator('#ctxMenu .ctx-item').allTextContents();
+  assert(missMenu.length === 1 && missMenu[0].includes('ボードから外す'),
+    'missing item menu offers ONLY ボードから外す (nothing destructive)');
+  await page.locator('#ctxMenu .ctx-item', { hasText: 'ボードから外す' })
+    .dispatchEvent('mousedown');
+  await waitFor(async () => {
+    const ns = await page.locator('.item .name').allTextContents();
+    return !ns.some((t) => t.includes('外部素材'));
+  }, 'missing card cleaned off the board');
+  await app4.close();
+
   console.log('\nGUI E2E: all steps passed');
 }
 

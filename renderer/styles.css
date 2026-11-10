@@ -191,6 +191,14 @@ body {
   overflow: hidden; word-break: break-all;
   text-shadow: 0 1px 4px rgba(0, 0, 0, .65);
 }
+/* linked item whose original vanished from its recorded path:
+   greyed out with a badge — never silently dropped */
+.item.missing { opacity: .48; filter: grayscale(1); }
+.item .badge-missing {
+  margin-top: 4px; padding: 1px 8px; border-radius: 999px;
+  background: rgba(180, 60, 45, .85); color: #fff;
+  font-size: 10.5px; line-height: 1.5; white-space: nowrap;
+}
 /* rubber-band selection (Windows desktop style: translucent blue
    fill + blue border), drawn live while dragging on empty area */
 .rubber-band {
@@ -241,6 +249,7 @@ body {
   box-shadow: 0 24px 60px var(--shadow); backdrop-filter: blur(20px);
 }
 .modal-title { margin: 0 0 12px; font-size: 16px; }
+.modal-note { color: var(--dim); font-size: 12.5px; line-height: 1.5; margin: -4px 0 10px; }
 .modal-input {
   width: 100%; font: inherit; font-size: 14.5px; color: var(--fg);
   background: rgba(255, 255, 255, .07); border: 1px solid var(--bar-border);

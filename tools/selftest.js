@@ -91,7 +91,7 @@ function main() {
     bf.saveBoard(folder, { 'alpha.txt': [2, 1] },
       [{ id: 'n1', text: 'メモ本文', col: 0, row: 2 }], 125);
     const raw = JSON.parse(fs.readFileSync(path.join(folder, bf.BOARD_FILENAME), 'utf8'));
-    ok(raw.version === 5 && raw.size_percent === 125, 'saved json uses v7 keys');
+    ok(raw.version === 6 && raw.size_percent === 125, 'saved json uses current keys (v6)');
     ok(raw.positions['alpha.txt'].col === 2 && raw.positions['alpha.txt'].row === 1,
       'saved position is {col,row}');
     const loaded = bf.loadBoard(folder);
@@ -436,11 +436,163 @@ function iconposMain() {
   }
 }
 
+// ------------------------------------------------ links (async)
+const ln = require('../lib/links');
+
+async function linksMain() {
+  // ---------- attrib output parsing ----------
+  {
+    ok(ln.parseAttribHidden('A            C:\\x\\a.txt', 'C:\\x\\a.txt') === false,
+      'attrib parse: no H -> not hidden');
+    ok(ln.parseAttribHidden('     H        C:\\x\\a.txt', 'C:\\x\\a.txt') === true,
+      'attrib parse: H -> hidden');
+    ok(ln.parseAttribHidden('A  SH        C:\\x\\a.txt', 'C:\\x\\a.txt') === true,
+      'attrib parse: SH -> hidden');
+    ok(ln.parseAttribHidden('', 'C:\\x\\a.txt') === null, 'attrib parse: empty -> null');
+    ok(ln.parseAttribHidden('garbage output', 'C:\\x\\a.txt') === null,
+      'attrib parse: unexpected shape -> null (no guessing)');
+  }
+
+  // ---------- register / duplicate / unregister with refcount ----------
+  {
+    const base = tmp(); const origin = tmp();
+    const boardA = path.join(base, 'ボードA'); fs.mkdirSync(boardA);
+    const boardB = path.join(base, 'ボードB'); fs.mkdirSync(boardB);
+    const file = path.join(origin, '素材.mp4');
+    fs.writeFileSync(file, 'video');
+    const stub = ln.createStubAttribRunner();
+
+    const r1 = await ln.addLink({ base, boardFolder: boardA, targetPath: file, attrib: stub });
+    ok(r1.added && !r1.duplicate && r1.attribOk, 'link: first intake registers');
+    ok(stub.count('+H') === 1, 'link: +H called exactly once at intake');
+    ok(stub.isHidden(file), 'link: original is hidden after intake');
+    const dataA = bf.loadBoard(boardA);
+    ok(dataA.links.length === 1 && dataA.links[0].path === file &&
+       dataA.links[0].wasHidden === false, 'link: recorded with wasHidden=false');
+    ok(fs.existsSync(file) && !fs.existsSync(path.join(boardA, '素材.mp4')),
+      'link: the file did NOT move into the board folder');
+
+    const r2 = await ln.addLink({ base, boardFolder: boardA, targetPath: file, attrib: stub });
+    ok(r2.duplicate && bf.loadBoard(boardA).links.length === 1,
+      'link: duplicate intake keeps exactly one entry');
+    ok(stub.count('+H') === 1, 'link: duplicate intake does not re-hide');
+
+    const r3 = await ln.addLink({ base, boardFolder: boardB, targetPath: file, attrib: stub });
+    ok(r3.added && bf.loadBoard(boardB).links[0].wasHidden === false,
+      'link: second board inherits wasHidden=false (not "pre-hidden")');
+    ok(stub.count('+H') === 1, 'link: second board does not call +H again');
+
+    const u1 = await ln.removeLink({ base, boardFolder: boardA, targetPath: file, attrib: stub });
+    ok(u1.removed && !u1.unhidden && stub.isHidden(file) && stub.count('-H') === 0,
+      'link: removal from one of two boards keeps Hidden (refcount)');
+    const u2 = await ln.removeLink({ base, boardFolder: boardB, targetPath: file, attrib: stub });
+    ok(u2.removed && u2.unhidden && !stub.isHidden(file) && stub.count('-H') === 1,
+      'link: last removal clears Hidden exactly once');
+    ok(fs.existsSync(file), 'link: original still exists after unlink');
+  }
+
+  // ---------- a file hidden BEFORE intake keeps its state ----------
+  {
+    const base = tmp(); const origin = tmp();
+    const board = path.join(base, 'ボード'); fs.mkdirSync(board);
+    const file = path.join(origin, '秘.mp4');
+    fs.writeFileSync(file, 'v');
+    const stub = ln.createStubAttribRunner({ [file]: true }); // user had it hidden
+    const r = await ln.addLink({ base, boardFolder: board, targetPath: file, attrib: stub });
+    ok(r.added && bf.loadBoard(board).links[0].wasHidden === true,
+      'link: pre-hidden file records wasHidden=true');
+    ok(stub.count('+H') === 0, 'link: pre-hidden file gets no +H call');
+    const u = await ln.removeLink({ base, boardFolder: board, targetPath: file, attrib: stub });
+    ok(u.removed && !u.unhidden && stub.isHidden(file) && stub.count('-H') === 0,
+      'link: pre-hidden file is NOT unhidden on removal');
+  }
+
+  // ---------- attrib failure never blocks intake ----------
+  {
+    const base = tmp(); const origin = tmp();
+    const board = path.join(base, 'ボード'); fs.mkdirSync(board);
+    const file = path.join(origin, 'f.txt');
+    fs.writeFileSync(file, 'x');
+    const deadAttrib = {
+      async readHidden() { return { ok: false, hidden: null }; },
+      async setHidden() { return { ok: false }; },
+    };
+    const r = await ln.addLink({ base, boardFolder: board, targetPath: file, attrib: deadAttrib });
+    ok(r.added && !r.attribOk && bf.loadBoard(board).links.length === 1,
+      'link: attrib failure still registers, flagged attribOk=false');
+  }
+
+  // ---------- missing-path state derivation ----------
+  {
+    const dir = tmp();
+    const file = path.join(dir, 'gone.txt');
+    fs.writeFileSync(file, 'x');
+    ok(ln.statLink(file).exists === true, 'statLink: existing file');
+    fs.rmSync(file);
+    const st = ln.statLink(file);
+    ok(st.exists === false && st.isDir === false, 'statLink: deleted file reads as missing');
+  }
+
+  // ---------- migration: v1.3.1 (version 5, no links) json ----------
+  {
+    const folder = tmp();
+    fs.writeFileSync(path.join(folder, 'resident.txt'), 'r');
+    fs.writeFileSync(path.join(folder, bf.BOARD_FILENAME), JSON.stringify({
+      version: 5, size_percent: 80,
+      positions: { 'resident.txt': { col: 2, row: 3 } },
+      notes: [{ id: 'n9', text: '旧メモ', col: 0, row: 0 }],
+    }));
+    const loaded = bf.loadBoard(folder);
+    ok(Array.isArray(loaded.links) && loaded.links.length === 0,
+      'migration: pre-v2 json loads with zero links');
+    ok(loaded.positions['resident.txt'][0] === 2 && loaded.positions['resident.txt'][1] === 3,
+      'migration: resident positions identical');
+    ok(loaded.sizePercent === 80 && loaded.notes[0].text === '旧メモ',
+      'migration: percent and notes identical');
+    // Saving after migration writes the v6 schema and preserves all.
+    bf.saveBoard(folder, loaded.positions, loaded.notes, loaded.sizePercent, loaded.links);
+    const raw = JSON.parse(fs.readFileSync(path.join(folder, bf.BOARD_FILENAME), 'utf8'));
+    ok(raw.version === 6 && Array.isArray(raw.links) && raw.links.length === 0,
+      'migration: save writes version 6 with empty links');
+    ok(raw.positions['resident.txt'].col === 2 && raw.positions['resident.txt'].row === 3,
+      'migration: positions survive the v6 save');
+  }
+
+  // ---------- v6 links roundtrip ----------
+  {
+    const folder = tmp();
+    const link = { path: 'C:\\Users\\x\\Desktop\\動画.mp4', col: 1, row: 2, wasHidden: false };
+    bf.saveBoard(folder, {}, [], 100, [link]);
+    const loaded = bf.loadBoard(folder);
+    ok(loaded.links.length === 1 && loaded.links[0].path === link.path &&
+       loaded.links[0].col === 1 && loaded.links[0].row === 2 &&
+       loaded.links[0].wasHidden === false, 'v6: link roundtrips through save/load');
+    const raw = JSON.parse(fs.readFileSync(path.join(folder, bf.BOARD_FILENAME), 'utf8'));
+    ok(raw.version === 6, 'v6: saved json version is 6');
+  }
+
+  // ---------- board deletion releases links (releaseBoardLinks) ----------
+  {
+    const base = tmp(); const origin = tmp();
+    const board = path.join(base, 'ボード'); fs.mkdirSync(board);
+    const file = path.join(origin, 'keep.txt');
+    fs.writeFileSync(file, 'k');
+    const stub = ln.createStubAttribRunner();
+    await ln.addLink({ base, boardFolder: board, targetPath: file, attrib: stub });
+    const held = bf.loadBoard(board).links;
+    fs.rmSync(board, { recursive: true, force: true }); // the trash itself
+    const rel = await ln.releaseBoardLinks({ base, links: held, attrib: stub });
+    ok(rel.unhidden === 1 && !stub.isHidden(file) && fs.existsSync(file),
+      'board delete: linked original unhidden and untouched');
+  }
+}
+
 (async () => {
   try {
     main();
     await dropmoveMain();
     await iconposMain();
+    await linksMain();
     console.log('\nselftest: ' + passed + ' checks passed');
   } catch (e) {
     console.error(e.message || e);

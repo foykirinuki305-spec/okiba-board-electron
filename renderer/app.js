@@ -49,12 +49,15 @@ async function cycleTheme() {
 }
 
 // ------------------------------------------------------------ modal
-function promptModal({ title, value = '', multiline = false }) {
+function promptModal({ title, value = '', multiline = false, note = '' }) {
   return new Promise((resolve) => {
     busy = true;
     const overlay = $('modalOverlay');
     const input = $('modalInput'), area = $('modalArea'), err = $('modalError');
     $('modalTitle').textContent = title;
+    const noteEl = $('modalNote');
+    noteEl.textContent = note || '';
+    noteEl.hidden = !note;
     err.textContent = '';
     input.hidden = multiline;
     area.hidden = !multiline;
@@ -311,6 +314,12 @@ function buildCells() {
     cells.set('file:' + name, c);
   }
   for (const n of boardData.notes) cells.set('note:' + n.id, [n.col, n.row]);
+  for (const l of boardData.links || []) {
+    if (l.col !== null && l.col !== undefined &&
+        l.row !== null && l.row !== undefined) {
+      cells.set('link:' + l.path, [l.col, l.row]);
+    }
+  }
   const m = metrics();
   const occupied = new Set([...cells.values()].map((c) => c[0] + ',' + c[1]));
   const place = (key) => {
@@ -322,6 +331,7 @@ function buildCells() {
   };
   for (const e of boardData.entries) place('file:' + e.name);
   for (const n of boardData.notes) place('note:' + n.id);
+  for (const l of boardData.links || []) place('link:' + l.path);
 }
 function bfNextFree(occupied, rows) {
   for (let col = 0; ; col++) {
@@ -336,15 +346,27 @@ async function persistBoard() {
   const notes = boardData.notes.map((n) => ({ ...n }));
   for (const [key, c] of cells.entries()) {
     if (key.startsWith('file:')) positions[key.slice(5)] = c;
-    else {
+    else if (key.startsWith('note:')) {
       const note = notes.find((n) => 'note:' + n.id === key);
       if (note) { note.col = c[0]; note.row = c[1]; }
     }
   }
+  const links = (boardData.links || []).map((l) => {
+    const c = cells.get('link:' + l.path);
+    return {
+      path: l.path, wasHidden: !!l.wasHidden,
+      col: c ? c[0] : (l.col !== undefined ? l.col : null),
+      row: c ? c[1] : (l.row !== undefined ? l.row : null),
+    };
+  });
   boardData.positions = positions;
   boardData.notes = notes;
+  for (const l of boardData.links || []) {
+    const c = cells.get('link:' + l.path);
+    if (c) { l.col = c[0]; l.row = c[1]; }
+  }
   try {
-    await api.saveBoard(boardData.name, positions, notes, boardData.sizePercent);
+    await api.saveBoard(boardData.name, positions, notes, boardData.sizePercent, links);
   } catch (e) { toast(String(e.message || e)); }
 }
 
@@ -355,11 +377,15 @@ function renderBoard() {
   buildCells();
   const m = metrics();
   boardArea.innerHTML = '';
-  const renderItem = (key, kind, label, fullPath, noteText) => {
+  const renderItem = (key, kind, label, fullPath, noteText, opts) => {
+    opts = opts || {};
+    const itemKind = opts.itemKind || 'resident';
+    const missing = !!opts.missing;
     const c = cells.get(key);
     if (!c) return;
     const el = document.createElement('div');
-    el.className = 'item' + (selection.has(key) ? ' selected' : '');
+    el.className = 'item' + (selection.has(key) ? ' selected' : '') +
+      (missing ? ' missing' : '');
     el.draggable = false; // items move via pointer drag only (see lockdown)
     el.dataset.key = key;
     el.style.left = (ORIGIN + c[0] * m.cellW) + 'px';
@@ -369,7 +395,7 @@ function renderBoard() {
     thumb.className = 'thumb';
     thumb.style.width = m.thumb + 'px';
     thumb.style.height = m.thumb + 'px';
-    if ((kind === 'image' || kind === 'video') && fullPath) {
+    if ((kind === 'image' || kind === 'video') && fullPath && !missing) {
       const showImg = (url) => {
         const t = thumb.querySelector('.tile');
         if (t) t.remove();
@@ -398,9 +424,16 @@ function renderBoard() {
     nm.textContent = label;
     nm.title = label; // full name on hover
     el.append(thumb, nm);
+    if (missing) {
+      const badge = document.createElement('div');
+      badge.className = 'badge-missing';
+      badge.textContent = '元の場所にありません';
+      el.appendChild(badge);
+    }
     el.addEventListener('pointerdown', (e) => itemPointer(e, el, key, fullPath));
     el.addEventListener('dblclick', () => {
       if (kind === 'note') editNoteFlow(key);
+      else if (missing) toast('元の場所にありません');
       else if (fullPath) api.openItem(fullPath).catch((err) => toast(String(err.message || err)));
     });
     el.addEventListener('contextmenu', (e) => {
@@ -408,13 +441,17 @@ function renderBoard() {
       if (!selection.has(key)) selection = new Set([key]);
       renderBoardSelection();
       if (selection.size > 1) {
-        // ---- multi-selection menu: bulk actions only ----
-        const fileCount = [...selection].filter((k) => k.startsWith('file:')).length;
+        // ---- multi-selection menu: one combined "take out" action
+        // that applies each item's own semantics (linked: unlink —
+        // the file stays put and becomes visible again; resident:
+        // move to Desktop). Delete is the explicit real-file kind.
+        const hasOut = [...selection].some((k) =>
+          k.startsWith('file:') || k.startsWith('link:'));
         const items = [{ label: `${selection.size}件を選択中`, action: () => {} }];
-        if (fileCount) {
-          items.push({ label: 'デスクトップへ移動', action: () => moveSelectionToDesktop() });
+        if (hasOut) {
+          items.push({ label: '選択をボードから出す', action: () => takeOutSelection() });
         }
-        items.push({ label: 'ゴミ箱へ削除', danger: true, action: () => trashSelection() });
+        items.push({ label: 'ゴミ箱へ削除（実ファイルも削除）', danger: true, action: () => trashSelection() });
         showMenu(e.clientX, e.clientY, items);
         return;
       }
@@ -427,6 +464,26 @@ function renderBoard() {
               await persistBoard(); renderBoard();
             } },
         ]);
+      } else if (itemKind === 'linked') {
+        const link = opts.link;
+        if (missing) {
+          // The original is gone from its path: the ONLY sensible
+          // action is cleaning the reference off the board. Nothing
+          // file-destructive is offered.
+          showMenu(e.clientX, e.clientY, [
+            { label: 'ボードから外す', action: () => unlinkFlow([fullPath]) },
+          ]);
+        } else {
+          showMenu(e.clientX, e.clientY, [
+            { label: '開く', action: () => api.openItem(fullPath) },
+            { label: '名前を変更', action: () => renameLinkedFlow(key, link) },
+            { label: '場所を開く', action: () => api.showItem(fullPath) },
+            { label: 'ボードから外す', action: () => unlinkFlow([fullPath]) },
+            { label: 'ファイルをゴミ箱へ削除', danger: true, action: async () => {
+                await api.trashLinked(boardData.name, fullPath); refreshBoard();
+              } },
+          ]);
+        }
       } else {
         showMenu(e.clientX, e.clientY, [
           { label: '開く', action: () => api.openItem(fullPath) },
@@ -444,7 +501,11 @@ function renderBoard() {
     boardArea.appendChild(el);
   };
   for (const e of boardData.entries) {
-    renderItem('file:' + e.name, e.kind, e.name, e.path, null);
+    renderItem('file:' + e.name, e.kind, e.name, e.path, null, { itemKind: 'resident' });
+  }
+  for (const l of boardData.links || []) {
+    renderItem('link:' + l.path, l.kind, l.name, l.path, null,
+      { itemKind: 'linked', missing: !l.exists, link: l });
   }
   for (const n of boardData.notes) {
     renderItem('note:' + n.id, 'note', n.text.split('\n')[0] || 'メモ', null, n.text);
@@ -459,7 +520,9 @@ function renderBoardSelection() {
 
 // ------------------------------------------------------- multi-select
 function pathOfKey(key) {
-  if (!key.startsWith('file:') || !boardData) return null;
+  if (!boardData) return null;
+  if (key.startsWith('link:')) return key.slice(5); // the path IS the id
+  if (!key.startsWith('file:')) return null;
   const entry = boardData.entries.find((en) => en.name === key.slice(5));
   return entry ? entry.path : null;
 }
@@ -486,20 +549,53 @@ function planGroupMove(keys, dCol, dRow, rows) {
   return plan;
 }
 
-async function moveSelectionToDesktop() {
-  const paths = [...selection].map(pathOfKey).filter(Boolean);
-  for (const p of paths) {
+// Unregister linked items (shared by the menu action and drag-out).
+// Main removes the references and restores visibility; the renderer
+// then just reloads board state — the originals never moved.
+async function unlinkFlow(paths) {
+  if (!paths.length) return;
+  try { await api.unlinkItems(boardData.name, paths); }
+  catch (e) { toast(String(e.message || e)); }
+  refreshBoard();
+}
+
+// Combined "take the selection out of this board" — each item keeps
+// its own semantics: linked -> unlink (file stays at its original
+// path and becomes visible again); resident -> move to Desktop
+// (its previous "out" behaviour). Notes stay (a note has no file to
+// take out; deleting notes is the trash action below).
+async function takeOutSelection() {
+  const keys = [...selection];
+  const linkedPaths = keys.filter((k) => k.startsWith('link:')).map((k) => k.slice(5));
+  const residentPaths = keys.filter((k) => k.startsWith('file:'))
+    .map(pathOfKey).filter(Boolean);
+  if (linkedPaths.length) {
+    try { await api.unlinkItems(boardData.name, linkedPaths); }
+    catch (e) { toast(String(e.message || e)); }
+  }
+  for (const p of residentPaths) {
     try { await api.moveToDesktop(p); } catch (e) { toast(String(e.message || e)); }
   }
   refreshBoard();
 }
 
+// Combined delete: notes are deleted, resident files are trashed,
+// and LINKED items get their REAL original file trashed (explicit
+// destructive action — distinct from ボードから外す）.
 async function trashSelection() {
   for (const key of [...selection]) {
     if (key.startsWith('note:')) {
       boardData.notes = boardData.notes.filter((n) => 'note:' + n.id !== key);
       cells.delete(key);
       selection.delete(key);
+    } else if (key.startsWith('link:')) {
+      const p = key.slice(5);
+      try {
+        await api.trashLinked(boardData.name, p);
+        boardData.links = boardData.links.filter((l) => l.path !== p);
+        cells.delete(key);
+        selection.delete(key);
+      } catch (e) { toast(String(e.message || e)); }
     } else {
       const p = pathOfKey(key);
       if (p) {
@@ -607,13 +703,45 @@ function itemPointer(e, el, key, fullPath) {
         screenPt = lastCursor;
       }
     }
-    const filePaths = group.map((g) => g.path).filter(Boolean);
-    if (!outside || !filePaths.length) { finishInternal(); return; }
-    // ---- outside release: self-implemented MOVE (no startDrag) ----
-    renderBoard(); // items snap back while main resolves the target
+    // Partition the dragged group by item kind. Notes have no file
+    // at all; LINKED items must never be file-moved (their whole
+    // point is that the original path does not change); RESIDENT
+    // items keep the v1.2 self-implemented MOVE.
+    const linkedPaths = group.filter((g) => g.key.startsWith('link:'))
+      .map((g) => g.path).filter(Boolean);
+    const residentPaths = group.filter((g) => g.key.startsWith('file:'))
+      .map((g) => g.path).filter(Boolean);
+    if (!outside || (!linkedPaths.length && !residentPaths.length)) {
+      finishInternal();
+      return;
+    }
+    // ---- outside release ----
+    renderBoard(); // items snap back while main works
+    let unlinked = false;
+    if (linkedPaths.length) {
+      // Drag-out of a linked item = take it off the board. The file
+      // itself does not move ANYWHERE, whatever the drop target was;
+      // it just becomes visible again at its original location.
+      try { await api.unlinkItems(boardData.name, linkedPaths); } catch (err) {}
+      for (const g of group) {
+        if (g.key.startsWith('link:')) {
+          cells.delete(g.key);
+          selection.delete(g.key);
+        }
+      }
+      boardData.links = boardData.links.filter((l) => !linkedPaths.includes(l.path));
+      unlinked = true;
+    }
+    if (!residentPaths.length) {
+      await persistBoard();
+      toast('ボードから外しました（ファイルは元の場所のままです）');
+      refreshBoard();
+      return;
+    }
+    // ---- resident items: self-implemented MOVE (no startDrag) ----
     toast('移動先を判定しています…', 15000);
     let res = null;
-    try { res = await api.resolveDropMove(filePaths, screenPt.x, screenPt.y); }
+    try { res = await api.resolveDropMove(residentPaths, screenPt.x, screenPt.y); }
     catch (err) { res = null; }
     if (res && res.moved && res.moved.length) {
       const movedSet = new Set(res.moved);
@@ -629,7 +757,14 @@ function itemPointer(e, el, key, fullPath) {
       // Positioning is best-effort; only the auto-arrange case adds
       // a note (the move itself still succeeded).
       if (isDesktop && res.positionNote) msg += '。' + res.positionNote;
+      if (unlinked) msg += '／リンクはボードから外しました';
       toast(msg);
+      refreshBoard();
+    } else if (unlinked) {
+      // Residents stayed (unknown target), but the linked ones did
+      // leave the board — say exactly that.
+      await persistBoard();
+      toast('リンクはボードから外しました');
       refreshBoard();
     } else {
       // unknown target / failure: NOTHING was moved, items stay put.
@@ -666,6 +801,34 @@ async function renameItemFlow(key, fullPath, oldName) {
       cells.delete(key);
       cells.set('file:' + v.trim(), c);
     }
+    await persistBoard();
+    refreshBoard();
+  } catch (e) { toast(String(e.message || e)); }
+}
+
+// Renaming a LINKED item renames the real file at its original
+// path — which is exactly what breaks other apps' references, so
+// the modal carries the one-line warning the user asked to see.
+async function renameLinkedFlow(key, link) {
+  if (!link) return;
+  const v = await promptModal({
+    title: '名前を変更', value: link.name,
+    note: '名前を変えるとAviUtl等の参照が切れます',
+  });
+  if (v === null || v.trim() === link.name) return;
+  try {
+    const dest = await api.renameLinked(boardData.name, link.path, v.trim());
+    if (cells.has(key)) {
+      const c = cells.get(key);
+      cells.delete(key);
+      cells.set('link:' + dest, c);
+    }
+    if (selection.has(key)) {
+      selection.delete(key);
+      selection.add('link:' + dest);
+    }
+    link.path = dest;
+    link.name = v.trim();
     await persistBoard();
     refreshBoard();
   } catch (e) { toast(String(e.message || e)); }
@@ -794,8 +957,15 @@ boardArea.addEventListener('drop', async (e) => {
   if (!boardData) return;
   const paths = [...e.dataTransfer.files].map((f) => api.getPathForFile(f)).filter(Boolean);
   if (!paths.length) return;
+  // v2.0 intake: LINK, never move. The file stays at its original
+  // path (AviUtl references survive); main hides it in place.
   try {
-    await api.dropFiles(boardData.name, paths);
+    const r = await api.linkFiles(boardData.name, paths);
+    if (r && r.duplicates && r.duplicates.length) {
+      toast('すでにボードに入っています');
+    } else if (r && r.attribFailed && r.attribFailed.length) {
+      toast('ボードに入れました（見た目を隠す印は付けられませんでした）');
+    }
     refreshBoard();
   } catch (err) { toast(String(err.message || err)); }
 });

@@ -65,26 +65,82 @@ jobs:
         env:
           OKIBA_SHOTS: ${{ github.workspace }}\screenshots
 
-      - name: Build portable exe
-        run: npx electron-builder --win portable
+      - name: Build installer + portable exe
+        run: npx electron-builder --win
 
-      - name: Verify exe exists
+      - name: Verify both exes exist
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Path dist -Filter *.exe | Select-Object -First 1
-          if (-not $exe) { throw 'exe not found in dist' }
-          Write-Host "EXE: $($exe.FullName) ($($exe.Length) bytes)"
+          $portable = Get-ChildItem -Path dist -Filter 'OkibaBoard.exe' | Select-Object -First 1
+          if (-not $portable) { throw 'portable exe not found in dist' }
+          Write-Host "PORTABLE: $($portable.FullName) ($($portable.Length) bytes)"
+          $setup = Get-ChildItem -Path dist -Filter 'OkibaBoard-Setup-*.exe' | Select-Object -First 1
+          if (-not $setup) { throw 'NSIS installer not found in dist' }
+          Write-Host "INSTALLER: $($setup.FullName) ($($setup.Length) bytes)"
 
-      - name: Launch smoke (in-app self-test mode)
+      - name: Launch smoke, portable (in-app self-test mode)
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Path dist -Filter *.exe | Select-Object -First 1
+          $exe = Get-ChildItem -Path dist -Filter 'OkibaBoard.exe' | Select-Object -First 1
           $env:OKIBA_SELFTEST = '1'
           $env:OKIBA_BASE = Join-Path $env:RUNNER_TEMP 'okiba-smoke-base'
           $env:OKIBA_OLD_BASE = Join-Path $env:RUNNER_TEMP 'okiba-smoke-old'
           $p = Start-Process -FilePath $exe.FullName -PassThru -Wait
           Write-Host "smoke exit code: $($p.ExitCode)"
           if ($p.ExitCode -ne 0) { throw "launch smoke failed with exit code $($p.ExitCode)" }
+
+      # The installer is the primary v2.0 deliverable (the portable
+      # exe re-unpacks itself on every launch; an installed copy
+      # starts fast). Prove the whole lifecycle unattended:
+      # silent install -> the INSTALLED exe passes the same in-app
+      # smoke -> silent uninstall removes the program but NOT the
+      # user's data directory (boards live outside the install).
+      - name: Installer lifecycle (silent install, smoke, uninstall, data survives)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Get-ChildItem -Path dist -Filter 'OkibaBoard-Setup-*.exe' | Select-Object -First 1
+          if (-not $setup) { throw 'installer not found in dist' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'okiba-install'
+          $env:OKIBA_SELFTEST = '1'
+          $env:OKIBA_BASE = Join-Path $env:RUNNER_TEMP 'okiba-installer-base'
+          $env:OKIBA_OLD_BASE = Join-Path $env:RUNNER_TEMP 'okiba-installer-old'
+
+          Write-Host "Installing $($setup.Name) silently to $installDir ..."
+          # /D=<dir> must be the LAST argument and stays unquoted.
+          Start-Process -FilePath $setup.FullName -ArgumentList '/S', "/D=$installDir" -Wait
+          # NSIS stubs can return before the real install finishes:
+          # poll for the installed exe instead of trusting the exit.
+          $exe = Join-Path $installDir 'OkibaBoard.exe'
+          $deadline = (Get-Date).AddSeconds(90)
+          while (-not (Test-Path $exe)) {
+            if ((Get-Date) -gt $deadline) { throw "installed exe never appeared at $exe" }
+            Start-Sleep -Seconds 2
+          }
+          Write-Host "Installed exe: $exe"
+
+          $p = Start-Process -FilePath $exe -PassThru -Wait
+          Write-Host "installed smoke exit code: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "installed exe smoke failed with exit code $($p.ExitCode)" }
+          $dataBoard = Join-Path $env:OKIBA_BASE 'ボード1'
+          if (-not (Test-Path $dataBoard)) { throw 'self-test did not create the data board' }
+          Write-Host "Data board created at $dataBoard"
+
+          $uninstaller = Get-ChildItem -Path $installDir -Filter 'Uninstall*.exe' |
+            Select-Object -First 1
+          if (-not $uninstaller) { throw 'uninstaller not found in install dir' }
+          Write-Host "Uninstalling via $($uninstaller.Name) ..."
+          Start-Process -FilePath $uninstaller.FullName -ArgumentList '/S' -Wait
+          $deadline = (Get-Date).AddSeconds(90)
+          while (Test-Path $exe) {
+            if ((Get-Date) -gt $deadline) { throw 'exe still present after uninstall' }
+            Start-Sleep -Seconds 2
+          }
+          Write-Host 'Program removed by uninstall'
+          if (-not (Test-Path $dataBoard)) {
+            throw 'DATA LOST: board directory vanished on uninstall'
+          }
+          Write-Host 'Data directory survived the uninstall, as required'
 
       - uses: actions/upload-artifact@v4
         with:

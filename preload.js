@@ -17,8 +17,19 @@ contextBridge.exposeInMainWorld('okiba', {
 
   saveHomePositions: (positions) => ipcRenderer.invoke('save-home-positions', positions),
   setTheme: (theme) => ipcRenderer.invoke('set-theme', theme),
-  saveBoard: (name, positions, notes, sizePercent) =>
-    ipcRenderer.invoke('save-board', name, positions, notes, sizePercent),
+  saveBoard: (name, positions, notes, sizePercent, links) =>
+    ipcRenderer.invoke('save-board', name, positions, notes, sizePercent, links),
+
+  // linked items (v2.0): intake registers a reference and hides the
+  // original in place; unlink restores visibility; trashLinked is
+  // the explicit REAL-file delete.
+  linkFiles: (boardName, paths) => ipcRenderer.invoke('link-files', boardName, paths),
+  unlinkItems: (boardName, paths) => ipcRenderer.invoke('unlink-items', boardName, paths),
+  renameLinked: (boardName, oldPath, newName) =>
+    ipcRenderer.invoke('rename-linked', boardName, oldPath, newName),
+  trashLinked: (boardName, targetPath) =>
+    ipcRenderer.invoke('trash-linked', boardName, targetPath),
+  testAttrib: () => ipcRenderer.invoke('test-attrib'),
 
   openItem: (p) => ipcRenderer.invoke('open-item', p),
   showItem: (p) => ipcRenderer.invoke('show-item', p),
