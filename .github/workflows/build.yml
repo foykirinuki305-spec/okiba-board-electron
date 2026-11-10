@@ -66,7 +66,10 @@ jobs:
           OKIBA_SHOTS: ${{ github.workspace }}\screenshots
 
       - name: Build installer + portable exe
-        run: npx electron-builder --win
+        # --publish never: electron-builder's implicit CI publishing
+        # otherwise tries to push a GitHub release and fails the
+        # whole build for a missing GH_TOKEN.
+        run: npx electron-builder --win --publish never
 
       - name: Verify both exes exist
         shell: pwsh

@@ -61,7 +61,7 @@
   "main": "main.js",
   "name": "okiba-board",
   "scripts": {
-    "build": "electron-builder --win",
+    "build": "electron-builder --win --publish never",
     "selftest": "node tools/selftest.js",
     "test:gui": "node tests/gui.e2e.js",
     "start": "electron ."
