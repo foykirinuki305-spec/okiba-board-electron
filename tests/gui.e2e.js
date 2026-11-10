@@ -697,7 +697,11 @@ async function main() {
     'linked file really landed in the resolved folder');
   assert(!fs.existsSync(dragFile), 'linked file LEFT its origin (a real move)');
   if (process.platform === 'win32') {
-    assert(attribHidden(path.join(landing, '外部ドラッグ.txt')) === false,
+    // The file appears in the landing folder at the MOVE step; the
+    // -H lands a moment later inside the same IPC. Poll for it —
+    // an immediate assert races the attrib call.
+    await waitFor(
+      () => attribHidden(path.join(landing, '外部ドラッグ.txt')) === false,
       'landed file is VISIBLE (Hidden cleared at the destination)');
   }
   await waitFor(async () => {
