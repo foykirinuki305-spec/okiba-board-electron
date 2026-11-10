@@ -451,6 +451,13 @@ async function linksMain() {
     ok(ln.parseAttribHidden('', 'C:\\x\\a.txt') === null, 'attrib parse: empty -> null');
     ok(ln.parseAttribHidden('garbage output', 'C:\\x\\a.txt') === null,
       'attrib parse: unexpected shape -> null (no guessing)');
+    // Codepage-mangled path bytes (what a real non-English Windows
+    // returns for a Japanese file name): the attribute field must
+    // still parse — the v2.0 CI failure mode.
+    ok(ln.parseAttribHidden('     H        C:\\x\\???.txt', 'C:\\x\\外部素材.txt') === true,
+      'attrib parse: mangled path bytes still find H');
+    ok(ln.parseAttribHidden('A            C:\\x\\???.txt', 'C:\\x\\外部素材.txt') === false,
+      'attrib parse: mangled path bytes, no H');
   }
 
   // ---------- register / duplicate / unregister with refcount ----------

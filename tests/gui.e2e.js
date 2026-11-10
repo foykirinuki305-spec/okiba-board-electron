@@ -440,10 +440,14 @@ async function main() {
   // is used, so the Hidden attribute is set/cleared for real and
   // read back here.
   const attribHidden = (p) => {
+    // Parse ONLY attrib's ASCII attribute field (everything before
+    // the "C:\" junction): the Japanese path in the output is
+    // codepage-mangled on the runner, the field is not.
     const { execFileSync } = require('child_process');
     const out = execFileSync('attrib', [p], { encoding: 'utf8' });
-    const idx = out.toLowerCase().indexOf(p.toLowerCase());
-    const prefix = idx >= 0 ? out.slice(0, idx) : out.slice(0, 12);
+    const line = out.split(/\r?\n/).filter((s) => s.trim())[0] || '';
+    const drive = line.match(/[A-Za-z]:[\\/]/);
+    const prefix = drive ? line.slice(0, drive.index) : '';
     return prefix.toUpperCase().includes('H');
   };
   const originDir = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-origin-'));
