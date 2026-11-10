@@ -907,16 +907,24 @@ async function main() {
   fs.writeFileSync(path.join(cleanupDesktop, 'OkibaBoard-Setup-2.1.0.exe'), 'old setup');
   fs.writeFileSync(path.join(cleanupDesktop, '関係ない.txt'), 'keep me');
   fs.writeFileSync(path.join(cleanupDownloads, 'keep.txt'), 'keep me too');
-  const boardLnkPath = path.join(cleanupDesktop, boardName + '.lnk');
+  // NOTE: seed .lnk names and the board path in args are ASCII on
+  // purpose — WScript.Shell on the en-US runner ANSI-mangles
+  // non-ASCII shortcut file names when saving (the app's own
+  // shell.writeShortcutLink writer is fully Unicode; only this
+  // test-side seeding is affected). The cleanup logic under test
+  // only looks at target/args, never at the .lnk file name.
+  const boardLnkPath = path.join(cleanupDesktop, 'board.lnk');
   const staleLnkPath = path.join(cleanupDesktop, 'OkibaBoard.lnk');
+  const asciiBoardDir = path.join(base, 'AsciiBoard');
+  fs.mkdirSync(asciiBoardDir, { recursive: true });
   if (process.platform === 'win32') {
     const fakeOldExe = path.join(cleanupDesktop, 'old', 'OkibaBoard.exe');
     const esc = (s) => s.replace(/'/g, "''");
     const psLines = [
       '$ws = New-Object -ComObject WScript.Shell',
       `$s = $ws.CreateShortcut('${esc(staleLnkPath)}'); $s.TargetPath = '${esc(fakeOldExe)}'; $s.Arguments = ''; $s.Save()`,
-      `$s = $ws.CreateShortcut('${esc(boardLnkPath)}'); $s.TargetPath = '${esc(fakeOldExe)}'; $s.Arguments = '--board-path="${esc(boardDir)}"'; $s.Save()`,
-      `$s = $ws.CreateShortcut('${esc(path.join(cleanupDesktop, 'メモ帳.lnk'))}'); $s.TargetPath = 'C:\\Windows\\System32\\notepad.exe'; $s.Arguments = ''; $s.Save()`,
+      `$s = $ws.CreateShortcut('${esc(boardLnkPath)}'); $s.TargetPath = '${esc(fakeOldExe)}'; $s.Arguments = '--board-path="${esc(asciiBoardDir)}"'; $s.Save()`,
+      `$s = $ws.CreateShortcut('${esc(path.join(cleanupDesktop, 'memo.lnk'))}'); $s.TargetPath = 'C:\\Windows\\System32\\notepad.exe'; $s.Arguments = ''; $s.Save()`,
     ].join('\n');
     const psFile = path.join(os.tmpdir(), 'okiba-gui-mklnk-' + Date.now() + '.ps1');
     fs.writeFileSync(psFile, '﻿' + psLines, 'utf8');
@@ -951,7 +959,7 @@ async function main() {
   }, 'cleanup: version marker stamped to the current version');
   if (process.platform === 'win32') {
     assert(!fs.existsSync(staleLnkPath), 'cleanup: stale app shortcut deleted');
-    assert(fs.existsSync(path.join(cleanupDesktop, 'メモ帳.lnk')),
+    assert(fs.existsSync(path.join(cleanupDesktop, 'memo.lnk')),
       'cleanup: unrelated shortcut untouched');
     const execPath = await app14.evaluate(() => process.execPath);
     await waitFor(async () => {
@@ -959,7 +967,7 @@ async function main() {
       return info && info.target === execPath;
     }, 'cleanup: board shortcut healed onto the running exe');
     const healed = await page.evaluate((p) => window.okiba.readShortcut(p), boardLnkPath);
-    assert(healed.args.includes('--board-path') && healed.args.includes(boardDir),
+    assert(healed.args.includes('--board-path') && healed.args.includes(asciiBoardDir),
       'cleanup: healed shortcut kept its --board-path args');
   } else {
     console.log('  skip - shortcut heal/delete assertions run on the Windows CI runner');
