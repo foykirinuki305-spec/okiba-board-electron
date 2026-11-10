@@ -24,31 +24,16 @@ jobs:
 
       # The bundled PowerShell scripts only ever run on end-user PCs
       # (tests stub them), so at least prove here that each script
-      # parses and its embedded C# interop compiles.
+      # parses and its embedded C# interop compiles. One fresh pwsh
+      # process per file: the v2.2 warm helper (shell-helper.ps1)
+      # re-declares the cold scripts' interop types by design.
       - name: PowerShell scripts parse + embedded C# compiles
         shell: pwsh
         run: |
-          $failed = $false
-          foreach ($f in @('scripts/resolve-drop.ps1', 'scripts/position-desktop-icons.ps1')) {
-            $tokens = $null; $errs = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile(
-              (Join-Path $PWD $f), [ref]$tokens, [ref]$errs)
-            if ($errs -and $errs.Count) {
-              $errs | ForEach-Object { Write-Host "$f syntax error: $($_.Message)" }
-              $failed = $true
-            }
-            $src = Get-Content -Raw $f
-            if ($src -match "(?s)Add-Type -TypeDefinition @'\r?\n(.*?)\r?\n'@") {
-              try {
-                Add-Type -TypeDefinition $Matches[1] -ErrorAction Stop
-                Write-Host "$f : embedded C# compiles"
-              } catch {
-                Write-Host "$f : C# compile failed: $($_.Exception.Message)"
-                $failed = $true
-              }
-            }
+          foreach ($f in @('scripts/resolve-drop.ps1', 'scripts/position-desktop-icons.ps1', 'scripts/shell-helper.ps1')) {
+            pwsh -NoProfile -File ./tools/check-ps.ps1 $f
+            if ($LASTEXITCODE -ne 0) { throw "PowerShell script check failed for $f" }
           }
-          if ($failed) { throw 'PowerShell script check failed' }
 
       # Real-desktop integration test: position-desktop-icons.ps1
       # drives the runner's actual Explorer desktop listview (the

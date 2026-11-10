@@ -35,6 +35,15 @@
  *      falls back to home with a one-line note; a second process
  *      with --board-path hands over to the RUNNING window, which
  *      switches boards (single-instance routing)
+ *   -> ANCHORED INTAKE (v2.2): linkFiles/dropFiles with an explicit
+ *      anchor + offsets save exactly the cells the placement module
+ *      picks into .okiba-board.json (collisions scan forward); a
+ *      plain call without options still registers position-less
+ *      links (append, back-compat)
+ *   -> WARM HELPER (v2.2): with OKIBA_TEST_HELPER=fake and the env
+ *      stubs removed, two desktop drag-outs are resolved AND
+ *      positioned through the fake helper; helperStats must show
+ *      spawns===1 (one process reused — no timing asserts)
  *
  * Screenshots of home and board are written to $OKIBA_SHOTS (default
  * ./screenshots). Any failure exits non-zero, failing the CI build.
@@ -768,6 +777,122 @@ async function main() {
     assert(attribHidden(cancelFile) === true, 'cancel: origin still hidden afterwards');
   }
   await app11.close();
+
+  // ------------------------------------------------------------ run 8
+  // v2.2 anchored intake placement (Job B) on a dedicated board
+  // whose occupancy is fully known: residents at (0,0) and (0,1).
+  // Explicit anchor + offsets come through the same IPC options the
+  // renderer's drop handler now sends; the saved cells in
+  // .okiba-board.json are the ground truth.
+  const placeBoard = '配置ボード';
+  const placeDir = path.join(base, placeBoard);
+  fs.mkdirSync(placeDir, { recursive: true });
+  fs.writeFileSync(path.join(placeDir, '既存A.txt'), 'A');
+  fs.writeFileSync(path.join(placeDir, '既存B.txt'), 'B');
+  fs.writeFileSync(path.join(placeDir, '.okiba-board.json'), JSON.stringify({
+    version: 5, size_percent: 100,
+    positions: { '既存A.txt': { col: 0, row: 0 }, '既存B.txt': { col: 0, row: 1 } },
+    notes: [],
+  }, null, 2));
+  const origin8 = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-origin8-'));
+  const linkA = path.join(origin8, '配置リンク1.txt');
+  const linkB = path.join(origin8, '配置リンク2.txt');
+  const linkC = path.join(origin8, '配置リンク3.txt');
+  for (const p of [linkA, linkB, linkC]) fs.writeFileSync(p, 'linked');
+  const resDir8 = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-res8-'));
+  const resA = path.join(resDir8, '配置レジデント1.txt');
+  const resB = path.join(resDir8, '配置レジデント2.txt');
+  fs.writeFileSync(resA, 'resident 1');
+  fs.writeFileSync(resB, 'resident 2');
+
+  step('anchored intake (v2.2): links land at anchor, collisions scan forward');
+  const app12 = await launch();
+  page = await app12.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click(`#boardGrid .board-card[data-name="${placeBoard}"]`);
+  await page.waitForSelector('#boardView:not([hidden]) .item');
+  const anchored = await page.evaluate(
+    (arg) => window.okiba.linkFiles(arg.board, [arg.a, arg.b],
+      { anchor: [0, 0], rows: 10, offsets: [[0, 0], [0, 1]] }),
+    { board: placeBoard, a: linkA, b: linkB });
+  assert(anchored.added.length === 2, 'anchored linkFiles registered both files');
+  const jsonPlaced = readJson(path.join(placeDir, '.okiba-board.json'));
+  const recA = (jsonPlaced.links || []).find((l) => l.path === linkA);
+  const recB = (jsonPlaced.links || []).find((l) => l.path === linkB);
+  // (0,0) and (0,1) are occupied by residents: the forward scan puts
+  // the pair at (0,2) and (0,3), relative order preserved.
+  assert(recA && recA.col === 0 && recA.row === 2,
+    'anchored link 1 shifted past the occupied anchor to (0,2)');
+  assert(recB && recB.col === 0 && recB.row === 3,
+    'anchored link 2 follows at (0,3)');
+
+  step('anchored intake (v2.2): resident move-in saves anchored positions');
+  const placedRes = await page.evaluate(
+    (arg) => window.okiba.dropFiles(arg.board, [arg.a, arg.b],
+      { anchor: [2, 1], rows: 10, offsets: [[0, 0], [0, 1]] }),
+    { board: placeBoard, a: resA, b: resB });
+  assert(Array.isArray(placedRes) && placedRes.length === 2,
+    'dropFiles moved both residents in');
+  assert(fs.existsSync(path.join(placeDir, '配置レジデント1.txt')) &&
+    fs.existsSync(path.join(placeDir, '配置レジデント2.txt')),
+    'resident files are physically in the board folder');
+  const jsonRes = readJson(path.join(placeDir, '.okiba-board.json'));
+  const posA = (jsonRes.positions || {})['配置レジデント1.txt'];
+  const posB = (jsonRes.positions || {})['配置レジデント2.txt'];
+  assert(posA && posA.col === 2 && posA.row === 1,
+    'resident 1 saved at the anchor (2,1)');
+  assert(posB && posB.col === 2 && posB.row === 2,
+    'resident 2 saved one row below (2,2)');
+
+  step('intake back-compat: no anchor -> position-less link (append), as before');
+  const plain = await page.evaluate(
+    (arg) => window.okiba.linkFiles(arg.board, [arg.p]),
+    { board: placeBoard, p: linkC });
+  assert(plain.added.length === 1, 'plain linkFiles still registers');
+  const jsonPlain = readJson(path.join(placeDir, '.okiba-board.json'));
+  const recC = (jsonPlain.links || []).find((l) => l.path === linkC);
+  assert(recC && (recC.col === null || recC.col === undefined),
+    'plain intake keeps col/row unset (renderer appends)');
+  await app12.close();
+
+  // ------------------------------------------------------------ run 9
+  // v2.2 warm helper (Job A): resolve + position run through the
+  // FAKE helper process (OKIBA_TEST_HELPER=fake) instead of the env
+  // stubs. Two full desktop drag-outs must be served by ONE helper
+  // process: stats.spawns===1 proves reuse (no timing asserts).
+  step('warm helper (v2.2): two drag-outs, one helper process');
+  const env9 = {
+    ...env,
+    OKIBA_TEST_HELPER: 'fake',
+    OKIBA_FAKE_LANDING: landing,
+    OKIBA_FAKE_TYPE: 'desktop',
+  };
+  delete env9.OKIBA_TEST_RESOLVER_DIR;
+  delete env9.OKIBA_TEST_POSITIONER;
+  const app13 = await electron.launch({
+    args: [ROOT, '--no-sandbox'], env: env9, timeout: 60000,
+  });
+  page = await app13.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click(`#boardGrid .board-card[data-name="${placeBoard}"]`);
+  await page.waitForSelector('#boardView:not([hidden]) .item');
+  await dragOutSynthetic(page.locator('.item', { hasText: '既存A' }).first());
+  await waitFor(() => fs.existsSync(path.join(landing, '既存A.txt')),
+    'warm helper: first file moved via helper resolve');
+  await dragOutSynthetic(page.locator('.item', { hasText: '既存B' }).first());
+  await waitFor(() => fs.existsSync(path.join(landing, '既存B.txt')),
+    'warm helper: second file moved via helper resolve');
+  await waitFor(async () => {
+    const log = await page.evaluate(() => window.okiba.dropLog());
+    return log.filter((e) => e.kind === 'position').length >= 2;
+  }, 'warm helper: both desktop drops recorded icon positioning');
+  const hstats = await page.evaluate(() => window.okiba.helperStats());
+  assert(hstats && hstats.enabled === true, 'warm helper: client enabled in fake mode');
+  assert(hstats.spawns === 1,
+    `warm helper: ONE process served every operation (spawns=${hstats && hstats.spawns})`);
+  assert(hstats.requests >= 4,
+    `warm helper: resolve+position went through the helper (requests=${hstats && hstats.requests})`);
+  await app13.close();
 
   console.log('\nGUI E2E: all steps passed');
 }

@@ -66,5 +66,5 @@
     "test:gui": "node tests/gui.e2e.js",
     "start": "electron ."
   },
-  "version": "2.1.0"
+  "version": "2.2.0"
 }

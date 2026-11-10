@@ -23,7 +23,8 @@ contextBridge.exposeInMainWorld('okiba', {
   // linked items (v2.0): intake registers a reference and hides the
   // original in place; unlink restores visibility; trashLinked is
   // the explicit REAL-file delete.
-  linkFiles: (boardName, paths) => ipcRenderer.invoke('link-files', boardName, paths),
+  linkFiles: (boardName, paths, placeOpts) =>
+    ipcRenderer.invoke('link-files', boardName, paths, placeOpts),
   unlinkItems: (boardName, paths) => ipcRenderer.invoke('unlink-items', boardName, paths),
   renameLinked: (boardName, oldPath, newName) =>
     ipcRenderer.invoke('rename-linked', boardName, oldPath, newName),
@@ -45,7 +46,8 @@ contextBridge.exposeInMainWorld('okiba', {
   trashItem: (p) => ipcRenderer.invoke('trash-item', p),
   renameItem: (p, newName) => ipcRenderer.invoke('rename-item', p, newName),
   moveToDesktop: (p) => ipcRenderer.invoke('move-to-desktop', p),
-  dropFiles: (boardName, paths) => ipcRenderer.invoke('drop-files', boardName, paths),
+  dropFiles: (boardName, paths, placeOpts) =>
+    ipcRenderer.invoke('drop-files', boardName, paths, placeOpts),
 
   // drag-out (v1.2): self-implemented move on outside release.
   // resolveDropMove asks main to resolve the folder under the given
@@ -59,6 +61,8 @@ contextBridge.exposeInMainWorld('okiba', {
   cursorPoint: () => ipcRenderer.invoke('cursor-point'),
   // test hook: read back main's resolve/move invocation log
   dropLog: () => ipcRenderer.invoke('test-droplog'),
+  // test hook (v2.2): warm-helper counters (spawns / requests)
+  helperStats: () => ipcRenderer.invoke('test-helper-stats'),
 
   onFsChanged: (cb) => ipcRenderer.on('fs-changed', cb),
   onStatus: (cb) => ipcRenderer.on('status', (_e, msg) => cb(msg)),

@@ -971,8 +971,20 @@ boardArea.addEventListener('drop', async (e) => {
   if (!paths.length) return;
   // v2.0 intake: LINK, never move. The file stays at its original
   // path (AviUtl references survive); main hides it in place.
+  // v2.2: pass the drop point as an anchor cell (same point->cell
+  // math as an internal drag) plus the live row count, so the new
+  // items land where they were dropped, keeping their arrangement.
+  const m = metrics();
+  const rect = boardArea.getBoundingClientRect();
+  const placeOpts = {
+    anchor: [
+      Math.max(0, Math.round((e.clientX - rect.left - ORIGIN) / m.cellW)),
+      Math.max(0, Math.round((e.clientY - rect.top - ORIGIN) / m.cellH)),
+    ],
+    rows: m.rows,
+  };
   try {
-    const r = await api.linkFiles(boardData.name, paths);
+    const r = await api.linkFiles(boardData.name, paths, placeOpts);
     if (r && r.duplicates && r.duplicates.length) {
       toast('すでにボードに入っています');
     } else if (r && r.attribFailed && r.attribFailed.length) {

@@ -7,6 +7,8 @@ const dm = require('./lib/dropmove');
 const ip = require('./lib/iconpos');
 const ln = require('./lib/links');
 const sc = require('./lib/shortcut');
+const pl = require('./lib/placement');
+const sh = require('./lib/shellhelper');
 
 // Hidden-attribute runner for linked items (v2.0). Real attrib.exe
 // in production; OKIBA_TEST_ATTRIB=stub swaps in the counting stub.
@@ -15,6 +17,11 @@ const attrib = ln.attribRunnerFromEnv();
 // ------------------------------------------------------------------ paths
 let BASE = null;
 let MIGRATED_COUNT = 0;
+// Warm shell helper client (v2.2, Job A): one long-lived PowerShell
+// process serving resolveDrop / positionIcons / getDesktopPositions.
+// Created in registerIpc(); null when disabled or off-Windows, in
+// which case every caller uses the v2.1 cold-spawn scripts.
+let shellHelper = null;
 
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.ico', '.avif']);
 const VIDEO_EXTS = new Set(['.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v', '.wmv']);
@@ -411,9 +418,20 @@ function registerIpc() {
   // Intake NO LONGER moves files into the board folder. The file
   // stays at its original path; the board stores a reference and the
   // original gets the Hidden attribute so it disappears visually.
-  ipcMain.handle('link-files', async (_e, boardName, paths) => {
+  //
+  // v2.2 anchored placement (Job B): when the caller passes
+  // placeOpts { anchor:[col,row], rows, offsets? }, new links are
+  // saved WITH the cells lib/placement.js picks around the anchor
+  // instead of col/row null (append). Without an anchor the v2.0
+  // behaviour is byte-identical. When every dropped path lives on
+  // the Desktop and no explicit offsets are given, the warm helper
+  // reports the files' current desktop icon cells and that layout
+  // becomes the offsets — read BEFORE any hiding happens, because
+  // hiding is exactly what makes those icons vanish.
+  ipcMain.handle('link-files', async (_e, boardName, paths, placeOpts) => {
     const folder = guardBoard(boardName);
     const result = { added: [], duplicates: [], skipped: [], attribFailed: [] };
+    const candidates = [];
     for (const p of paths || []) {
       if (!p || !fs.existsSync(p)) { result.skipped.push(p); continue; }
       // A file already physically inside this board folder is a
@@ -422,7 +440,45 @@ function registerIpc() {
         result.skipped.push(p);
         continue;
       }
-      const r = await ln.addLink({ base: BASE, boardFolder: folder, targetPath: p, attrib });
+      candidates.push(p);
+    }
+    const anchor = (placeOpts && Array.isArray(placeOpts.anchor)) ? placeOpts.anchor : null;
+    const rows = (placeOpts && placeOpts.rows > 0) ? placeOpts.rows | 0 : 8;
+    let ordered = candidates;
+    let offsets = (placeOpts && Array.isArray(placeOpts.offsets)) ? placeOpts.offsets : null;
+    if (anchor && !offsets && candidates.length) {
+      const deskDirs = new Set(
+        [bf.desktopDir(), shellDesktopDir()].filter(Boolean)
+          .map((d) => path.resolve(d).toLowerCase()));
+      const allOnDesktop = candidates.every(
+        (p) => deskDirs.has(path.resolve(path.dirname(p)).toLowerCase()));
+      if (allOnDesktop) {
+        try {
+          const plan = await desktopLayoutPlan(candidates);
+          if (plan) { ordered = plan.paths; offsets = plan.offsets; }
+        } catch (e) { /* layout lookup is best-effort: strip order */ }
+      }
+    }
+    let cells = null;
+    if (anchor && ordered.length) {
+      try {
+        const data = bf.loadBoard(folder);
+        const { occupied } = pl.computeCells({
+          entries: bf.scanFolder(folder),
+          positions: data.positions, notes: data.notes, links: data.links,
+          rowsPerCol: rows,
+        });
+        cells = pl.placeItems({
+          occupied, anchor, offsets, count: ordered.length, rowsPerCol: rows,
+        });
+      } catch (e) { cells = null; /* placement is best-effort */ }
+    }
+    for (let i = 0; i < ordered.length; i++) {
+      const p = ordered[i];
+      const r = await ln.addLink({
+        base: BASE, boardFolder: folder, targetPath: p, attrib,
+        cell: cells ? cells[i] : undefined,
+      });
       if (r.duplicate) result.duplicates.push(p);
       else {
         result.added.push(p);
@@ -529,9 +585,35 @@ function registerIpc() {
     }
     return dest;
   });
-  ipcMain.handle('drop-files', (_e, boardName, paths) => {
+  ipcMain.handle('drop-files', (_e, boardName, paths, placeOpts) => {
     const folder = guardBoard(boardName);
-    return bf.placeDroppedItems(paths, folder);
+    const placed = bf.placeDroppedItems(paths, folder);
+    // Anchored placement for moved-in residents (v2.2): with an
+    // anchor, the new arrivals get saved cells from the same
+    // placement module linked intake uses (their own stale/absent
+    // positions excluded from occupancy). Without one, positions
+    // stay unset and the renderer appends, exactly as before.
+    const anchor = (placeOpts && Array.isArray(placeOpts.anchor)) ? placeOpts.anchor : null;
+    if (anchor && placed.length) {
+      try {
+        const rows = (placeOpts && placeOpts.rows > 0) ? placeOpts.rows | 0 : 8;
+        const data = bf.loadBoard(folder);
+        const fresh = new Set(placed.map((d) => path.basename(d)));
+        const { occupied } = pl.computeCells({
+          entries: bf.scanFolder(folder).filter((e) => !fresh.has(e.name)),
+          positions: data.positions, notes: data.notes, links: data.links,
+          rowsPerCol: rows,
+        });
+        const cells = pl.placeItems({
+          occupied, anchor,
+          offsets: (placeOpts && Array.isArray(placeOpts.offsets)) ? placeOpts.offsets : null,
+          count: placed.length, rowsPerCol: rows,
+        });
+        placed.forEach((dest, i) => { data.positions[path.basename(dest)] = cells[i]; });
+        bf.saveBoard(folder, data.positions, data.notes, data.sizePercent, data.links);
+      } catch (e) { /* placement is best-effort; the files are in */ }
+    }
+    return placed;
   });
 
   // ------------------------- drag-out: self-implemented MOVE
@@ -557,15 +639,97 @@ function registerIpc() {
     } catch (e) {}
     return path.join(__dirname, 'scripts', fileName);
   }
-  const resolveDropTarget = dm.createResolver({
-    scriptPath: bundledScriptPath('resolve-drop.ps1'),
-  });
+  // ------------------------- warm shell helper (v2.2, Job A)
+  // One long-lived PowerShell process (scripts/shell-helper.ps1)
+  // serves drop-target resolution, desktop icon positioning and
+  // desktop icon position reads over JSON lines. The v2.1 cold-spawn
+  // scripts remain as the fallback for every operation: a helper
+  // transport failure (not running, died, timed out) transparently
+  // re-runs the operation the old way, so nothing can regress below
+  // v2.1 behaviour. The env test stubs keep top precedence so the
+  // suites stay deterministic; OKIBA_HELPER_MODE=off disables the
+  // helper entirely; OKIBA_TEST_HELPER=fake swaps in the Node test
+  // double (tools/fake-helper.js).
+  function createShellHelper() {
+    if (process.env.OKIBA_HELPER_MODE === 'off') return null;
+    if (process.env.OKIBA_TEST_HELPER === 'fake') {
+      const fake = path.join(__dirname, 'tools', 'fake-helper.js');
+      if (!fs.existsSync(fake)) return null;
+      // process.execPath is the ELECTRON binary here, not Node:
+      // ELECTRON_RUN_AS_NODE makes it behave as plain Node so the
+      // fake helper script runs as-is.
+      return sh.createShellHelperClient({
+        command: process.execPath, args: [fake],
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      });
+    }
+    if (process.platform !== 'win32') return null;
+    return sh.createShellHelperClient({
+      command: 'powershell.exe',
+      args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', bundledScriptPath('shell-helper.ps1')],
+    });
+  }
+  shellHelper = createShellHelper();
+  if (shellHelper) shellHelper.start();
+
+  // The SHELL Desktop folder (what the helper reads icons from);
+  // bf.desktopDir() is the plain ~/Desktop path. Both are accepted
+  // when deciding whether a drop came "from the desktop".
+  function shellDesktopDir() {
+    try { return app.getPath('desktop'); } catch (e) { return null; }
+  }
+
+  // Desktop-layout plan for an all-Desktop intake: ask the helper
+  // where those icons sit right now (budget ~400ms — it is a pure
+  // read) and turn the arrangement into relative offsets. ANY
+  // failure → null → drop-order vertical strip.
+  async function desktopLayoutPlan(candidatePaths) {
+    if (!shellHelper) return null;
+    const names = candidatePaths.map((p) => path.basename(p));
+    const r = await shellHelper.request(
+      'getDesktopPositions', { names }, { timeoutMs: 400 });
+    if (!r.ok || !r.result) return null;
+    const cellMap = pl.cellsFromDesktopPositions(r.result, names);
+    const items = candidatePaths.map((p) => ({ key: p, cell: cellMap.get(path.basename(p)) }));
+    if (items.some((it) => !it.cell)) return null; // partial plan would scramble order
+    const plan = pl.planDesktopOffsets(items);
+    if (!plan) return null;
+    return { paths: plan.order, offsets: plan.offsets };
+  }
+
+  const testResolveDrop = dm.testResolverFromEnv();
+  const coldResolveDrop = dm.createPowerShellResolver(bundledScriptPath('resolve-drop.ps1'));
+  async function resolveDropTarget(x, y) {
+    if (testResolveDrop) return testResolveDrop(x, y);
+    if (shellHelper) {
+      const r = await shellHelper.request(
+        'resolveDrop', { x: Math.round(x), y: Math.round(y) });
+      if (r.ok && r.result) return dm.parseResolveOutput(JSON.stringify(r.result));
+      // transport failure only: an authoritative 'unknown' from the
+      // helper is returned as-is (the cold script would agree).
+    }
+    return coldResolveDrop(x, y);
+  }
   // Desktop icon positioning (v1.3): after a Desktop move, place the
   // new icons at the drop point. Strictly best-effort — see
-  // lib/iconpos.js.
-  const positionDesktopIcons = ip.createPositioner({
-    scriptPath: bundledScriptPath('position-desktop-icons.ps1'),
-  });
+  // lib/iconpos.js. v2.2 routes it through the warm helper first
+  // (its internal poll is tightened to ~50ms); the cold script is
+  // the fallback, unchanged.
+  const testPositionIcons = ip.testPositionerFromEnv();
+  const coldPositionIcons = ip.createPowerShellPositioner(
+    bundledScriptPath('position-desktop-icons.ps1'));
+  async function positionDesktopIcons(x, y, names) {
+    if (testPositionIcons) return testPositionIcons(x, y, names);
+    if (shellHelper) {
+      const r = await shellHelper.request(
+        'positionIcons',
+        { x: Math.round(x), y: Math.round(y), names },
+        { timeoutMs: 10000 });
+      if (r.ok && r.result) return ip.parsePositionOutput(JSON.stringify(r.result));
+    }
+    return coldPositionIcons(x, y, names);
+  }
 
   // Every resolution is logged so the GUI test-suite can verify the
   // new IPC path (renderer outside-release -> main resolve -> move)
@@ -689,6 +853,12 @@ function registerIpc() {
       hidden: Object.fromEntries(attrib.state || []),
     };
   });
+  // Test hook (v2.2): warm-helper counters. E2E asserts spawns===1
+  // across several drag-out operations (process reuse) instead of
+  // flaky wall-clock timing checks.
+  ipcMain.handle('test-helper-stats', () => (shellHelper
+    ? shellHelper.stats()
+    : { enabled: false, spawns: 0, requests: 0, ok: 0, failed: 0 }));
 }
 
 app.whenReady().then(async () => {
@@ -718,4 +888,8 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('will-quit', () => {
+  if (shellHelper) shellHelper.dispose();
 });

@@ -822,6 +822,185 @@ function shortcutMain() {
   }
 }
 
+function placementMain() {
+  const pl = require('../lib/placement');
+  const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  console.log('\n[placement] anchored intake placement (v2.2, Job B)');
+  {
+    // Anchor exact: empty board, single item lands on the anchor.
+    const cells = pl.placeItems({ occupied: new Set(), anchor: [2, 1], offsets: [[0, 0]], count: 1, rowsPerCol: 6 });
+    ok(eq(cells, [[2, 1]]), 'placement: single item lands exactly on the anchor');
+  }
+  {
+    // Default: no offsets -> vertical strip in drop order.
+    const cells = pl.placeItems({ occupied: new Set(), anchor: [1, 0], offsets: null, count: 3, rowsPerCol: 6 });
+    ok(eq(cells, [[1, 0], [1, 1], [1, 2]]), 'placement: no offsets -> vertical strip in drop order');
+  }
+  {
+    // Explicit vertical strip preserved.
+    const cells = pl.placeItems({
+      occupied: new Set(), anchor: [3, 2], count: 3, rowsPerCol: 8,
+      offsets: [[0, 0], [0, 1], [0, 2]],
+    });
+    ok(eq(cells, [[3, 2], [3, 3], [3, 4]]), 'placement: explicit vertical strip preserved');
+  }
+  {
+    // Desktop-relative 2-column arrangement preserved exactly.
+    const cells = pl.placeItems({
+      occupied: new Set(), anchor: [1, 1], count: 4, rowsPerCol: 8,
+      offsets: [[0, 0], [0, 1], [1, 0], [1, 1]],
+    });
+    ok(eq(cells, [[1, 1], [1, 2], [2, 1], [2, 2]]),
+      'placement: 2-column desktop arrangement preserved');
+  }
+  {
+    // Collision AT the anchor: forward scan (down the column).
+    const cells = pl.placeItems({
+      occupied: new Set(['2,1']), anchor: [2, 1], count: 1, rowsPerCol: 6,
+      offsets: [[0, 0]],
+    });
+    ok(eq(cells, [[2, 2]]), 'placement: occupied anchor shifts to nearest free cell forward');
+  }
+  {
+    // Collision shifts only the colliding item; neighbours keep
+    // their preferred cells.
+    const cells = pl.placeItems({
+      occupied: new Set(['0,1']), anchor: [0, 0], count: 3, rowsPerCol: 8,
+      offsets: [[0, 0], [0, 1], [0, 5]],
+    });
+    ok(eq(cells, [[0, 0], [0, 2], [0, 5]]),
+      'placement: only the colliding item shifts forward');
+  }
+  {
+    // A shifted item may take the NEXT item's preferred cell; the
+    // next item then shifts too, but relative order is preserved.
+    const cells = pl.placeItems({
+      occupied: new Set(['0,0']), anchor: [0, 0], count: 2, rowsPerCol: 6,
+      offsets: [[0, 0], [0, 1]],
+    });
+    ok(eq(cells, [[0, 1], [0, 2]]), 'placement: chain shift preserves relative order');
+  }
+  {
+    // Capacity overflow wraps to the next column (the user's
+    // acknowledged caveat).
+    const cells = pl.placeItems({
+      occupied: new Set(), anchor: [0, 1], count: 2, rowsPerCol: 2,
+      offsets: [[0, 0], [0, 1]],
+    });
+    ok(eq(cells, [[0, 1], [1, 0]]), 'placement: column capacity overflow wraps to next column');
+  }
+  {
+    // Never overwrite, never duplicate — crowded board.
+    const occupied = new Set(['0,0', '0,1', '0,2', '1,0', '1,1']);
+    const cells = pl.placeItems({
+      occupied, anchor: [0, 0], count: 4, rowsPerCol: 3, offsets: null,
+    });
+    const keys = cells.map((c) => c.join(','));
+    ok(new Set(keys).size === 4 && keys.every((k) => !occupied.has(k)),
+      'placement: never lands on an occupied cell, never duplicates');
+    ok(eq(cells, [[1, 2], [2, 0], [2, 1], [2, 2]]),
+      'placement: forward scan follows the board fill order');
+  }
+  {
+    // computeCells replicates the renderer: saved positions win,
+    // position-less residents/links append in render order.
+    const { cells, occupied } = pl.computeCells({
+      entries: [{ name: 'a.txt' }, { name: 'b.txt' }, { name: 'c.txt' }],
+      positions: { 'a.txt': [2, 0] },
+      notes: [{ id: 'n1', col: 0, row: 0 }],
+      links: [{ path: 'D:\\x.txt', col: null, row: null }],
+      rowsPerCol: 4,
+    });
+    ok(eq(cells.get('file:a.txt'), [2, 0]), 'computeCells: saved resident position kept');
+    ok(eq(cells.get('note:n1'), [0, 0]), 'computeCells: note cell kept');
+    ok(eq(cells.get('file:b.txt'), [0, 1]), 'computeCells: position-less resident appended');
+    ok(eq(cells.get('file:c.txt'), [0, 2]), 'computeCells: append order matches renderer');
+    ok(eq(cells.get('link:D:\\x.txt'), [0, 3]), 'computeCells: position-less link appended last');
+    ok(occupied.size === 5, 'computeCells: occupancy covers every item');
+  }
+  {
+    // Desktop pixel positions -> grid cells -> normalised offsets.
+    const res = { positions: { 'A.txt': { x: 405, y: 198 }, 'B.txt': { x: 405, y: 296 }, 'C.txt': { x: 483, y: 198 } }, sx: 78, sy: 98 };
+    const cellMap = pl.cellsFromDesktopPositions(res, ['A.txt', 'B.txt', 'C.txt', 'gone.txt']);
+    ok(eq(cellMap.get('A.txt'), [5, 2]) && eq(cellMap.get('B.txt'), [5, 3]) && eq(cellMap.get('C.txt'), [6, 2]),
+      'desktop cells: pixels convert via icon spacing');
+    ok(!cellMap.has('gone.txt'), 'desktop cells: missing icons are absent from the map');
+    const plan = pl.planDesktopOffsets([
+      { key: 'C.txt', cell: cellMap.get('C.txt') },
+      { key: 'A.txt', cell: cellMap.get('A.txt') },
+      { key: 'B.txt', cell: cellMap.get('B.txt') },
+    ]);
+    ok(eq(plan.order, ['A.txt', 'B.txt', 'C.txt']),
+      'desktop plan: items ordered by desktop (col,row)');
+    ok(eq(plan.offsets, [[0, 0], [0, 1], [1, 0]]),
+      'desktop plan: offsets normalised to the top-left item');
+  }
+}
+
+async function shellhelperMain() {
+  const sh = require('../lib/shellhelper');
+  console.log('\n[shellhelper] warm-helper client protocol (v2.2, Job A)');
+  const fake = path.join(__dirname, 'fake-helper.js');
+  const landing = tmp();
+  process.env.OKIBA_FAKE_LANDING = landing;
+  {
+    // Two sequential + two pipelined requests, ONE process.
+    const client = sh.createShellHelperClient({ command: process.execPath, args: [fake] });
+    const r1 = await client.request('resolveDrop', { x: 111, y: 5 });
+    ok(r1.ok && r1.result.type === 'explorer' && r1.result.path === landing && r1.result.echo === 111,
+      'helper: resolveDrop answered by the fake helper');
+    const r2 = await client.request('positionIcons', { x: 1, y: 2, names: ['a', 'b'] });
+    ok(r2.ok && r2.result.status === 'ok' && r2.result.positioned === 2,
+      'helper: positionIcons answered by the same process');
+    const [p1, p2] = await Promise.all([
+      client.request('resolveDrop', { x: 222, y: 5 }),
+      client.request('resolveDrop', { x: 333, y: 5 }),
+    ]);
+    ok(p1.ok && p1.result.echo === 222 && p2.ok && p2.result.echo === 333,
+      'helper: pipelined responses matched by request id');
+    const st = client.stats();
+    ok(st.spawns === 1, 'helper: sequential requests reuse one process (spawns==1)');
+    ok(st.requests === 4 && st.ok === 4, 'helper: stats count served requests');
+    client.dispose();
+  }
+  {
+    // Timeout: a hung request fails soft and does NOT kill the
+    // helper; the next request is served by the same process.
+    const client = sh.createShellHelperClient({ command: process.execPath, args: [fake] });
+    const hung = await client.request('hang', {}, { timeoutMs: 250 });
+    ok(!hung.ok && hung.error === 'timeout', 'helper: hung request times out soft');
+    const after = await client.request('resolveDrop', { x: 7, y: 7 });
+    ok(after.ok && after.result.echo === 7, 'helper: request after a timeout still served');
+    ok(client.stats().spawns === 1, 'helper: timeout does not restart the process');
+    client.dispose();
+  }
+  {
+    // Crash: in-flight request fails, the NEXT request lazily
+    // respawns the helper and succeeds (restart-on-crash).
+    const client = sh.createShellHelperClient({ command: process.execPath, args: [fake] });
+    const boom = await client.request('resolveDrop', { x: 1, y: 1, boom: true });
+    ok(!boom.ok, 'helper: request in flight during a crash fails');
+    const next = await client.request('resolveDrop', { x: 9, y: 9 });
+    ok(next.ok && next.result.echo === 9, 'helper: next request succeeds after respawn');
+    ok(client.stats().spawns === 2, 'helper: crash caused exactly one respawn');
+    client.dispose();
+  }
+  {
+    // Disabled client: never spawns, requests fail soft (callers
+    // fall back to the cold-spawn scripts).
+    const client = sh.createShellHelperClient({ enabled: false, command: process.execPath, args: [fake] });
+    const r = await client.request('resolveDrop', { x: 1, y: 1 });
+    ok(!r.ok && client.stats().spawns === 0, 'helper: disabled client never spawns');
+  }
+  {
+    // Wire escaping: Japanese names survive as \uXXXX on the line.
+    const line = sh.escapeLine(JSON.stringify({ name: '素材データ.mp4' }));
+    ok(!/[^\x00-\x7F]/.test(line) && JSON.parse(line).name === '素材データ.mp4',
+      'helper: non-ASCII is \\u-escaped on the wire and round-trips');
+  }
+  delete process.env.OKIBA_FAKE_LANDING;
+}
+
 (async () => {
   try {
     main();
@@ -829,6 +1008,8 @@ function shortcutMain() {
     await iconposMain();
     await linksMain();
     shortcutMain();
+    placementMain();
+    await shellhelperMain();
     console.log('\nselftest: ' + passed + ' checks passed');
   } catch (e) {
     console.error(e.message || e);
