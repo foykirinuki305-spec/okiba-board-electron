@@ -19,8 +19,8 @@ contextBridge.exposeInMainWorld('okiba', {
 
   saveHomePositions: (positions) => ipcRenderer.invoke('save-home-positions', positions),
   setTheme: (theme) => ipcRenderer.invoke('set-theme', theme),
-  saveBoard: (name, positions, notes, sizePercent, links) =>
-    ipcRenderer.invoke('save-board', name, positions, notes, sizePercent, links),
+  saveBoard: (name, positions, notes, sizePercent, links, expectedRevision) =>
+    ipcRenderer.invoke('save-board', name, positions, notes, sizePercent, links, expectedRevision),
 
   // linked items (v2.0): intake registers a reference and hides the
   // original in place; unlink restores visibility; trashLinked is

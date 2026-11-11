@@ -191,13 +191,16 @@ async function boardsState() {
   return Object.assign(homeState(), { boards });
 }
 
+const boardSaveGuard = require('./lib/board-save-guard');
 function boardState(boardName) {
   const folder = path.join(BASE, boardName);
-  const data = bf.loadBoard(folder);
+  const snapshot = boardSaveGuard.loadSnapshot(folder,bf.loadBoard);
+  const data = snapshot.data;
   let entries = [];
   try { entries = bf.scanFolder(folder); } catch (e) {}
   return {
     name: boardName,
+    revision: snapshot.revision,
     folder,
     entries: entries.map((e) => Object.assign(e, {
       kind: kindOf(e.name, e.isDir),
@@ -470,9 +473,9 @@ function registerIpc() {
     return true;
   });
 
-  ipcMain.handle('save-board', (_e, name, positions, notes, sizePercent, links) => {
-    bf.saveBoard(guardBoard(name), positions, notes, sizePercent, links || []);
-    return true;
+  ipcMain.handle('save-board', (_e, name, positions, notes, sizePercent, links, expectedRevision) => {
+    if(folderReturnBusy)return {saved:false,conflict:true,busy:true,currentRevision:boardSaveGuard.revision(boardSaveGuard.readRaw(guardBoard(name)))};
+    return boardSaveGuard.save(guardBoard(name),{positions,notes,sizePercent,links:links||[],expectedRevision},{allowMissingRevision:process.env.OKIBA_TEST_HOOKS==='1'&&!app.isPackaged});
   });
 
   // moveFile adapter for ln.moveLinkedOut: a single-item move

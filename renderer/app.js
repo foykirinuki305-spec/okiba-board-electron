@@ -1,7 +1,22 @@
 'use strict';
 /* OkibaBoard renderer. All filesystem work goes through window.okiba
  * (preload IPC); this file only does layout, drag and menus. */
-const api = window.okiba;
+const api = { ...window.okiba };
+let boardEpoch = 0, boardReadSeq = 0, boardOperation = 0;
+// Invalidate old reads at both boundaries; block a second UI mutation until completion.
+for (const name of ['saveBoard','linkFiles','unlinkItems','renameLinked','trashLinked','trashItem','renameItem','safeTakeout','moveToDesktop','dropFiles','resolveDropMove','moveLinkedToDesktop','restoreHistoryGroup','restoreHistoryItem','renameBoard','trashBoard']) {
+  const original = api[name]; if (typeof original !== 'function') continue;
+  api[name] = async (...args) => {
+    if (boardOperation) throw Error('処理中です。完了してから操作してください。');
+    boardOperation++; boardEpoch++;
+    try { return await original(...args); }
+    finally { boardOperation--; boardEpoch++; }
+  };
+}
+for (const event of ['pointerdown','click','keydown','drop']) document.addEventListener(event, e => {
+  if (!boardOperation) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+}, true);
 
 const THEME_ORDER = ['紺', '黒グレー', '深緑', '紫夜', '焦げ茶'];
 const PERCENTS = [25, 30, 40, 50, 60, 70, 80, 90, 100, 125];
@@ -472,6 +487,8 @@ function bfNextFree(occupied, rows) {
 }
 
 async function persistBoard() {
+  if (!boardData || boardOperation) return;
+  const snapshot = boardData;
   const positions = {};
   const notes = boardData.notes.map((n) => ({ ...n }));
   for (const [key, c] of cells.entries()) {
@@ -496,7 +513,12 @@ async function persistBoard() {
     if (c) { l.col = c[0]; l.row = c[1]; }
   }
   try {
-    await api.saveBoard(boardData.name, positions, notes, boardData.sizePercent, links);
+    const result = await api.saveBoard(snapshot.name, positions, notes, snapshot.sizePercent, links, snapshot.revision);
+    if (result && result.conflict) {
+      toast('別の変更が完了していたため、古い保存は取り消して最新の状態を表示します。',15000);
+      await refreshBoard(); return;
+    }
+    if (result && result.saved && boardData === snapshot) boardData.revision = result.revision;
   } catch (e) { toast(String(e.message || e)); }
 }
 
@@ -1057,20 +1079,21 @@ async function editNoteFlow(key) {
 }
 
 async function refreshBoard() {
-  if (!boardData) return;
-  const name = boardData.name;
+  if (!boardData || boardOperation || dragging) return;
+  const name = boardData.name, epoch = boardEpoch, request = ++boardReadSeq;
   try {
-    boardData = await api.getBoard(name);
-    // A refresh requested before a drag started can resolve DURING
-    // the drag; rendering then would wipe the dragged elements /
-    // rubber band mid-gesture. Re-check at render time.
-    if (dragging) return;
-    if (view === 'board') renderBoard();
+    const next = await api.getBoard(name);
+    if (epoch !== boardEpoch || request !== boardReadSeq || boardOperation || dragging || !boardData || boardData.name !== name || view !== 'board') return;
+    boardData = next;
+    renderBoard();
   } catch (e) { /* board folder may be gone */ }
 }
-
 async function openBoard(name) {
-  boardData = await api.getBoard(name);
+  if (boardOperation) return;
+  const epoch = ++boardEpoch, request = ++boardReadSeq;
+  const next = await api.getBoard(name);
+  if (epoch !== boardEpoch || request !== boardReadSeq || boardOperation) return;
+  boardData = next;
   view = 'board';
   selection = new Set(); // selection never carries across boards
 
@@ -1260,6 +1283,7 @@ $('historyOverlay').addEventListener('mousedown', (e) => {
   if (e.target === $('historyOverlay')) closeHistory();
 });
 $('backBtn').addEventListener('click', async () => {
+  boardEpoch++; boardReadSeq++;
   view = 'home';
   boardView.hidden = true;
   homeView.hidden = false;
@@ -1399,9 +1423,9 @@ window.addEventListener('resize', () => {
 });
 
 // external changes: watcher events + 2s polling + focus refresh
-api.onFsChanged(() => { if (!busy && !dragging) (view === 'board' ? refreshBoard() : refreshHome()); });
-setInterval(() => { if (!busy && !dragging) (view === 'board' ? refreshBoard() : refreshHome()); }, 2000);
-window.addEventListener('focus', () => { if (!busy && !dragging) (view === 'board' ? refreshBoard() : refreshHome()); });
+api.onFsChanged(() => { if (!busy && !dragging && !boardOperation) (view === 'board' ? refreshBoard() : refreshHome()); });
+setInterval(() => { if (!busy && !dragging && !boardOperation) (view === 'board' ? refreshBoard() : refreshHome()); }, 2000);
+window.addEventListener('focus', () => { if (!busy && !dragging && !boardOperation) (view === 'board' ? refreshBoard() : refreshHome()); });
 
 // ------------------------------------------- board-shortcut routing
 // Launched from a board shortcut (--board-path), the app opens
