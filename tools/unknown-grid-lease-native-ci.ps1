@@ -42,7 +42,7 @@ function Unknown-Prepare($req){
  if($mx -lt 8 -or $my -lt 8 -or $mx -gt 512 -or $my -gt 512 -or $patch.left -lt $area.left -or $patch.right -gt $area.right -or $patch.top -lt $area.top -or $patch.bottom -gt $area.bottom){throw 'unknown-patch-invalid'}
  foreach($i in $s.icons){if($i.x -ge $patch.left-$mx -and $i.x -le $patch.right+$mx -and $i.y -ge $patch.top-$my -and $i.y -le $patch.bottom+$my){throw 'unknown-patch-occupied'}}
  $r=@{version=2;kind=$q.kind;token=$req.token;snapshot=$s;originalFlags=[uint32]$s.folderFlags;records=$records;targets=@();targetAreaIndex=$index;plan=$q.plan;phase='unknown-prepared';flagState='on';owner=@{pid=$owner.pid;started=$owner.started}}
- $null=Unknown-Current $r;$selected=Lease-Guard $r $s;if($selected.Count -ne 0){throw 'unknown-initial-visible'};$script:SnapLease=$r
+ Unknown-SuccessInit $r $q;$null=Unknown-Current $r;$selected=Lease-Guard $r $s;if($selected.Count -ne 0){throw 'unknown-initial-visible'};$script:SnapLease=$r
  return @{ok=$true;recovery=$r}
 }
 function Unknown-ProbeVisible($r){
@@ -74,7 +74,7 @@ function Invoke-UnknownLeaseCI($req){
   # The durable intent cannot establish that a pre-change flag is still ours.
   # Accept only its post-change value; other values fail closed without mutation.
   switch -CaseSensitive ($r.flagState){'off-intent'{$r.flagState='off'}'on-intent'{$r.flagState='on'}'restore-on-intent'{$r.flagState='on'}}
-  $current=Unknown-Current $r;$r.phase='abort-only';$script:SnapLease=$r;return @{ok=$true;abortOnly=$true}
+  $current=Unknown-Current $r;if($null -ne $r.success -and $null -ne $r.success.resolved){$null=Unknown-ValidateSuccess $r};$r.phase=if($req.resolutionMode -ceq 'resolve-only'){'resolve-only'}else{'abort-only'};$script:SnapLease=$r;return @{ok=$true;abortOnly=$true}
  }
  $r=Lease-Require $req.token
  if($req.cmd -ceq 'leaseUnknownHideAndVerify'){return Unknown-HideAndVerify $r}
@@ -84,6 +84,7 @@ function Invoke-UnknownLeaseCI($req){
   if((Lease-Guard $r $s).Count -ne 0 -or $s.folderFlags -ne $r.originalFlags){throw 'unknown-release-unverified'}
   Unknown-TerminalHidden $r;$script:SnapLease=$null;return @{ok=$true;released=$true}
  }
+ if($req.cmd -in @('leaseUnknownResolveTargets','leaseUnknownRevealResolvedAndPlace','leaseUnknownRestoreResolvedAndVerify','leaseUnknownVerifyResolvedVisible','leaseUnknownReleaseVisible')){return Invoke-UnknownSuccessCI $req $r}
  Unknown-Live $r;if($r.phase -ceq 'abort-only'){throw 'unknown-adopted-abort-only'}
  switch($req.cmd){
   'leaseUnknownRevealProbe' {
@@ -109,8 +110,10 @@ function Invoke-UnknownLeaseCI($req){
    [OkibaFolderView]::PositionNewItem([int]$i.index,$r.records[0].path,[int]$i.x,[int]$i.y,[int]$req.point.x,[int]$req.point.y,[string]$i.identity)
    $clock=[Diagnostics.Stopwatch]::StartNew();$probe=@{path=$r.records[0].path;name=[IO.Path]::GetFileName($r.records[0].path)}
    $after=Wait-CalibrationSettled $r.snapshot $probe $r.plan.patch $clock;if(-not $after.ok){throw 'unknown-sample-not-settled'}
-   Unknown-AssertFlags $r $after.current;return @{ok=$true;snapshot=$after.current;probe=$after.new[0];elapsedMs=$clock.Elapsed.TotalMilliseconds}
+   Unknown-AssertFlags $r $after.current;$sample=Unknown-RecordSample $r $req $after.new[0];return @{ok=$true;recovery=$r;sample=$sample;snapshot=$after.current;probe=$after.new[0];elapsedMs=$clock.Elapsed.TotalMilliseconds}
   }
   default {throw 'unknown-ci-command-unsupported'}
  }
 }
+
+. (Join-Path $PSScriptRoot 'unknown-grid-success-native-ci.ps1')

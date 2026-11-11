@@ -1,0 +1,41 @@
+name: unknown-grid-success
+on:
+  push:
+    paths:
+      - 'tools/unknown-grid-*'
+      - '.github/workflows/unknown-grid-success.yml'
+  workflow_dispatch:
+jobs:
+  isolated:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Pure success and existing abort regressions
+        shell: pwsh
+        run: |
+          node tools/unknown-grid-success-model-selftest.js
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          node tools/unknown-grid-adaptive-driver-selftest.js
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          node tools/unknown-grid-success-flow-selftest.js
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          node tools/unknown-grid-lease-flow-selftest.js
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          ./tools/unknown-grid-lease-native-guards-selftest.ps1
+      - name: Hosted N3 sparse success and no-fit abort
+        shell: pwsh
+        run: |
+          & node tools/unknown-grid-success-ci.js ([Environment]::GetFolderPath('Desktop')) 2>&1 | Tee-Object unknown-grid-success-ci.log
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unknown-grid-success-evidence
+          path: |
+            unknown-grid-success-ci.json
+            unknown-grid-success-ci.log
+            unknown-grid-success-journals/**

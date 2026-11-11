@@ -16,3 +16,16 @@ ExpectThrow {Unknown-TerminalHidden $r} # Explorer has not yet shown the unhidde
 $script:mockHidden=$true;$script:mockAttributes=34
 ExpectThrow {Unknown-TerminalHidden $r} # unrelated attribute changed
 Write-Output 'PASS pure exact phase flags and terminal Hidden/attributes guards; no Desktop API invoked'
+
+foreach($phase in @('abort-only','calibrating','abort-hidden','aborted','targets-resolved')){ExpectThrow {Unknown-AssertVisiblePhase @{phase=$phase}}}
+foreach($phase in @('resolved-restored','resolve-only')){Unknown-AssertVisiblePhase @{phase=$phase}}
+if(-not (Unknown-VisibleAttributesMatch 2 128) -or -not (Unknown-VisibleAttributesMatch 34 32)){throw 'normal-attribute-normalization-failed'}
+if((Unknown-VisibleAttributesMatch 2 32) -or (Unknown-VisibleAttributesMatch 34 128) -or (Unknown-VisibleAttributesMatch 2 2)){throw 'foreign-attribute-accepted'}
+function Strict-GeometryKey($s){return $s.key}
+function Strict-IconsKey($s){return $s.iconsKey}
+$original=@{key='geometry';iconsKey='old-icons'}
+$bound=@{token='owned';records=@(@{path='probe'});snapshot=$original;success=@{baseline=$original;binding=@{token='owned';probeId='probe';geometryKey='geometry';iconsKey='old-icons'}}}
+Unknown-AssertProofBinding $bound
+foreach($key in @('token','probeId','geometryKey','iconsKey')){$before=$bound.success.binding[$key];$bound.success.binding[$key]='foreign';ExpectThrow {Unknown-AssertProofBinding $bound};$bound.success.binding[$key]=$before}
+$bound.snapshot=@{key='changed';iconsKey='old-icons'};ExpectThrow {Unknown-AssertProofBinding $bound}
+Write-Output 'PASS native pure abort-only visible refusal, NORMAL normalization and immutable proof binding'

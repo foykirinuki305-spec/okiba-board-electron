@@ -4,6 +4,9 @@ const crypto=require('crypto');
 const transitions={
  revealProbe:{from:['unknown-prepared'],intent:'probe-reveal-intent',done:'probe-visible-off',command:'leaseUnknownRevealProbe'},
  beginCalibration:{from:['probe-visible-off'],intent:'probe-snap-intent',done:'calibrating',command:'leaseUnknownBeginCalibration'},
+ resolveTargets:{from:['calibrating'],intent:'resolve-targets-intent',done:'targets-resolved',command:'leaseUnknownResolveTargets'},
+ revealResolvedAndPlace:{from:['targets-resolved'],intent:'placement-off-intent',done:'resolved-placed',command:'leaseUnknownRevealResolvedAndPlace'},
+ restoreResolvedAndVerify:{from:['resolved-placed'],intent:'placement-on-intent',done:'resolved-restored',command:'leaseUnknownRestoreResolvedAndVerify'},
  calibrationSample:{from:['calibrating'],intent:'calibrating',done:'calibrating',command:'leaseUnknownCalibrationSample'}
 };
 function validateUnknownScope(scope){
@@ -24,12 +27,12 @@ function createUnknownFlow(io){
   },
   async step(name,token,payload={}){
    const rule=transitions[name];if(!rule)throw Error('unknown-step');const a=await requireLive(token);if(!rule.from.includes(a.phase))throw Error('unknown-phase-invalid');
-   a.phase=rule.intent;if(name==='revealProbe')a.recovery.flagState='off-intent';if(name==='beginCalibration')a.recovery.flagState='on-intent';await io.save(); // Before every mutating native request.
+   a.phase=rule.intent;if(['revealProbe','revealResolvedAndPlace'].includes(name))a.recovery.flagState='off-intent';if(['beginCalibration','restoreResolvedAndVerify'].includes(name))a.recovery.flagState='on-intent';await io.save(); // Before every mutating native request.
    const r=await io.native(rule.command,{...payload,token});if(!r.ok)throw Error(r.reason||'unknown-native-failed');
-   if(r.recovery)a.recovery=r.recovery;if(name==='revealProbe')a.recovery.flagState='off';if(name==='beginCalibration')a.recovery.flagState='on';a.phase=rule.done;await io.save();return r;
+   if(r.recovery)a.recovery=r.recovery;if(['revealProbe','revealResolvedAndPlace'].includes(name))a.recovery.flagState='off';if(['beginCalibration','restoreResolvedAndVerify'].includes(name))a.recovery.flagState='on';a.phase=rule.done;await io.save();return r;
   },
-  async abort(token){
-   const a=io.get();if(!a||a.mode!=='unknown-ci'||a.token!==token||a.permit)throw Error('unknown-abort-invalid');if(a.phase==='aborted')return {ok:true,state:'aborted'};
+  async abort(token,receiptResolution=false){
+   const a=io.get();if(!a||a.mode!=='unknown-ci'||a.token!==token||(a.permit&&!(receiptResolution&&io.canRollbackPermit&&await io.canRollbackPermit(a))))throw Error('unknown-abort-invalid');if(a.phase==='aborted')return io.lockOwned?.()?{ok:false,state:'blocked',reason:'terminal-global-lock-unreleased'}:{ok:true,state:'aborted'};
    a.phase='abort-hide-intent';await io.save(); // Keep exact old flag through hiding and any helper loss.
    const hidden=await io.native('leaseUnknownHideAndVerify',{token});
    if(!hidden.ok||!hidden.oldUnchanged||!hidden.selectedHidden||!hidden.recovery||!['on','off'].includes(hidden.recovery.flagState))throw Error('unknown-hide-unverified');

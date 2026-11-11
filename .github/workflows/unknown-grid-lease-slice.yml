@@ -2,7 +2,7 @@ name: unknown-grid-lease-slice
 on:
   push:
     paths:
-      - 'tools/unknown-grid-lease-*'
+      - 'tools/unknown-grid-*'
       - '.github/workflows/unknown-grid-lease-slice.yml'
   workflow_dispatch:
 jobs:
