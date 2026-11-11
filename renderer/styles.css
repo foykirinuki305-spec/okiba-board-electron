@@ -196,7 +196,8 @@ body {
   border-radius: 12px; overflow: hidden; flex: none;
   box-shadow: 0 5px 14px var(--shadow);
 }
-.item .thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.item .thumb.native-preview { border-radius: 0; box-shadow: none; }
+.item .thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
 .item .name {
   margin-top: 6px; width: 100%; text-align: center; line-height: 1.3;
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;

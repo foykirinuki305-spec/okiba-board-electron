@@ -79,22 +79,14 @@ async function runInAppSelfTest() {
 }
 
 // -------------------------------------------------------------- thumbnails
-const thumbCache = new Map(); // path|mtime|size -> dataURL|null
-async function thumbnailFor(fullPath, px) {
-  let stat;
-  try { stat = fs.statSync(fullPath); } catch (e) { return null; }
-  if (!stat.isFile()) return null;
-  const key = fullPath + '|' + stat.mtimeMs + '|' + px;
-  if (thumbCache.has(key)) return thumbCache.get(key);
-  let url = null;
-  try {
-    const img = await nativeImage.createThumbnailFromPath(fullPath, { width: px, height: px });
-    if (img && !img.isEmpty()) url = img.toDataURL();
-  } catch (e) { url = null; }
-  if (thumbCache.size > 400) thumbCache.clear();
-  thumbCache.set(key, url);
-  return url;
-}
+const { createPreviewService } = require('./lib/previews');
+const previewService = createPreviewService({
+  stat: (fullPath) => fs.promises.stat(fullPath),
+  thumbnail: (fullPath, options) => nativeImage.createThumbnailFromPath(fullPath, options),
+  fileIcon: (fullPath, options) => app.getFileIcon(fullPath, options),
+  isMedia: (fullPath) => ['image', 'video'].includes(kindOf(path.basename(fullPath), false)),
+});
+function thumbnailFor(fullPath, px) { return previewService.get(fullPath, px); }
 
 // Startup speed: the home screen must paint BEFORE thumbnails are
 // generated (a cold thumbnail cache used to block the first render
@@ -110,15 +102,7 @@ function notifyThumbsReady() {
   }, 300);
 }
 function peekThumb(fullPath, px) {
-  let stat;
-  try { stat = fs.statSync(fullPath); } catch (e) { return null; }
-  if (!stat.isFile()) return null;
-  const key = fullPath + '|' + stat.mtimeMs + '|' + px;
-  if (thumbCache.has(key)) return thumbCache.get(key);
-  thumbnailFor(fullPath, px)
-    .then((url) => { if (url) notifyThumbsReady(); })
-    .catch(() => {});
-  return null;
+  return previewService.peek(fullPath, px, notifyThumbsReady);
 }
 
 async function boardPreview(boardName) {
@@ -140,11 +124,13 @@ async function boardPreview(boardName) {
   }
   const thumbs = [];
   const kinds = [];
+  let previewCandidates = 0;
   for (const e of items) {
     if (kinds.length < 6) kinds.push(kindOf(e.name, e.isDir));
-    if (thumbs.length >= 6) continue;
+    if (previewCandidates >= 6) continue;
     const kind = kindOf(e.name, e.isDir);
     if (kind === 'image' || kind === 'video') {
+      previewCandidates++;
       // Cache-first (see peekThumb): never block first paint on
       // thumbnail generation; missing ones arrive via fs-changed.
       const url = peekThumb(e.fullPath, 220);
@@ -326,6 +312,10 @@ function listCleanupFiles(dir) {
 }
 
 function runVersionCleanup() {
+  // Development/test runs must never clean the real Desktop or Downloads.
+  // Explicit redirected folders keep the cleanup integration test available.
+  if (!app.isPackaged && (!process.env.OKIBA_CLEANUP_DESKTOP ||
+      !process.env.OKIBA_CLEANUP_DOWNLOADS)) return;
   try {
     const current = app.getVersion();
     const home = bf.loadHome(BASE);

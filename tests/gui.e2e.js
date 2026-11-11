@@ -138,6 +138,7 @@ async function main() {
   fs.mkdirSync(SHOTS, { recursive: true });
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-base-'));
   const oldBase = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-old-'));
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-profile-'));
   const boardName = 'テスト素材';
   const boardDir = path.join(base, boardName);
   fs.mkdirSync(boardDir, { recursive: true });
@@ -174,6 +175,9 @@ async function main() {
 
   const env = {
     ...process.env,
+    OKIBA_CLEANUP_DESKTOP: landing,
+    OKIBA_CLEANUP_DOWNLOADS: landing,
+    OKIBA_SHORTCUT_DESKTOP: landing,
     OKIBA_BASE: base,
     OKIBA_OLD_BASE: oldBase,
     OKIBA_TEST_RESOLVER_DIR: landing,
@@ -182,7 +186,7 @@ async function main() {
     ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
   };
   const launch = (extraEnv) => electron.launch({
-    args: [ROOT, '--no-sandbox'],
+    args: [ROOT, '--no-sandbox', '--user-data-dir=' + userData],
     env: extraEnv ? { ...env, ...extraEnv } : env,
     timeout: 60000,
   });
@@ -620,7 +624,7 @@ async function main() {
 
   step('shortcut launch: --board-path opens the board directly');
   const launchArgs = (extra) => electron.launch({
-    args: [ROOT, '--no-sandbox', ...extra],
+    args: [ROOT, '--no-sandbox', '--user-data-dir=' + userData, ...extra],
     env, timeout: 60000,
   });
   const app6 = await launchArgs(['--board-path', boardDir]);
@@ -884,7 +888,7 @@ async function main() {
   delete env9.OKIBA_TEST_RESOLVER_DIR;
   delete env9.OKIBA_TEST_POSITIONER;
   const app13 = await electron.launch({
-    args: [ROOT, '--no-sandbox'], env: env9, timeout: 60000,
+    args: [ROOT, '--no-sandbox', '--user-data-dir=' + userData], env: env9, timeout: 60000,
   });
   page = await app13.firstWindow();
   await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
@@ -1245,7 +1249,7 @@ async function main() {
   delete env13.OKIBA_TEST_RESOLVER_DIR;
   delete env13.OKIBA_TEST_POSITIONER;
   const app19 = await electron.launch({
-    args: [ROOT, '--no-sandbox'], env: env13, timeout: 60000,
+    args: [ROOT, '--no-sandbox', '--user-data-dir=' + userData], env: env13, timeout: 60000,
   });
   // Both cursor witnesses must use the same scripted coordinates. The
   // renderer backup otherwise reads the user's real OS mouse on multi-monitor
@@ -1467,6 +1471,9 @@ async function main() {
     return b && ab && b.x > ab.x - 4 && b.x < ab.x + ab.width;
   }, 'scroll: the col-7 item is visible after scrolling right');
   await app21.close();
+
+  step('native desktop previews: thumbnails, file icons, missing/note, unchanged data');
+  await require('./previews.e2e')(SHOTS);
 
   console.log('\nGUI E2E: all steps passed');
 }

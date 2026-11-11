@@ -62,9 +62,9 @@
   "name": "okiba-board",
   "scripts": {
     "build": "electron-builder --win --publish never",
-    "selftest": "node tools/selftest.js",
+    "selftest": "node tools/selftest.js && node tools/preview-selftest.js",
     "test:gui": "node tests/gui.e2e.js",
     "start": "electron ."
   },
-  "version": "2.2.3"
+  "version": "2.2.4"
 }

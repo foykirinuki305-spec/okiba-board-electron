@@ -20,7 +20,7 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
 
       - name: Headless self-test (pure fs logic)
-        run: node tools/selftest.js
+        run: npm run selftest
 
       # The bundled PowerShell scripts only ever run on end-user PCs
       # (tests stub them), so at least prove here that each script

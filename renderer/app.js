@@ -145,17 +145,46 @@ document.addEventListener('drop', (e) => {
 api.onStatus((msg) => toast(msg));
 
 // -------------------------------------------------------------- thumbs
-const thumbCache = new Map();
-function loadThumb(fullPath, imgEl) {
-  if (thumbCache.has(fullPath)) {
-    const u = thumbCache.get(fullPath);
-    if (u) imgEl.src = u;
-    return;
+// Show the last preview immediately, then revalidate in main's mtime/size
+// cache. This avoids flashing placeholders at every polling refresh without
+// retaining stale path-only images indefinitely.
+const previewImages = new Map();
+const previewPending = new Map();
+const previewQueue = [];
+let previewActive = 0;
+function rememberPreview(fullPath, url) {
+  previewImages.delete(fullPath);
+  if (url) previewImages.set(fullPath, url);
+  while (previewImages.size > 400) previewImages.delete(previewImages.keys().next().value);
+}
+function requestPreview(fullPath, target) {
+  if (previewPending.has(fullPath)) {
+    const task = previewPending.get(fullPath);
+    task.targets = new Set([...task.targets].filter(el => el.isConnected));
+    task.targets.add(target);
+    return task.promise;
   }
-  api.thumb(fullPath).then((url) => {
-    thumbCache.set(fullPath, url);
-    if (url && imgEl.isConnected) imgEl.src = url;
-  }).catch(() => thumbCache.set(fullPath, null));
+  const task = { fullPath, targets: new Set([target]) };
+  task.promise = new Promise(resolve => { task.resolve = resolve; });
+  previewPending.set(fullPath, task);
+  previewQueue.push(task);
+  // renderBoard attaches the new targets before this microtask runs.
+  Promise.resolve().then(pumpPreviews);
+  return task.promise;
+}
+function pumpPreviews() {
+  while (previewActive < 4 && previewQueue.length) {
+    const task = previewQueue.shift();
+    if (view !== 'board' || ![...task.targets].some(el => el.isConnected)) {
+      previewPending.delete(task.fullPath); task.resolve(null); continue;
+    }
+    previewActive++;
+    Promise.resolve().then(() => api.thumb(task.fullPath)).catch(() => null)
+      .then(url => { rememberPreview(task.fullPath, url); task.resolve(url); })
+      .finally(() => {
+        previewPending.delete(task.fullPath); previewActive--; pumpPreviews();
+      });
+  }
 }
 
 function tileFor(kind, noteText) {
@@ -505,26 +534,30 @@ function renderBoard() {
     thumb.className = 'thumb';
     thumb.style.width = m.thumb + 'px';
     thumb.style.height = m.thumb + 'px';
-    if ((kind === 'image' || kind === 'video') && fullPath && !missing) {
+    if (kind !== 'note' && kind !== 'folder' && fullPath && !missing) {
       const showImg = (url) => {
+        thumb.classList.add('native-preview');
         const t = thumb.querySelector('.tile');
         if (t) t.remove();
+        const previous = thumb.querySelector('img');
+        if (previous) previous.remove();
         const img = document.createElement('img');
         img.alt = '';
         img.draggable = false; // a dragged data:-URL img becomes a "download"
         img.src = url;
         thumb.appendChild(img);
       };
-      const had = thumbCache.get(fullPath);
-      if (had) showImg(had);
-      else {
-        // show a tile until the thumbnail arrives
-        thumb.appendChild(tileFor(kind));
-        api.thumb(fullPath).then((url) => {
-          thumbCache.set(fullPath, url);
-          if (url && thumb.isConnected) showImg(url);
-        }).catch(() => {});
-      }
+      const previous = previewImages.get(fullPath);
+      if (previous) showImg(previous);
+      else thumb.appendChild(tileFor(kind));
+      requestPreview(fullPath, thumb).then((url) => {
+        if (!thumb.isConnected) return;
+        if (url) showImg(url);
+        else if (previous) {
+          thumb.classList.remove('native-preview');
+          thumb.replaceChildren(tileFor(kind));
+        }
+      }).catch(() => {});
     } else {
       thumb.appendChild(tileFor(kind === 'note' ? 'note' : kind, noteText));
     }
