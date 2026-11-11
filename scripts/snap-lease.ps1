@@ -160,11 +160,18 @@ function Lease-RestoreVerify([string]$token){
  $script:LeasePhase='restore-preflight'
  $r=Lease-Require $token;$s=Measure-LeaseStep 'restoreCheck' {Lease-Snapshot};$null=Lease-Guard $r $s $true;Lease-AllGrid $r.snapshot $s
  foreach($record in $r.records){if((Lease-CheckRecord $record).hidden){throw 'lease-target-hidden'}}
- if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){Lease-SetSnap $r $s $true}
+ # A fresh full verification is still mandatory on every call. If no setting
+ # changes now, there is no self-induced transition needing another settle/read.
+ if([uint32]$s.folderFlags -eq [uint32]$r.originalFlags){
+  if(-not $s.snap){throw 'lease-restore-unverified'}
+  Add-LeasePerf 'restoreAlreadyEnabled' ([Diagnostics.Stopwatch]::StartNew())
+  return @{ok=$true;snapRestored=$true;oldUnchanged=$true;targetsExact=$true;restoreMode='already-enabled-fresh-verification'}
+ }
+ Lease-SetSnap $r $s $true
  Measure-LeaseStep 'restoreSettle' {Start-Sleep -Milliseconds 250}
  $s=Measure-LeaseStep 'afterguard' {Lease-Snapshot};Measure-LeaseStep 'exactGuard' {$null=Lease-Guard $r $s $true}
  if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags -or -not $s.snap){throw 'lease-restore-unverified'}
- return @{ok=$true;snapRestored=$true;oldUnchanged=$true;targetsExact=$true}
+ return @{ok=$true;snapRestored=$true;oldUnchanged=$true;targetsExact=$true;restoreMode='changed-and-settled'}
 }
 function Lease-Rollback([string]$token){
  $script:LeasePhase='rollback-preflight'

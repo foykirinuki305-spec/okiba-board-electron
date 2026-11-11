@@ -30,5 +30,32 @@ $x=Clone-Data $r;$x.snapshot.icons[0].path=$x.records[0].path;Reject {Lease-Vali
 $x=Clone-Data $r;$x.snapshot.areas[0].grid=$null;Reject {Lease-ValidateRecovery $x $s} 'lease-off-grid-icon'
 $env:OKIBA_SNAP_LEASE=$null;$reply=Invoke-SnapLeaseRequest @{cmd='leasePrepare'};Pass (-not $reply.ok -and $reply.detail -eq 'lease-dedicated-helper-required') 'dedicated helper required'
 Pass ($reply.perf.inclusive -and $reply.perf.metrics.total.count -eq 1) 'failure includes observer perf'
+# Synthetic restore branch regression. Every OS operation is replaced with a mock.
+function Lease-Snapshot {$script:readCount++;return $script:readQueue.Dequeue()}
+function Lease-SetSnap($r,$s,[bool]$enabled){if(-not $enabled){throw 'unexpected disable'};$script:setCount++}
+function Lease-CheckRecord($r){$script:fileChecks++;return @{hidden=$script:mockHidden}}
+function Start-Sleep {param([int]$Milliseconds);$script:sleepMs+=$Milliseconds}
+function Reset-RestoreMocks($snapshots){
+ $script:readQueue=[Collections.Queue]::new();foreach($v in $snapshots){$script:readQueue.Enqueue($v)}
+ $script:readCount=0;$script:setCount=0;$script:fileChecks=0;$script:sleepMs=0;$script:mockHidden=$false;$script:LeasePerf=@{}
+}
+$script:SnapLease=$r
+$visible=Clone-Data $s;$visible.icons+=@{identity='selected';path=$r.targets[0].path;x=200;y=0}
+Reset-RestoreMocks @($visible)
+$reply=Lease-RestoreVerify $r.token
+Pass ($reply.ok -and $reply.restoreMode -eq 'already-enabled-fresh-verification' -and $script:readCount -eq 1 -and $script:setCount -eq 0 -and $script:sleepMs -eq 0 -and $script:fileChecks -eq 1) 'already ON keeps fresh full checks without redundant transition wait'
+Pass ($script:LeasePerf.restoreAlreadyEnabled.count -eq 1 -and -not $script:LeasePerf.ContainsKey('restoreSettle')) 'already ON skip is observable'
+$off=Clone-Data $visible;$off.folderFlags=0;$off.snap=$false
+Reset-RestoreMocks @($off,$visible)
+$reply=Lease-RestoreVerify $r.token
+Pass ($reply.ok -and $reply.restoreMode -eq 'changed-and-settled' -and $script:readCount -eq 2 -and $script:setCount -eq 1 -and $script:sleepMs -eq 250 -and $script:fileChecks -eq 1) 'OFF to ON retains setter wait and fresh final guard'
+$changed=Clone-Data $visible;$changed.icons[0].x=100
+Reset-RestoreMocks @($changed)
+Reject {Lease-RestoreVerify $r.token} 'lease-old-icon-moved'
+Reset-RestoreMocks @($visible);$script:mockHidden=$true
+Reject {Lease-RestoreVerify $r.token} 'lease-target-hidden'
+Reset-RestoreMocks @($off,$changed)
+Reject {Lease-RestoreVerify $r.token} 'lease-old-icon-moved'
+$script:SnapLease=$null;$script:LeasePerf=$null
 Write-Host ('snap lease pure: '+$n+' passed; no desktop mutations')
 
