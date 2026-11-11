@@ -249,6 +249,25 @@ public static class OkibaTestWin {
   }
 
   Write-Host ''
+  # The first test icon occupies the same grid column as the group test.
+  # Remove it and wait for Explorer to acknowledge removal, otherwise this
+  # test itself creates a collision unrelated to group placement.
+  Remove-Item -LiteralPath $dummy -Force
+  $gone = $false
+  for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    $r = [OkibaDesk+Reader]::new($metricLv)
+    try {
+      $stillThere = $false
+      for ($idx = 0; $idx -lt [OkibaDesk]::GetItemCount($metricLv); $idx++) {
+        $label = $r.GetText($idx)
+        if ($label -ceq $name -or $label -ceq [IO.Path]::GetFileNameWithoutExtension($name)) { $stillThere = $true; break }
+      }
+    } finally { $r.Dispose() }
+    if (-not $stillThere) { $gone = $true; break }
+    Start-Sleep -Milliseconds 250
+  }
+  if (-not $gone) { Fail 'single-test icon did not disappear before batch test' }
+
   # ---- 4. three icons, including Unicode/spaces, twice in one helper ----
   # Use actual listview geometry, including multi-monitor client origin.
   $tag = [guid]::NewGuid().ToString('N').Substring(0, 10)
