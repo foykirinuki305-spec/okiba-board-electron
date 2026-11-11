@@ -22,6 +22,32 @@ jobs:
       - name: Headless self-test (pure fs logic)
         run: npm run selftest
 
+      - name: Packaged copy fixture ASCII wire roundtrip
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./tools/packaged-copyout-wire-selftest.ps1
+
+      - name: Native copy refuses Desktop roots before opening material
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./tools/copyout-desktop-guard-selftest.ps1
+
+      - name: Original-preserving native copy in generated TEMP fixtures
+        run: node tools/copyout-selftest.js
+
+      - name: Native copy failure cleanup before and after publication
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./tools/copyout-fault-selftest.ps1
+
+      - name: User-initiated copy UI cancellation and partial outcomes
+        run: node tests/copyout-ui.e2e.js
+
+      - name: Upload copy UI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: copyout-ui-evidence
+          path: copyout-ui-evidence/
+          if-no-files-found: ignore
+
       # The bundled PowerShell scripts only ever run on end-user PCs
       # (tests stub them), so at least prove here that each script
       # parses and its embedded C# interop compiles. One fresh pwsh
@@ -123,32 +149,6 @@ jobs:
         with:
           name: lease-gui-evidence
           path: lease-gui-evidence/
-          if-no-files-found: ignore
-
-      - name: Packaged copy fixture ASCII wire roundtrip
-        shell: pwsh
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./tools/packaged-copyout-wire-selftest.ps1
-
-      - name: Native copy refuses Desktop roots before opening material
-        shell: pwsh
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./tools/copyout-desktop-guard-selftest.ps1
-
-      - name: Original-preserving native copy in generated TEMP fixtures
-        run: node tools/copyout-selftest.js
-
-      - name: Native copy failure cleanup before and after publication
-        shell: pwsh
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./tools/copyout-fault-selftest.ps1
-
-      - name: User-initiated copy UI cancellation and partial outcomes
-        run: node tests/copyout-ui.e2e.js
-
-      - name: Upload copy UI evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: copyout-ui-evidence
-          path: copyout-ui-evidence/
           if-no-files-found: ignore
 
       - name: Build installer + portable exe

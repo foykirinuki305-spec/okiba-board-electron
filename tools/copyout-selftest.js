@@ -47,6 +47,16 @@ function attrib(file,flag){let args=flag?[flag,file]:[file];const r=cp.spawnSync
   ok(hash(large)===largeBefore.hash&&fs.statSync(large).ino===largeBefore.ino&&attrib(large)===largeBefore.attrs,'128MiB original bytes ID attrs unchanged');
   ok(fs.statSync(lr.dest).ino!==largeBefore.ino&&!attrib(lr.dest).includes('H'),'128MiB independent visible copy');
   console.log(JSON.stringify({measurement:'one synthetic warm-cache local-volume sample, not general video throughput',bytes:128*1024*1024,nativeCopyIncludingHashesMs:lr.copyMs,workerRoundTripIncludingStartupMs:workerRoundTripMs}));
+  const aliasSource=path.join(srcdir,'Alias Source Long Name.bin'),aliasDest=path.join(root,'Alias Destination Long Name');fs.writeFileSync(aliasSource,'alias source bytes');fs.mkdirSync(aliasDest);
+  const shortScript=`Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; public static class CopyTestShortPath { [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] public static extern uint GetShortPathName(string path,StringBuilder result,uint size); }'; $values=@(); foreach($p in @($env:OKIBA_COPY_TEST_SOURCE,$env:OKIBA_COPY_TEST_DEST)){ $b=New-Object Text.StringBuilder 32768; if([CopyTestShortPath]::GetShortPathName($p,$b,32768) -eq 0){throw 'short path unavailable'}; $values+=$b.ToString() }; [Console]::Out.WriteLine((ConvertTo-Json -InputObject $values -Compress))`;
+  const shortResult=cp.spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',shortScript],{encoding:'utf8',windowsHide:true,env:{...process.env,OKIBA_COPY_TEST_SOURCE:aliasSource,OKIBA_COPY_TEST_DEST:aliasDest}});assert.equal(shortResult.status,0,shortResult.stderr);const [shortSource,shortDest]=JSON.parse(shortResult.stdout.trim());
+  ok(fs.statSync(shortSource).ino===fs.statSync(aliasSource).ino&&fs.statSync(shortDest).ino===fs.statSync(aliasDest).ino,'short aliases resolve to same original file and directory IDs');
+  const aliasBefore={ino:fs.statSync(aliasSource).ino,hash:hash(aliasSource),attrs:attrib(aliasSource)};
+  const aliasCopy=await copyFilesOut({sources:[shortSource],destDir:shortDest});ok(aliasCopy.copied.length===1,JSON.stringify(aliasCopy));
+  const aliasExpected=path.join(fs.realpathSync.native(aliasDest),path.basename(fs.realpathSync.native(aliasSource)));
+  ok(fs.realpathSync.native(aliasCopy.copied[0].dest).toLowerCase()===aliasExpected.toLowerCase(),'short source basename and destination produce exact long-name destination');
+  ok(hash(aliasExpected)===aliasBefore.hash&&hash(aliasSource)===aliasBefore.hash&&fs.statSync(aliasSource).ino===aliasBefore.ino&&attrib(aliasSource)===aliasBefore.attrs,'alias copy preserves original and correct destination content');
+  console.log(JSON.stringify({ownedAliasFixture:true,sourceSpellingChanged:shortSource.toLowerCase()!==aliasSource.toLowerCase(),destinationSpellingChanged:shortDest.toLowerCase()!==aliasDest.toLowerCase()}));
   console.log(`copyout: ${checks} checks PASS (own TEMP only)`);
  }finally{if(path.dirname(root)!==os.tmpdir()||!path.basename(root).startsWith('okiba-copyout-test-'))throw Error('cleanup scope');fs.rmSync(root,{recursive:true,force:true});}
 })().catch(e=>{console.error(e);process.exitCode=1});
