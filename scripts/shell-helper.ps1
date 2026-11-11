@@ -1,4 +1,4 @@
-﻿# Warm shell helper (v2.2): ONE long-lived PowerShell process that
+# Warm shell helper (v2.2): ONE long-lived PowerShell process that
 # serves the shell-interop requests the app used to cold-spawn per
 # operation (scripts/resolve-drop.ps1, scripts/position-desktop-icons.ps1).
 # Protocol: JSON lines on stdin -> JSON lines on stdout, matched by
@@ -586,7 +586,20 @@ public static class OkibaFolderView {
  public static void ClearReadNameCache(){ReadNameCache.Clear();ReadPathCache.Clear();}
  public sealed class ShellReadRow {public string label;public int x;public int y;public string identity;public string path;public int index;}
  static string PidlKey(IntPtr p){uint size=ILGetSize(p);if(size<2||size>65536)throw new InvalidOperationException("bad-pidl-size");byte[] bytes=new byte[size];Marshal.Copy(p,bytes,0,(int)size);return Convert.ToBase64String(bytes);}
+ // Only two successful ALLVIEW count observations can prove an empty view.
+ public static bool VerifyEmptyCounts(int firstHr,int firstCount,int secondHr,int secondCount){
+  if(firstHr!=0){Marshal.ThrowExceptionForHR(firstHr);throw new InvalidOperationException("item-count-not-s-ok");}
+  if(firstCount<0)throw new InvalidOperationException("bad-item-count");
+  if(firstCount!=0)return false;
+  if(secondHr!=0){Marshal.ThrowExceptionForHR(secondHr);throw new InvalidOperationException("item-count-not-s-ok");}
+  if(secondCount!=0)throw new InvalidOperationException("item-count-changed");
+  return true;
+ }
  static IntPtr[] EnumerateRead(IFolderView2 view){
+  int firstCount;int firstHr=view.ItemCount(2u,out firstCount);
+  if(firstHr!=0||firstCount<0)VerifyEmptyCounts(firstHr,firstCount,0,0);
+  if(firstCount==0){int secondCount;int secondHr=view.ItemCount(2u,out secondCount);if(VerifyEmptyCounts(firstHr,firstCount,secondHr,secondCount))return new IntPtr[0];}
+
   Guid iid=typeof(IEnumIDListRead).GUID;IntPtr ptr=IntPtr.Zero,array=IntPtr.Zero;object obj=null;
   var result=new System.Collections.Generic.List<IntPtr>();
   try {
@@ -1070,6 +1083,40 @@ function Strict-InferAreaGrid($members,[int]$sx,[int]$sy,[int]$scale,[int]$viewD
   if($residues.Count -ne 1){return $null}
   $xy=$residues[0].Split(',');return @{gx=[int]$xy[0];gy=[int]$xy[1];sx=$sx;sy=$sy}
 }
+Add-Type -TypeDefinition @'
+// Pure snapshot grid arithmetic. No Shell calls, caching or policy relaxation.
+using System;
+public static class OkibaStrictAreaGrid {
+ public static int[][] Infer(int[] xs,int[] ys,int[][] areas,int sx,int sy,int dpi) {
+  if(xs==null||ys==null||areas==null||xs.Length!=ys.Length)throw new ArgumentException("shape");
+  var result=new int[areas.Length][];
+  for(int a=0;a<areas.Length;a++) {
+   var r=areas[a];if(r==null||r.Length!=5)throw new ArgumentException("area-shape");
+   if(sx<=0||sy<=0||r[4]<=0||dpi<=0||(long)r[4]*96!=(long)dpi*100)continue;
+   bool found=false,mismatch=false;int gx=0,gy=0;
+   for(int i=0;i<xs.Length;i++) {
+    if(xs[i]<r[0]||xs[i]>=r[2]||ys[i]<r[1]||ys[i]>=r[3])continue;
+    int x=(int)(((long)xs[i]%sx+sx)%sx),y=(int)(((long)ys[i]%sy+sy)%sy);
+    if(!found){found=true;gx=x;gy=y;}else if(x!=gx||y!=gy){mismatch=true;break;}
+   }
+   if(found&&!mismatch)result[a]=new int[]{gx,gy,sx,sy};
+  }
+  return result;
+ }
+}
+'@
+function Set-StrictAreaGrids($icons,$areas,[int]$sx,[int]$sy,[int]$viewDpi) {
+ $xs=New-Object 'System.Collections.Generic.List[int]';$ys=New-Object 'System.Collections.Generic.List[int]'
+ foreach($i in $icons){$xs.Add([int]$i.x);$ys.Add([int]$i.y)}
+ $bounds=New-Object 'System.Collections.Generic.List[int[]]'
+ foreach($area in $areas){$bounds.Add([int[]]@($area.left,$area.top,$area.right,$area.bottom,$area.scale))}
+ $grids=[OkibaStrictAreaGrid]::Infer($xs.ToArray(),$ys.ToArray(),$bounds.ToArray(),$sx,$sy,$viewDpi)
+ for($a=0;$a -lt @($areas).Count;$a++){
+  $g=$grids[$a]
+  if($null -eq $g){$areas[$a].grid=$null}else{$areas[$a].grid=@{gx=$g[0];gy=$g[1];sx=$g[2];sy=$g[3]}}
+ }
+}
+
 # Observer-only timings. Durations overlap (inclusive), never sum categories.
 $script:DesktopPerf=$null
 function Add-DesktopPerf([string]$name,$clock) {
@@ -1128,11 +1175,11 @@ function Get-RawStrictDesktopSnapshotCore {
       $r=$_
       $tl=[OkibaDesk]::ToClient($lv,$r[0],$r[1]); $br=[OkibaDesk]::ToClient($lv,$r[2],$r[3])
       $monitorOrigin=[OkibaDesk]::ToClient($lv,$r[4],$r[5])
-      $members=@($icons.ToArray() | Where-Object {$_.x -ge $tl[0] -and $_.x -lt $br[0] -and $_.y -ge $tl[1] -and $_.y -lt $br[1]})
-      $areaGrid=Strict-InferAreaGrid $members $sx $sy ([int]$r[6]) $viewDpi
+      $areaGrid=$null # Filled by pure batch arithmetic below.
       @{left=[int]$tl[0];top=[int]$tl[1];right=[int]$br[0];bottom=[int]$br[1];grid=$areaGrid;scale=[int]$r[6];monitorOrigin=@{x=$monitorOrigin[0];y=$monitorOrigin[1]}}
     })
     if ($areas.Count -eq 0) { return @{ok=$false;reason='unknown-monitors'} }
+    Set-StrictAreaGrids $icons $areas $sx $sy $viewDpi
     $snapshot=@{ok=$true;identityVersion=1;explorerPid=$explorerProcess;explorerStarted=$explorerStarted;listviewHwnd=$lv.ToInt64();autoArrange=($shellState[1] -ne 0 -or ($shellState[0] -band 1) -ne 0 -or ([OkibaDesk]::GetWindowLong($lv,-16) -band 0x0100) -ne 0);
       snap=(($shellState[0] -band 4) -ne 0);viewDpi=$viewDpi;folderFlags=$shellState[0];shellAutoArrange=($shellState[1] -ne 0);sx=$sx;sy=$sy;gx=$grid[0];gy=$grid[1];
       origin=@{x=$origin[0];y=$origin[1]};areas=$areas;icons=@($icons.ToArray())}

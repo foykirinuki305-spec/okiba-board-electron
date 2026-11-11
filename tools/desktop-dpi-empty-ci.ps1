@@ -21,11 +21,12 @@ try{
 '@
  $anchor=" `$report.status='actual-150-spacing-readonly-verified'";if(-not $source.Contains($anchor)){throw 'dpi-hook-anchor-missing'};$source=$source.Replace($anchor,$hook);$source=$source.Replace('$PSScriptRoot',("'"+$PSScriptRoot.Replace("'","''")+"'"));$safeRestore=$false;& ([scriptblock]::Create($source))
  $r=Get-Content (Join-Path $root 'desktop-dpi-ui-ci.json') -Raw|ConvertFrom-Json;if($r.restoreSkippedDueToUnresolvedLease){$safeRestore=$false;throw 'lease-unresolved-no-fixture-restoration'};$safeRestore=$true;if($r.status -ne 'single-150-empty-native-verified'){throw ('native-proof-failed:'+ $r.reason)}
-}catch{$failureReason=$_.Exception.Message;throw}finally{
+}catch{$failureReason=$_.Exception.Message;@{originalFailure=$failureReason;detail=[string]$_;stack=$_.ScriptStackTrace}|ConvertTo-Json -Depth 8|Set-Content (Join-Path $root 'dpi-empty-original-failure.json');throw}finally{
  if($safeRestore){
-  $failures=@();try{& node $fixture restore;if($LASTEXITCODE -ne 0){throw 'attribute-restore-failed'}}catch{$failures+=$_.Exception.Message}
+  $failures=@();
   if($uiAttempted){try{$box=OpenIcons;ApplyIcons $box $originalRecycle;@{phase='ui-restored';originalRecycle=$originalRecycle}|ConvertTo-Json|Set-Content (Join-Path $root 'dpi-empty-ui.json')}catch{$failures+=$_.Exception.Message}}
+  try{& node $fixture restore;if($LASTEXITCODE -ne 0){throw 'attribute-restore-failed'}}catch{$failures+=$_.Exception.Message}
   try{& node $fixture verify;if($LASTEXITCODE -ne 0){throw 'fixture-final-difference'}}catch{$failures+=$_.Exception.Message}
-  @{scope='single150 empty only; initial fixture positions not protection proof';failures=$failures;fixtureRestored=($failures.Count -eq 0)}|ConvertTo-Json -Depth 8|Set-Content (Join-Path $root 'dpi-empty-restore.json');if($failures.Count){throw ($failures -join ';')}
+  @{scope='single150 empty only; initial fixture positions not protection proof';originalFailure=$failureReason;failures=$failures;fixtureRestored=($failures.Count -eq 0)}|ConvertTo-Json -Depth 8|Set-Content (Join-Path $root 'dpi-empty-restore.json');if($failures.Count -and -not $failureReason){throw ($failures -join ';')}
  }else{@{restoreSkippedDueToUnresolvedLease=$true;reason=$failureReason;state='native-or-invoked-script-termination-unverified'}|ConvertTo-Json|Set-Content (Join-Path $root 'dpi-empty-restore.json')}
 }

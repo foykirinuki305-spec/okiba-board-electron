@@ -16,6 +16,9 @@ jobs:
           node-version: '20'
       - name: Pure fixture allowlist
         run: node tools/desktop-dpi-empty-selftest.js
+      - name: Empty COM count validation
+        shell: powershell
+        run: ./tools/desktop-empty-count-selftest.ps1
       - name: Single actual 150 empty fixture only
         shell: powershell
         run: ./tools/desktop-dpi-empty-ci.ps1

@@ -66,6 +66,14 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -File ./tools/helper-grid-selftest.ps1
 
+      - name: Pure native area grid equivalence against frozen PS reference
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./tools/area-grid-prototype-selftest.ps1
+
+      - name: Empty COM count validation
+        shell: powershell
+        run: ./tools/desktop-empty-count-selftest.ps1
+
       - name: Calibration evidence validation pure checks
         shell: pwsh
         run: pwsh -NoProfile -File ./tools/helper-calibration-selftest.ps1
