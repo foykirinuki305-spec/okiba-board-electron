@@ -28,6 +28,8 @@ jobs:
         run: |
           node tools/resident-scope-selftest.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/desktop-resident-selection-selftest.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/stable-snapshot-ci-selftest.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/snap-lease-controller-selftest.js

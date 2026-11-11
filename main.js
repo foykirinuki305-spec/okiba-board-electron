@@ -693,6 +693,7 @@ function registerIpc() {
   const safeDesk = require('./lib/safe-desktop');
   const leaseController=require('./lib/desktop-snap-lease-controller');
   const leaseReceipt=require('./lib/desktop-commit-receipt');
+  const residentSelection=require('./lib/desktop-resident-selection');
   let desktopLeaseClient=null,desktopLeasePending=false,desktopLeaseVerification=null;
   function leaseOptIn(){return process.env.OKIBA_TEST_HOOKS==='1'&&process.env.OKIBA_TEST_SNAP_LEASE==='1';}
   function pendingLeaseResult(reason){return {moved:[],destinations:[],skipped:[],failed:[],error:'配置処理の完了をまだ確認できません。素材の再移動はせず、このまま確認結果をお待ちください。',reason,pendingVerification:true,retrySafe:false,position:{status:'pending'}};}
@@ -959,16 +960,22 @@ function registerIpc() {
       if(leaseOptIn()) {
         const first=plan.targets?.[0];
         const targetAreaIndex=(snap.areas||[]).findIndex(a=>first&&first.x>=a.left&&first.x<a.right&&first.y>=a.top&&first.y<a.bottom);
-        const candidate={kind:'samepath-hidden',desktop:target.path,items:planned.map(i=>({path:i.path,destination:i.dest,hidden:i.hidden,fileIdentity:String(i.identity.dev)+':'+String(i.identity.ino)})),snapshot:snap,targetAreaIndex,metadataPaths:[meta],targets:(plan.targets||[]).map(t=>({...t,path:planned.find(i=>i.path===t.path)?.dest})),buffer:plan.buffer};
-        const eligible=!calibrationPlan&&planned.every(i=>i.isLink&&i.hidden&&ln.samePath(i.path,i.dest))&&leaseController.validateScope(candidate);
+        const residentCandidate=process.env.OKIBA_TEST_RESIDENT_LEASE==='1'&&!calibrationPlan&&planned.every(i=>!i.isLink&&!i.crossVolume&&!ln.samePath(i.path,i.dest));
+        const candidate={kind:residentCandidate?'resident-archive-samevolume':'samepath-hidden',desktop:target.path,items:planned.map(i=>({path:i.path,destination:i.dest,hidden:i.hidden,fileIdentity:String(i.identity.dev)+':'+String(i.identity.ino)})),snapshot:snap,targetAreaIndex,metadataPaths:[meta],targets:(plan.targets||[]).map(t=>({...t,path:planned.find(i=>i.path===t.path)?.dest})),buffer:plan.buffer};
+        const eligible=!calibrationPlan&&(residentCandidate||planned.every(i=>i.isLink&&i.hidden&&ln.samePath(i.path,i.dest)))&&leaseController.validateScope(candidate);
         if(eligible){
-          const after=prepareLeaseMetadata(before,planned.map(i=>i.path),ln.samePath);
+          const after=residentCandidate?residentSelection.prepareResidentMetadata(before,planned.map(i=>i.path),folder):prepareLeaseMetadata(before,planned.map(i=>i.path),ln.samePath);
           const receipts=[{path:meta,beforeHash:leaseReceipt.hash(before),afterHash:leaseReceipt.hash(after)}];
           const identity=()=>{const st=fs.statSync(meta);return String(st.dev)+':'+String(st.ino);};
           const metadataIdentity=identity();
           const checkSources=()=>{for(const i of planned){const st=fs.statSync(i.path);if(st.dev!==i.identity.dev||st.ino!==i.identity.ino)throw Error('source-changed');}};
           checkSources();const client=leaseClient();const ready=await client.ready();if(!ready.ok)throw Error(ready.reason||'lease-not-ready');
           const scope=await client.prepareScope(candidate);checkSources();
+          if(residentCandidate){
+            const classified=residentSelection.classifyResidentSelection(planned.map((i,n)=>({...i,isFile:scope.items[n]?.nativeFile?.regularFile,reparse:scope.items[n]?.nativeFile?.reparse,linkCount:scope.items[n]?.nativeFile?.linkCount,attributes:scope.items[n]?.nativeFile?.attributes})),{knownGrid:true});
+            // Read-only classification refusal is explicit; never silently use a riskier route.
+            if(classified.kind!=='resident-archive-samevolume')return desktopBlocked(classified.reason||'resident-native-scope-unverified');
+          }
           // Ordinary executeDesktop rollback is deliberately NOT used after a lease commit gate.
           const commitFn=async()=>commitLeaseMetadata({before,after,expectedIdentity:metadataIdentity,io:{
             read:readMeta,identity,
@@ -980,7 +987,7 @@ function registerIpc() {
           leaseTransaction=await leaseController.runLease({scope,receipts,adapter:leaseAdapter});
           diagnostic('lease-transaction',{result:leaseTransaction});
           if(leaseTransaction.pendingVerification||(!leaseTransaction.ok&&leaseTransaction.resolution?.state!=='aborted')){
-            beginLeaseVerification({result:leaseTransaction,adapter:leaseAdapter,diagnostic,onCommitted:()=>recordHistory(payload.boardName,{folder,positions:data.positions,links:data.links},planned.map(i=>({kind:'linked',destPath:i.dest,fileName:i.name,col:i.cell[0],row:i.cell[1]})),payload.groupId)});
+            beginLeaseVerification({result:leaseTransaction,adapter:leaseAdapter,diagnostic,onCommitted:()=>recordHistory(payload.boardName,{folder,positions:data.positions,links:data.links},planned.map(i=>({kind:i.isLink?'linked':'resident',destPath:i.dest,fileName:i.name,col:i.cell[0],row:i.cell[1]})),payload.groupId)});
             return pendingLeaseResult(leaseTransaction.reason);
           }
         }else diagnostic('lease-not-covered',{reason:calibrationPlan?'unknown-grid-calibration':'scope-not-supported',legacyArrivalRiskUnresolved:true});

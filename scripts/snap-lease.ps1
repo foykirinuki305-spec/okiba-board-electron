@@ -259,6 +259,7 @@ function Invoke-SnapLeaseRequestCore($req){
    'leaseOwnerPin' {if($null -ne $script:SnapLease){throw 'lease-already-active'};return [OkibaLeaseOwner]::Pin([int]$req.pid,[string]$req.started)}
    'leaseOwnerState' {return [OkibaLeaseOwner]::Read()}
    'leaseReadFiles' {if(@($req.paths).Count -lt 1 -or @($req.paths).Count -gt 1000){throw 'lease-invalid-path-count'};$records=@($req.paths|ForEach-Object {Lease-ReadRecord $_});return @{ok=$true;records=$records}}
+   'leaseReadResidentFiles' {if(@($req.paths).Count -lt 1 -or @($req.paths).Count -gt 1000){throw 'lease-invalid-path-count'};Resident-Native;$records=@($req.paths|ForEach-Object {[OkibaResidentFiles]::Read([string]$_)});return @{ok=$true;records=$records}}
    'leasePrepare' {return Measure-LeaseStep 'prepare' {Lease-Prepare $req}}
    'leaseRevealPlace' {return Lease-RevealPlace $req.token}
    'leaseRestoreVerify' {return Lease-RestoreVerify $req.token}

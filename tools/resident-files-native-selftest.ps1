@@ -15,6 +15,7 @@ try{
  foreach($original in @(32,34)){
   $a=Join-Path $src ('日本語 space-'+$original+'.txt');$b=Join-Path $dst ([IO.Path]::GetFileName($a));[IO.File]::WriteAllText($a,'owned fixture');[IO.File]::SetAttributes($a,[IO.FileAttributes]$original);$r=[OkibaResidentFiles]::Read($a)
   Check ($r.identity -ceq [OkibaFileAttributes]::Read($a).identity) 'native identity exact same format'
+  Check ($r.regularFile -and -not $r.reparse -and $r.linkCount -eq 1) 'native eligibility fields verified'
   $after=Stage $a $b $r $ak $bk
   Check ((-not [IO.File]::Exists($a))-and [IO.File]::Exists($b)-and $after.attributes-eq 34) 'stage hidden and source absent'
   $closed=[OkibaResidentFiles]::Read($b);Check ($closed.identity-ceq $r.identity -and $closed.size-eq $r.size -and $closed.mtime-eq $r.mtime -and $closed.attributes-eq 34) 'rename-close no attribute rebaseline'

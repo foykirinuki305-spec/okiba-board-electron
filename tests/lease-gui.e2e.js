@@ -16,27 +16,49 @@ async function stableCardBox(locator,label){
  return box;
 }
 async function scenario(mode){
- const isDrag=mode.startsWith('drag-');
+ const isDrag=mode.startsWith('drag-'),isResident=mode.startsWith('resident-');
  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-lease-gui-'));const base=path.join(temp,'boards'),board=path.join(base,'Lease'),desktop=path.join(temp,'desktop'),old=path.join(temp,'old'),profile=path.join(temp,'profile');for(const p of [board,desktop,old])fs.mkdirSync(p,{recursive:true});
- const files=['first.txt','second.txt'].map(n=>path.join(desktop,n));files.forEach((p,i)=>fs.writeFileSync(p,'selected-'+i));
+ const files=['first.txt','second.txt'].map(n=>path.join(isResident?board:desktop,n));files.forEach((p,i)=>fs.writeFileSync(p,'selected-'+i));
  const keep=path.join(board,'keep.txt');fs.writeFileSync(keep,'unchanged resident');const sentinel=path.join(desktop,'sentinel.txt');fs.writeFileSync(sentinel,'untouched');const sentinelStat=fs.statSync(sentinel);
- const meta=path.join(board,'.okiba-board.json');fs.writeFileSync(meta,JSON.stringify({version:6,positions:{'keep.txt':{col:1,row:1}},notes:[],links:[],size_percent:100}));
+ const meta=path.join(board,'.okiba-board.json');fs.writeFileSync(meta,JSON.stringify({version:6,positions:{'keep.txt':{col:1,row:1},...(isResident?{'first.txt':{col:3,row:1},'second.txt':{col:3,row:2}}:{})},notes:[],links:[],size_percent:100}));
  fs.writeFileSync(path.join(base,'.home.json'),JSON.stringify({appVersion:require('../package.json').version,positions:{Lease:{col:0,row:0}},theme:'light'}));
  const log=path.join(temp,'lease.jsonl');const records=()=>fs.existsSync(log)?fs.readFileSync(log,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse):[];
  const snapshot={ok:true,identityVersion:1,autoArrange:false,snap:true,sx:100,sy:100,gx:0,gy:0,origin:{x:0,y:0},areas:[{left:0,top:0,right:3000,bottom:2000,grid:{gx:0,gy:0,sx:100,sy:100}}],icons:[{identity:'old-sentinel',label:'sentinel.txt',path:sentinel,x:2000,y:1000}]};
  if(mode==='drag-occupied')snapshot.icons.push({identity:'occupied-second-cell',label:'guard.txt',path:path.join(desktop,'guard.txt'),x:500,y:600});
  const env={...process.env,OKIBA_BASE:base,OKIBA_OLD_BASE:old,OKIBA_SHORTCUT_DESKTOP:desktop,OKIBA_CLEANUP_DESKTOP:desktop,OKIBA_CLEANUP_DOWNLOADS:desktop,OKIBA_TEST_DESKTOP_DIR:desktop,OKIBA_TEST_HOOKS:'1',OKIBA_TEST_ATTRIB:'stub',OKIBA_TEST_HELPER:'fake',OKIBA_TEST_SNAP_LEASE:'1',OKIBA_TEST_POSITIONER:'',OKIBA_TEST_RESOLVER_DIR:'',OKIBA_FAKE_LANDING:desktop,OKIBA_FAKE_TYPE:'desktop',OKIBA_TEST_DESKTOP_SNAPSHOT:JSON.stringify(snapshot),OKIBA_FAKE_LEASE:'1',OKIBA_FAKE_LEASE_ROOT:temp,OKIBA_FAKE_LEASE_LOG:log,OKIBA_FAKE_LEASE_MODE:isDrag?'success':mode,ELECTRON_DISABLE_SECURITY_WARNINGS:'1'};
+ if(isResident)env.OKIBA_TEST_RESIDENT_LEASE='1';
  if(mode==='legacy-abort')env.OKIBA_FAKE_PLAN_FAIL='1';
  if(mode==='legacy-concurrent')env.OKIBA_FAKE_POSITION_DELAY_MS='2500';
  let app,clean=false,afterForCleanup=null;
  try{
   app=await electron.launch({args:[ROOT,'--no-sandbox','--user-data-dir='+profile],env,timeout:60000});let page=await app.firstWindow();await page.waitForSelector('#boardGrid .board-card');await page.click('#boardGrid .board-card[data-name="Lease"]');
-  await page.evaluate(paths=>window.okiba.linkFiles('Lease',paths,{anchor:[3,1],offsets:[[0,0],[0,1]]}),files);
+  if(!isResident)await page.evaluate(paths=>window.okiba.linkFiles('Lease',paths,{anchor:[3,1],offsets:[[0,0],[0,1]]}),files);
   const card=n=>page.locator('.item').filter({has:page.locator('.name',{hasText:n})}).first();
   await wait(async()=>(await page.locator('.item .name').allTextContents()).includes('first.txt'),'linked cards');await sleep(500);
   // Install a future-version field after normal intake, so the tested commit must retain it.
   const data=JSON.parse(fs.readFileSync(meta,'utf8'));data.future={untouched:['value',17]};fs.writeFileSync(meta,JSON.stringify(data));await sleep(500);
   const before=fs.readFileSync(meta,'utf8'),beforeData=JSON.parse(before);afterForCleanup=JSON.stringify({...beforeData,links:beforeData.links.filter(l=>l.path!==files[0])},null,2);const keptBox=await stableCardBox(card('keep.txt'),'initial keep card');
+  if(isResident){
+   const result=await page.evaluate(paths=>window.okiba.safeTakeout({boardName:'Lease',paths,linkedPaths:[]}),files);
+   check(records().some(r=>r.cmd==='leaseReadResidentFiles'),'resident native classification requested');
+   const after=JSON.parse(fs.readFileSync(meta,'utf8'));
+   if(mode==='resident-reveal-fail'){
+    check(!!result.error&&!result.pendingVerification,'resident failure is verified rollback');check(fs.readFileSync(meta,'utf8')===before,'resident rollback metadata bytes unchanged');check(!fs.existsSync(path.join(base,'.move-history.json')),'resident rollback no success history');
+    for(const p of files)check(fs.existsSync(p)&&!fs.existsSync(path.join(desktop,path.basename(p))),'resident rollback source restored');
+   }else{
+    if(mode==='resident-pending'){
+     check(result.pendingVerification===true&&result.retrySafe===false,'resident postcommit pending blocks unsafe retry');const count=records().filter(r=>r.cmd==='leasePrepare').length;
+     const retry=await page.evaluate(p=>window.okiba.safeTakeout({boardName:'Lease',paths:[p],linkedPaths:[]}),keep);check(retry.pendingVerification===true&&retry.retrySafe===false,'resident pending refuses another resident request');check(records().filter(r=>r.cmd==='leasePrepare').length===count,'resident pending starts no new lease');check(!fs.existsSync(path.join(base,'.move-history.json')),'unverified resident never claims history success');
+    }else check(result.metadataCommitted===true&&!result.error,'resident commit result explicit');
+    for(const k of Object.keys(beforeData).filter(k=>k!=='positions'))check(JSON.stringify(after[k])===JSON.stringify(beforeData[k]),'resident preserves '+k);
+    check(JSON.stringify(after.positions)===JSON.stringify({'keep.txt':beforeData.positions['keep.txt']}),'only selected resident cells removed');
+    if(mode!=='resident-pending'){const history=JSON.parse(fs.readFileSync(path.join(base,'.move-history.json'),'utf8'));check(history[0].items.length===2&&history[0].items.every(i=>i.kind==='resident'),'resident group history correct');}
+    for(const p of files)check(!fs.existsSync(p)&&fs.existsSync(path.join(desktop,path.basename(p))),'resident material moved to selected destination');
+   }
+   for(let i=0;i<files.length;i++)check(fs.readFileSync(mode==='resident-reveal-fail'?files[i]:path.join(desktop,path.basename(files[i])),'utf8')==='selected-'+i,'resident bytes preserved');
+   const finalKeep=await stableCardBox(card('keep.txt'),'resident keep card');check(finalKeep.x===keptBox.x&&finalKeep.y===keptBox.y,'resident operation keeps unrelated cell');check(fs.statSync(sentinel).mtimeMs===sentinelStat.mtimeMs,'resident does not touch desktop sentinel');
+   return;
+  }
   if(mode==='legacy-abort'||mode==='legacy-concurrent'){
    const operation=page.evaluate(p=>window.okiba.safeTakeout({boardName:'Lease',paths:[p],linkedPaths:[]}),keep);
    if(mode==='legacy-concurrent'){
@@ -146,4 +168,4 @@ async function scenario(mode){
   if(clean){const resolved=path.resolve(temp);assert(resolved.startsWith(path.resolve(os.tmpdir())+path.sep)&&path.basename(resolved).startsWith('okiba-lease-gui-'));fs.rmSync(resolved,{recursive:true,force:true});}
  }
 }
-(async()=>{for(const mode of ['success','reveal-fail','pending','transient-native','retry-native','release-fail','foreign-change','restart-global','restart-journal','legacy-abort','legacy-concurrent','drag-success','drag-occupied','drag-outside'])await scenario(mode);console.log('LEASE GUI '+checks+' checks PASS');})().catch(e=>{console.error(e);process.exitCode=1;});
+(async()=>{for(const mode of ['success','reveal-fail','pending','transient-native','retry-native','release-fail','foreign-change','restart-global','restart-journal','legacy-abort','legacy-concurrent','drag-success','drag-occupied','drag-outside','resident-success','resident-reveal-fail','resident-pending'])await scenario(mode);console.log('LEASE GUI '+checks+' checks PASS');})().catch(e=>{console.error(e);process.exitCode=1;});

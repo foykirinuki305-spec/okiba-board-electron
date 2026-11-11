@@ -56,13 +56,14 @@ if(leaseFake){leaseLog('fake-start',{parent:process.ppid});process.on('exit',()=
 function fakeLeaseCommand(req){
  if(!leaseFake||!req.cmd.startsWith('lease'))return null;
  leaseLog(req.cmd,{token:req.token,targets:req.scope?.targets});
- const mode=process.env.OKIBA_FAKE_LEASE_MODE||'success';
+ const mode=(process.env.OKIBA_FAKE_LEASE_MODE||'success').replace(/^resident-/,'');
  const identity=p=>{const st=calibrationFs.statSync(leaseOwned(p));return st.dev+':'+st.ino;};
  const alive=()=>{try{process.kill(fakeOwner.pid,0);return 'alive';}catch{return 'exited';}};
  switch(req.cmd){
  case 'leaseHelperIdentity':{const desktop=leaseOwned(process.env.OKIBA_FAKE_LANDING||leasePath.join(process.env.OKIBA_FAKE_LEASE_ROOT,'desktop'));const localAppData=leaseOwned(leasePath.join(process.env.OKIBA_FAKE_LEASE_ROOT,'localAppData'));calibrationFs.mkdirSync(desktop,{recursive:true});calibrationFs.mkdirSync(localAppData,{recursive:true});leaseLog('fake-helper-location',{desktop,canonicalDesktop:calibrationFs.realpathSync.native(desktop),localAppData});return {ok:true,pid:process.pid,started:fakeHelperStarted,sessionId:0,desktop,localAppData};}
  case 'leaseOwnerPin':fakeOwner={pid:req.pid,started:req.started||(req.pid===process.ppid?'2':'1')};return {ok:true,...fakeOwner,state:alive()};
  case 'leaseOwnerState':return {ok:true,...fakeOwner,state:alive()};
+ case 'leaseReadResidentFiles':return {ok:true,records:req.paths.map(p=>({path:leaseOwned(p),identity:identity(p),attributes:32,regularFile:true,reparse:false,linkCount:1}))};
  case 'leaseReadFiles':return {ok:true,records:req.paths.map(p=>({path:p,identity:identity(p)}))};
  case 'leasePrepare':
   for(const i of req.scope.items){if(identity(i.path)!==i.fileIdentity)throw Error('fake-source-changed');}
@@ -71,6 +72,7 @@ function fakeLeaseCommand(req){
  case 'leaseAdopt':fakeLease=req.recovery;return {ok:true};
  case 'leaseRevealPlace':
   if(fakeLease?.token!==req.token)throw Error('fake-token');fakeLease.visible=true;fakeLease.snap=false;
+  if(fakeLease.scope.kind==='resident-archive-samevolume')for(const i of fakeLease.scope.items){const src=leaseOwned(i.path),dest=leaseOwned(i.destination);if(calibrationFs.existsSync(dest))throw Error('fake-destination-occupied');if(identity(src)!==i.fileIdentity)throw Error('fake-source-changed');calibrationFs.renameSync(src,dest);}
   if(mode==='reveal-fail')return {ok:false,reason:'injected-reveal-failure'};return {ok:true};
  case 'leaseRestoreVerify':
   if(fakeLease?.token!==req.token)throw Error('fake-token');verifyCalls++;fakeLease.snap=true;
@@ -78,9 +80,10 @@ function fakeLeaseCommand(req){
   if((mode==='pending'&&verifyCalls>=3&&alive()==='alive')||(mode==='retry-native'&&verifyCalls>=3&&verifyCalls<=4)||(mode==='transient-native'&&verifyCalls===3))return {ok:false,reason:'injected-postcommit-verification-failure'};
   return {ok:true,snapRestored:true,oldUnchanged:true,targetsExact:true};
  case 'leaseRollback':
-  if(fakeLease?.token!==req.token)throw Error('fake-token');fakeLease.visible=false;fakeLease.snap=true;return {ok:true};
+  if(fakeLease?.token!==req.token)throw Error('fake-token');if(fakeLease.scope.kind==='resident-archive-samevolume')for(const i of fakeLease.scope.items){const src=leaseOwned(i.path),dest=leaseOwned(i.destination);if(calibrationFs.existsSync(dest)){if(calibrationFs.existsSync(src)||identity(dest)!==i.fileIdentity)throw Error('fake-rollback-conflict');calibrationFs.renameSync(dest,src);}}
+  fakeLease.visible=false;fakeLease.snap=true;return {ok:true,sourceRestored:true};
  case 'leaseRelease':
-  if(!['visible','hidden'].includes(req.expectedOutcome))throw Error('lease-release-outcome-required');
+  if(!['visible','hidden','source-restored'].includes(req.expectedOutcome))throw Error('lease-release-outcome-required');
   if(mode==='release-fail'&&++releaseCalls===1)return {ok:false,reason:'injected-release-failure'};
   if(fakeLease?.token!==req.token)throw Error('fake-token');leaseLog('fake-terminal',{visible:fakeLease.visible,snap:fakeLease.snap});return {ok:true};
  default:return {ok:false,reason:'unsupported-fake-lease-command'};

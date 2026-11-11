@@ -1,4 +1,4 @@
-// Resident lease native adapter. No Desktop/Shell setting or positioning APIs.
+﻿// Resident lease native adapter. No Desktop/Shell setting or positioning APIs.
 // Narrow scope: local same-volume regular single-link files with attributes 32/34.
 using System;
 using System.IO;
@@ -19,7 +19,7 @@ public static class OkibaResidentFiles {
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true,ExactSpelling=true)] static extern uint GetFinalPathNameByHandleW(SafeFileHandle h,StringBuilder text,uint length,uint flags);
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true,ExactSpelling=true)] static extern uint GetFileAttributesW(string path);
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,ExactSpelling=true)] static extern uint GetDriveTypeW(string root);
- public sealed class Record {public string path,identity,volume,size,mtime;public uint attributes;public bool hidden,regularFile,reparse;}
+ public sealed class Record {public string path,identity,volume,size,mtime;public uint attributes,linkCount;public bool hidden,regularFile,reparse;}
  public sealed class ParentRecord {public string path,identity,volume,ancestorKey;}
  static Exception Error(string op,int code){return new Win32Exception(code,op);}
  static Exception Error(string op){return Error(op,Marshal.GetLastWin32Error());}
@@ -36,7 +36,7 @@ public static class OkibaResidentFiles {
  static string ID(INFO i){return i.volume.ToString("X8",CultureInfo.InvariantCulture)+":"+i.indexHigh.ToString("X8",CultureInfo.InvariantCulture)+i.indexLow.ToString("X8",CultureInfo.InvariantCulture);}
  static INFO Validate(SafeFileHandle h,string p,bool directory){var i=Info(h);if((i.attr&0x400)!=0)throw new InvalidOperationException("resident-reparse-refused");if(((i.attr&16)!=0)!=directory)throw new InvalidOperationException("resident-kind-mismatch");if(!directory&&(GetFileType(h)!=1||i.links!=1))throw new InvalidOperationException("resident-regular-single-link-required");if(!String.Equals(Canonical(h),Full(p),StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("resident-path-resolved-elsewhere");return i;}
  static void AttrScope(uint attrs){if(attrs!=32&&attrs!=34)throw new InvalidOperationException("resident-archive-attributes-required");}
- static Record RecordOf(SafeFileHandle h,string p){var i=Validate(h,p,false);AttrScope(i.attr);return new Record{path=p,identity=ID(i),volume=i.volume.ToString("X8",CultureInfo.InvariantCulture),size=(((ulong)i.sizeHigh<<32)|i.sizeLow).ToString(CultureInfo.InvariantCulture),mtime=(((ulong)i.write.high<<32)|i.write.low).ToString(CultureInfo.InvariantCulture),attributes=i.attr,hidden=(i.attr&2)!=0,regularFile=true,reparse=false};}
+ static Record RecordOf(SafeFileHandle h,string p){var i=Validate(h,p,false);AttrScope(i.attr);return new Record{path=p,identity=ID(i),volume=i.volume.ToString("X8",CultureInfo.InvariantCulture),size=(((ulong)i.sizeHigh<<32)|i.sizeLow).ToString(CultureInfo.InvariantCulture),mtime=(((ulong)i.write.high<<32)|i.write.low).ToString(CultureInfo.InvariantCulture),attributes=i.attr,linkCount=i.links,hidden=(i.attr&2)!=0,regularFile=true,reparse=false};}
  sealed class Pins:IDisposable {
   public readonly List<SafeFileHandle> held=new List<SafeFileHandle>();public ParentRecord record;
   public Pins(string directory){try{
