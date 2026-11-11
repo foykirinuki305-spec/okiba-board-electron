@@ -1224,6 +1224,7 @@ function Get-RawStrictDesktopSnapshotCore {
       }
       if($valid){$area.grid=$g}else{$script:CalibratedDesktopGrids.Remove($key)}
     }
+    if($env:OKIBA_UNKNOWN_GRID_LEASE -ceq '1' -and (Get-Command Apply-UnknownSessionGrids -ErrorAction SilentlyContinue)){$snapshot=Apply-UnknownSessionGrids $snapshot}
     return $snapshot
   } finally { $reader.Dispose() }
 }

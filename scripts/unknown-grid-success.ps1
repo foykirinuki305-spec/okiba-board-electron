@@ -1,4 +1,5 @@
 # Optional product success operations; native private ledger is authoritative.
+$script:UnknownNativeLedgerOrigins=@{}
 function Unknown-BindingDigest([string]$canonical){
  if($null -eq $canonical){throw 'unknown-null-canonical-key'}
  $sha=[Security.Cryptography.SHA256]::Create()
@@ -11,12 +12,16 @@ function Unknown-SuccessInit($r,$scope){
  if(@($r.success.items).Count -ne @($r.records).Count){throw 'unknown-shape-count'}
  $seen=@{};foreach($item in $r.success.items){$p=Lease-Path $item.path;if($seen.ContainsKey($p) -or @($r.records|Where-Object{(Lease-Path $_.path) -ieq $p}).Count -ne 1 -or @($item.cell).Count -ne 2){throw 'unknown-shape-path'};$seen[$p]=$true;foreach($n in $item.cell){if($null -eq $n -or [double]$n -ne [int]$n){throw 'unknown-shape-cell'}}}
  if(-not $seen.ContainsKey((Lease-Path $r.success.anchorPath)) -or -not(Strict-PointValid $r.success.requestedAnchor)){throw 'unknown-shape-anchor'}
+ $script:UnknownNativeLedgerOrigins.Clear();$script:UnknownNativeLedgerOrigins[$r.token]=@{record=$r;sampleKeys=@()}
 }
 function Unknown-RecordSample($r,$req,$observed){
  if($null -eq $r.success){return $null}
  $samples=@($r.success.samples);if($samples.Count -ge 44 -or $null -eq $req.sampleId -or [double]$req.sampleId -ne $samples.Count -or $req.axis -notin @('x','y') -or $req.pass -notin @('candidate','forward','reverse')){throw 'unknown-sample-sequence'}
  $b=$r.success.binding;$sample=@{id=$samples.Count;axis=$req.axis;pass=$req.pass;token=$b.token;probeId=$b.probeId;geometryKey=$b.geometryKey;iconsKey=$b.iconsKey;requestX=[int]$req.point.x;requestY=[int]$req.point.y;x=[int]$observed.x;y=[int]$observed.y}
- $r.success.samples=@($samples)+@($sample);return $sample
+ $r.success.samples=@($samples)+@($sample)
+ $origin=$script:UnknownNativeLedgerOrigins[$r.token]
+ if($null -ne $origin -and [object]::ReferenceEquals($origin.record,$r)){$origin.sampleKeys+=,(Unknown-BindingDigest ($sample|ConvertTo-Json -Depth 8 -Compress))}
+ return $sample
 }
 function Unknown-AssertProofBinding($r){
  $b=$r.success.binding;$original=$r.success.baseline
@@ -61,6 +66,84 @@ function Unknown-VerifyVisible($r){
  foreach($record in $r.records){$n=Lease-CheckRecord $record;if($n.hidden -or -not (Unknown-VisibleAttributesMatch $record.attributes $n.attributes)){throw 'unknown-visible-attributes'}}
  return @{ok=$true;oldUnchanged=$true;targetsExact=$true;snapRestored=$true;recovery=$r}
 }
+
+# Private formal proof cache: never exported/imported, never populated from caller JSON.
+$script:UnknownSessionCandidates=@{}
+$script:UnknownSessionGrids=@{}
+function Unknown-SessionGridKey($g){
+ foreach($k in @('sx','sy','gx','gy')){if($null -eq $g.$k -or [double]$g.$k -ne [int]$g.$k){throw 'unknown-cache-grid-invalid'}}
+ if($g.sx -lt 8 -or $g.sy -lt 8 -or $g.sx -gt 512 -or $g.sy -gt 512 -or $g.gx -lt 0 -or $g.gx -ge $g.sx -or $g.gy -lt 0 -or $g.gy -ge $g.sy){throw 'unknown-cache-grid-invalid'}
+ return (@([int]$g.sx,[int]$g.sy,[int]$g.gx,[int]$g.gy)|ConvertTo-Json -Compress)
+}
+function Unknown-SessionEvidenceKey($r){
+ Unknown-AssertProofBinding $r
+ return Unknown-BindingDigest ($r|ConvertTo-Json -Depth 24 -Compress)
+}
+function Unknown-CacheFreshGrid($s,[int]$index,$grid){
+ if(-not $s.ok -or $s.identityVersion -ne 1 -or $s.autoArrange -or $s.shellAutoArrange -or -not $s.snap -or ($s.folderFlags -band 5) -ne 4 -or $index -lt 0 -or $index -ge @($s.areas).Count){throw 'unknown-cache-snapshot-invalid'}
+ $null=Unknown-SessionGridKey $grid
+ $copy=$s|ConvertTo-Json -Depth 20 -Compress|ConvertFrom-Json
+ $existing=$copy.areas[$index].grid
+ if($null -ne $existing -and (Unknown-SessionGridKey $existing) -cne (Unknown-SessionGridKey $grid)){throw 'unknown-cache-grid-conflict'}
+ $copy.areas[$index].grid=$grid;$seen=@{}
+ foreach($i in $copy.icons){
+  if([string]::IsNullOrEmpty($i.identity) -or $seen.ContainsKey($i.identity) -or -not (Strict-PointValid $i)){throw 'unknown-cache-icon-invalid'};$seen[$i.identity]=$true
+  $areas=@($copy.areas|Where-Object{$i.x -ge $_.left -and $i.x -lt $_.right -and $i.y -ge $_.top -and $i.y -lt $_.bottom})
+  if($areas.Count -ne 1){throw 'unknown-cache-icon-area'};$g=$areas[0].grid;$null=Unknown-SessionGridKey $g
+  if(([long]$i.x+[long]$g.sx) -gt $areas[0].right -or ([long]$i.y+[long]$g.sy) -gt $areas[0].bottom){throw 'unknown-cache-icon-boundary'}
+ }
+ Lease-AllGrid $copy $copy
+ return $copy
+}
+function Unknown-ProvisionSessionGrid($r){
+ # Called only after Unknown-VerifyVisible, before clearing its native lease.
+ $origin=$script:UnknownNativeLedgerOrigins[$r.token]
+ if($null -eq $origin -or -not [object]::ReferenceEquals($origin.record,$r) -or @($origin.sampleKeys).Count -eq 0 -or @($origin.sampleKeys).Count -ne @($r.success.samples).Count){throw 'unknown-cache-ledger-not-native-session'}
+ for($n=0;$n -lt @($origin.sampleKeys).Count;$n++){if($origin.sampleKeys[$n] -cne (Unknown-BindingDigest ($r.success.samples[$n]|ConvertTo-Json -Depth 8 -Compress))){throw 'unknown-cache-native-sample-changed'}}
+ $native=Unknown-ValidateSuccess $r;$s=Unknown-Current $r;$null=Lease-Guard $r $s $true
+ $s=Unknown-CacheFreshGrid $s ([int]$r.targetAreaIndex) $native.grid
+ $saved=$r|ConvertTo-Json -Depth 24 -Compress|ConvertFrom-Json
+ $id=[Guid]::NewGuid().ToString('N');$now=[DateTime]::UtcNow
+ $script:UnknownSessionCandidates.Clear()
+ $script:UnknownSessionCandidates[$id]=@{token=$r.token;id=$id;record=$saved;evidenceKey=(Unknown-SessionEvidenceKey $saved);geometry=(Strict-GeometryKey $s);physical=(Lease-PhysicalKey $s);terminalIcons=(Strict-IconsKey $s);index=[int]$r.targetAreaIndex;grid=$native.grid;expires=$now.AddMinutes(2)}
+ return $id
+}
+function Unknown-CommitSessionGrid($req){
+ if($null -ne $script:SnapLease){throw 'unknown-cache-active-lease'}
+ $id=[string]$req.candidateId
+ if(-not $script:UnknownSessionCandidates.ContainsKey($id)){throw 'unknown-cache-candidate-missing'}
+ $e=$script:UnknownSessionCandidates[$id];$script:UnknownSessionCandidates.Remove($id)
+ if($req.token -cne $e.token -or $e.expires -le [DateTime]::UtcNow){throw 'unknown-cache-candidate-invalid'}
+ Unknown-Live $e.record
+ if((Unknown-SessionEvidenceKey $e.record) -cne $e.evidenceKey){throw 'unknown-cache-evidence-changed'}
+ $v=Unknown-ValidateSuccess $e.record
+ if((Unknown-SessionGridKey $v.grid) -cne (Unknown-SessionGridKey $e.grid)){throw 'unknown-cache-proof-changed'}
+ $s=Lease-Snapshot
+ if((Strict-GeometryKey $s) -cne $e.geometry -or (Strict-IconsKey $s) -cne $e.terminalIcons){throw 'unknown-cache-terminal-changed'}
+ $null=Unknown-CacheFreshGrid $s $e.index $e.grid
+ $e.expires=[DateTime]::UtcNow.AddHours(1)
+ if($script:UnknownSessionGrids.Count -ge 4 -and -not $script:UnknownSessionGrids.ContainsKey($e.index)){$script:UnknownSessionGrids.Clear()}
+ $script:UnknownSessionGrids[$e.index]=$e
+ return @{ok=$true;sessionCalibrationCommitted=$true}
+}
+function Apply-UnknownSessionGrids($s){
+ if($env:OKIBA_UNKNOWN_GRID_LEASE -cne '1'){return $s}
+ foreach($index in @($script:UnknownSessionGrids.Keys)){
+  $e=$script:UnknownSessionGrids[$index]
+  try{
+   if($e.expires -le [DateTime]::UtcNow -or (Lease-PhysicalKey $s) -cne $e.physical){throw 'unknown-cache-session-changed'}
+   # A current owned lease may temporarily switch Snap OFF; do not use cache then.
+   if((Strict-GeometryKey $s) -cne $e.geometry){
+    if($null -ne $script:SnapLease -and [uint32]$s.folderFlags -eq ([uint32]$e.record.originalFlags -band ([uint32]::MaxValue -bxor 4))){continue}
+    throw 'unknown-cache-flags-changed'
+   }
+   if((Unknown-SessionEvidenceKey $e.record) -cne $e.evidenceKey){throw 'unknown-cache-evidence-changed'}
+   $s=Unknown-CacheFreshGrid $s $e.index $e.grid
+  }catch{$script:UnknownSessionGrids.Remove($index)}
+ }
+ return $s
+}
+
 function Invoke-UnknownSuccess($req,$r){
  switch -CaseSensitive ($req.cmd){
  'leaseUnknownResolveTargets'{Unknown-Live $r;if($r.phase -cne 'calibrating'){throw 'unknown-resolve-phase'};$v=Unknown-ValidateSuccess $r;$r.success.resolved=$v;$r.snapshot.areas[$r.targetAreaIndex].grid=$v.grid;$r.targets=@($v.targets);$r.phase='targets-resolved';return @{ok=$true;recovery=$r;resolved=$v}}
@@ -78,7 +161,7 @@ function Invoke-UnknownSuccess($req,$r){
   Lease-SetSnap $r $s $true;$r.flagState='on';Start-Sleep -Milliseconds 250;$r.phase='resolved-restored';return Unknown-VerifyVisible $r
  }
  'leaseUnknownVerifyResolvedVisible'{return Unknown-VerifyVisible $r}
- 'leaseUnknownReleaseVisible'{$null=Unknown-VerifyVisible $r;$script:SnapLease=$null;return @{ok=$true;released=$true}}
+ 'leaseUnknownReleaseVisible'{$null=Unknown-VerifyVisible $r;$candidate=$null;try{$candidate=Unknown-ProvisionSessionGrid $r}catch{};$script:SnapLease=$null;return @{ok=$true;released=$true;cacheCandidateId=$candidate}}
  default{throw 'unknown-success-command'}
  }
 }

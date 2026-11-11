@@ -105,6 +105,8 @@ function Unknown-RestoreAndVerify($r){
 }
 function Invoke-UnknownLease($req){
  Unknown-Enabled
+ if($req.cmd -ceq 'leaseUnknownCommitSessionCalibration'){return Unknown-CommitSessionGrid $req}
+ if($req.cmd -ceq 'leaseUnknownSessionSnapshot'){if($null -ne $script:SnapLease){throw 'unknown-cache-active-lease'};$current=Lease-Snapshot;return @{ok=$true;snapshot=$current;sessionCalibrationCount=$script:UnknownSessionGrids.Count}}
  if($req.cmd -ceq 'leaseUnknownPrepare'){return Unknown-Prepare $req}
  if($req.cmd -ceq 'leaseUnknownAdopt'){
   if($null -ne $script:SnapLease){throw 'lease-already-active'};$r=$req.recovery;$o=[OkibaLeaseOwner]::Read()
