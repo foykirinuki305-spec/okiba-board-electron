@@ -32,5 +32,21 @@ let checks=0;const ok=(v,m)=>{assert.ok(v,m);checks++;};
   ok(await f('C:\\a.lnk',{})==='C:\\a.lnk','cycle bounded');
   links['C:\\a.lnk']={target:'b.lnk'};paths['C:\\b.lnk']=file;links['C:\\b.lnk']={target:'app.exe'};
   ok(await f('C:\\a.lnk',{})==='C:\\app.exe','nested shortcut read only');
+  const exeIcon={isEmpty:()=>false,toDataURL:()=> 'explicit-exe-icon'};
+  const explicitCalls=[];
+  const explicit=createFileIconResolver({
+    readShortcutLink:()=>({target:'C:\\target.exe',icon:'C:\\branding.exe',iconIndex:0}),
+    stat:async()=>file,loadIcon:()=>null,
+    getFileIcon:async p=>{explicitCalls.push(p);return exeIcon;},
+  });
+  ok(await explicit('C:\\tool.lnk',{})===exeIcon && explicitCalls[0]==='C:\\branding.exe','explicit EXE default icon preferred');
+  const indexedCalls=[];
+  const indexed=createFileIconResolver({
+    readShortcutLink:()=>({target:'C:\\target.exe',icon:'C:\\branding.exe',iconIndex:2}),
+    stat:async()=>file,loadIcon:()=>null,
+    getFileIcon:async p=>{indexedCalls.push(p);return exeIcon;},
+  });
+  await indexed('C:\\tool.lnk',{});
+  ok(indexedCalls[0]==='C:\\target.exe','nonzero EXE resource index not misrepresented');
   console.log(`shortcut-preview-selftest: ${checks} checks passed`);
 })().catch(e=>{console.error(e);process.exitCode=1;});
