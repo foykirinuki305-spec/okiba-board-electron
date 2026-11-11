@@ -1,0 +1,19 @@
+'use strict';
+const assert=require('assert/strict'),p=require('./packaged-preview-policy-ci');
+const h={GITHUB_ACTIONS:'true',RUNNER_OS:'Windows',RUNNER_ENVIRONMENT:'github-hosted'};p.hosted(h,'win32');for(const key of Object.keys(h))assert.throws(()=>p.hosted({...h,[key]:'x'},'win32'));assert.throws(()=>p.hosted(h,'linux'));
+const e=p.cleanEnv({...h,okiba_test_helper:'fake',OKIBA_TEST_ATTRIB:'stub',OKIBA_HELPER_MODE:'off',ELECTRON_RUN_AS_NODE:'1'},'base','old');assert(!Object.keys(e).some(k=>/^OKIBA_TEST_/i.test(k)));assert(!e.ELECTRON_RUN_AS_NODE);assert.equal(e.OKIBA_DESKTOP_SAFE_PREVIEW,'1');
+const s={ok:true,snap:true,autoArrange:false,identityVersion:1,areas:[{scale:100,grid:{sx:78,sy:98}}]};p.known(s);for(const bad of [{...s,snap:false},{...s,autoArrange:true},{...s,areas:[{scale:150,grid:{}}]},{...s,areas:[{scale:100,grid:null}]},{...s,areas:[...s.areas,...s.areas]}])assert.throws(()=>p.known(bad));
+console.log('packaged preview guards PASS');
+const fs=require('fs'),path=require('path'),source=fs.readFileSync(path.join(__dirname,'packaged-preview-ci.js'),'utf8'),ps=fs.readFileSync(path.join(__dirname,'packaged-preview-support-ci.ps1'),'utf8');
+assert(source.includes('window.okiba.safeTakeout(payload)'));assert(!source.includes('runLease('));assert(!source.includes('SetFlagsForCI'));assert(!ps.includes('SetFlagsForCI'));assert(source.indexOf('await stop();await snapshot();')<source.indexOf("await support('hide'"));assert(source.indexOf("assert(invisible,'owned files not invisible')")<source.indexOf('fs.unlinkSync(f.path)'));assert(ps.includes('SetRecordedAndNotify'));assert(!ps.includes('Remove-Item'));console.log('packaged preview lifecycle static guards PASS');
+// Exercise the actual main.js success return expression, not an invented API schema.
+const main=fs.readFileSync(path.join(__dirname,'../main.js'),'utf8'),vm=require('vm');
+const line=main.split(/\r?\n/).find(l=>l.includes('return {metadataCommitted:leaseTransaction?.ok===true,moved:planned.map'));
+assert(line,'real main success return contract');const planned=[1,2,3].map(i=>({path:'source'+i,dest:'dest'+i}));
+const real=JSON.parse(JSON.stringify(vm.runInNewContext('(function(){'+line+'})()',{leaseTransaction:{ok:true},planned,warnings:[]})));
+p.success(real,planned.map(i=>i.path),planned.map(i=>i.dest));assert.equal(real.ok,undefined);
+for(const bad of [{...real,metadataCommitted:false},{...real,moved:real.moved.slice(1)},{...real,moved:[...real.moved].reverse()},{...real,destinations:[...real.destinations].reverse()},{...real,error:'failed'},{...real,failed:['x']},{...real,skipped:['x']},{...real,warnings:['x']},{...real,position:{status:'partial',positioned:3}},{...real,position:{status:'ok',positioned:2}},{ok:true}])assert.throws(()=>p.success(bad,planned.map(i=>i.path),planned.map(i=>i.dest)));
+const bf=require('../lib/boardfs');assert.deepEqual(bf.cellFromAny({col:2,row:5},166,104),[2,5]);
+const preload=fs.readFileSync(path.join(__dirname,'../preload.js'),'utf8');assert(preload.includes("safeTakeout: (payload) => ipcRenderer.invoke('safe-takeout', payload)"));assert(main.includes("ipcMain.handle('safe-takeout',(_e,payload)=>safeDesktopMove({...payload,automatic:true}"));
+console.log('packaged real success schema + preload/layout contract PASS');
+assert(ps.includes('$null=$process.Handle'));assert(ps.includes('$birth=$process.StartTime.ToUniversalTime().Ticks.ToString()'));assert(ps.includes('$fresh.CreationDate -ne $c.CreationDate'));assert(!ps.includes('started=$_.CreationDate'));console.log('exact process birth + ancestry race guards PASS');
