@@ -39,6 +39,10 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -File ./tools/desktop-identity-selftest.ps1
 
+      - name: Free-wave batch and cycle buffer pure safety checks
+        shell: pwsh
+        run: pwsh -NoProfile -File ./tools/desktop-wave-selftest.ps1
+
       - name: Per-monitor grid inference pure safety checks
         shell: pwsh
         run: pwsh -NoProfile -File ./tools/helper-grid-selftest.ps1

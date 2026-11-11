@@ -1,4 +1,5 @@
-﻿ [DllImport("shell32.dll")] static extern void SHGetSettings(out uint state,uint mask);
+﻿#pragma warning disable 9191 // Marshal.QueryInterface is ref Guid on .NET Framework, in Guid on newer .NET.
+ [DllImport("shell32.dll")] static extern void SHGetSettings(out uint state,uint mask);
  [DllImport("shell32.dll",CharSet=CharSet.Unicode)] static extern void SHChangeNotify(uint change,uint flags,string item,IntPtr other);
  public static bool ShowHiddenForCIRead(){uint state;SHGetSettings(out state,1);return (state&1)!=0;}
  public static void NotifyActualChangeForCI(string path,bool deleted){
@@ -35,10 +36,16 @@
     point=Marshal.AllocCoTaskMem(8);Marshal.WriteInt32(point,0,Int32.MinValue);Marshal.WriteInt32(point,4,Int32.MinValue);
     int before=s.Folder.GetItemPosition(child,point);int bx=Marshal.ReadInt32(point,0),by=Marshal.ReadInt32(point,4);
     Marshal.WriteInt32(point,0,x);Marshal.WriteInt32(point,4,y);array=Marshal.AllocCoTaskMem(IntPtr.Size);Marshal.WriteIntPtr(array,child);
-    int set=mode==1?((ILegacyFolderView)s.Folder).SetItemPos(child,point):s.Folder.SelectAndPositionItems(1,array,point,0x80);
+    int set,rawQi=-1,sameIdentity=-1;
+    if(mode==1){
+      IntPtr viaFolder=Marshal.GetIUnknownForObject(s.Folder),viaView=Marshal.GetIUnknownForObject(s.RawViewForCI),legacy=IntPtr.Zero;object legacyObj=null;
+      try{sameIdentity=viaFolder==viaView?1:0;Guid legacyId=typeof(ILegacyFolderView).GUID;rawQi=Marshal.QueryInterface(viaView,ref legacyId,out legacy);set=rawQi;
+       if(rawQi==0){legacyObj=Marshal.GetObjectForIUnknown(legacy);set=((ILegacyFolderView)legacyObj).SetItemPos(child,point);}
+      }finally{if(legacyObj!=null&&Marshal.IsComObject(legacyObj))Marshal.ReleaseComObject(legacyObj);if(legacy!=IntPtr.Zero)Marshal.Release(legacy);Marshal.Release(viaView);Marshal.Release(viaFolder);}
+    }else{set=s.Folder.SelectAndPositionItems(1,array,point,0x80);}
     Marshal.WriteInt32(point,0,Int32.MinValue);Marshal.WriteInt32(point,4,Int32.MinValue);
     int after=s.Folder.GetItemPosition(child,point);int ax=Marshal.ReadInt32(point,0),ay=Marshal.ReadInt32(point,4);
-    return new int[]{parse,before,bx,by,set,after,ax,ay};
+    return new int[]{parse,before,bx,by,set,after,ax,ay,rawQi,sameIdentity};
    }finally{
     if(array!=IntPtr.Zero)Marshal.FreeCoTaskMem(array);if(point!=IntPtr.Zero)Marshal.FreeCoTaskMem(point);if(child!=IntPtr.Zero)Marshal.FreeCoTaskMem(child);
     if(obj!=null&&Marshal.IsComObject(obj))Marshal.ReleaseComObject(obj);if(folder!=IntPtr.Zero)Marshal.Release(folder);
