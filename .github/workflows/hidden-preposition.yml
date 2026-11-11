@@ -1,0 +1,31 @@
+name: hidden-preposition
+on:
+  push:
+    paths:
+      - 'tools/hidden-preposition-ci.ps1'
+      - 'tools/hidden-preposition-ci.cs'
+      - '.github/workflows/hidden-preposition.yml'
+  workflow_dispatch:
+jobs:
+  investigate:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [modern, legacy]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hidden PIDL experiment, not a production feature
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/hidden-preposition-ci.ps1 -Mode '${{ matrix.mode }}' 2>&1 | Tee-Object -FilePath hidden-preposition-${{ matrix.mode }}-ci.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve evidence including negative and failed experiments
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hidden-preposition-${{ matrix.mode }}-evidence
+          path: |
+            hidden-preposition-${{ matrix.mode }}-ci.json
+            hidden-preposition-${{ matrix.mode }}-ci.log

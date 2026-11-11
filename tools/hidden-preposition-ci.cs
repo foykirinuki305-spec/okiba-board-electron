@@ -1,0 +1,37 @@
+﻿ // CI-only experiment: non-visible items are NOT guaranteed by the API contract.
+ [ComImport,Guid("000214e6-0000-0000-c000-000000000046"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+ interface IShellFolderParse {
+  [PreserveSig] int ParseDisplayName(IntPtr hwnd,IntPtr bind,[MarshalAs(UnmanagedType.LPWStr)]string name,ref uint eaten,out IntPtr pidl,ref uint attributes);
+ }
+ [ComImport,Guid("37A378C0-F82D-11CE-AE65-08002B2E1262"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+ interface ILegacyFolderView {
+  [PreserveSig]int Rearrange(IntPtr p);[PreserveSig]int GetArrangeParam(out IntPtr p);[PreserveSig]int ArrangeGrid();[PreserveSig]int AutoArrange();[PreserveSig]int GetAutoArrange();
+  [PreserveSig]int AddObject(IntPtr p,out uint n);[PreserveSig]int GetObject(out IntPtr p,uint n);[PreserveSig]int RemoveObject(IntPtr p,out uint n);[PreserveSig]int GetObjectCount(out uint n);[PreserveSig]int SetObjectCount(uint n,uint flags);
+  [PreserveSig]int UpdateObject(IntPtr a,IntPtr b,out uint n);[PreserveSig]int RefreshObject(IntPtr p,out uint n);[PreserveSig]int SetRedraw([MarshalAs(UnmanagedType.Bool)]bool redraw);[PreserveSig]int GetSelectedCount(out uint n);[PreserveSig]int GetSelectedObjects(out IntPtr p,out uint n);
+  [PreserveSig]int IsDropOnSource(IntPtr p);[PreserveSig]int GetDragPoint(IntPtr p);[PreserveSig]int GetDropPoint(IntPtr p);[PreserveSig]int MoveIcons(IntPtr data);
+  [PreserveSig]int SetItemPos(IntPtr child,IntPtr point);
+ }
+ public static int[] PrepositionHiddenForCI(string path,int x,int y,int mode){
+  if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true"||Environment.GetEnvironmentVariable("RUNNER_OS")!="Windows"||Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT")!="github-hosted")throw new InvalidOperationException("CI-only experiment");
+  if((System.IO.File.GetAttributes(path)&System.IO.FileAttributes.Hidden)==0)throw new InvalidOperationException("Probe must remain hidden");
+  using(var s=new Session()){
+   IntPtr folder=IntPtr.Zero,child=IntPtr.Zero,point=IntPtr.Zero,array=IntPtr.Zero;object obj=null;
+   try{
+    Guid iid=typeof(IShellFolderParse).GUID;Marshal.ThrowExceptionForHR(s.Folder.GetFolder(ref iid,out folder));
+    obj=Marshal.GetObjectForIUnknown(folder);uint eaten=0,attributes=0;
+    int parse=((IShellFolderParse)obj).ParseDisplayName(IntPtr.Zero,IntPtr.Zero,System.IO.Path.GetFileName(path),ref eaten,out child,ref attributes);
+    Marshal.ThrowExceptionForHR(parse);
+    string actual=GetItemFilePath(s.Folder,child);
+    if(!String.Equals(System.IO.Path.GetFullPath(actual),System.IO.Path.GetFullPath(path),StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Hidden PIDL path mismatch");
+    point=Marshal.AllocCoTaskMem(8);Marshal.WriteInt32(point,0,0);Marshal.WriteInt32(point,4,0);
+    int before=s.Folder.GetItemPosition(child,point);int bx=Marshal.ReadInt32(point,0),by=Marshal.ReadInt32(point,4);
+    Marshal.WriteInt32(point,0,x);Marshal.WriteInt32(point,4,y);array=Marshal.AllocCoTaskMem(IntPtr.Size);Marshal.WriteIntPtr(array,child);
+    int set=mode==1?((ILegacyFolderView)s.Folder).SetItemPos(child,point):s.Folder.SelectAndPositionItems(1,array,point,0x80);
+    int after=s.Folder.GetItemPosition(child,point);int ax=Marshal.ReadInt32(point,0),ay=Marshal.ReadInt32(point,4);
+    return new int[]{parse,before,bx,by,set,after,ax,ay};
+   }finally{
+    if(array!=IntPtr.Zero)Marshal.FreeCoTaskMem(array);if(point!=IntPtr.Zero)Marshal.FreeCoTaskMem(point);if(child!=IntPtr.Zero)Marshal.FreeCoTaskMem(child);
+    if(obj!=null&&Marshal.IsComObject(obj))Marshal.ReleaseComObject(obj);if(folder!=IntPtr.Zero)Marshal.Release(folder);
+   }
+  }
+ }
