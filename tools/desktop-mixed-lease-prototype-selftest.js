@@ -1,0 +1,13 @@
+'use strict';
+const assert=require('assert/strict'),{planMixed:p,mixedMetadata:m,recoveryRoute:r}=require('./desktop-mixed-lease-prototype');
+let n=0;const test=f=>{f();n++};const desktop='C:\\Desktop',board='C:\\Boards\\B';
+const s={kind:'mixed-hidden-resident-prototype',desktop,grid:{gx:0,gy:0,sx:100,sy:70},items:[{mode:'hidden-link',source:desktop+'\\a.mp4',destination:desktop+'\\a.mp4',identity:'idA',originalHidden:true,offset:[0,0]},{mode:'resident-file',source:board+'\\b.mp4',destination:desktop+'\\b.mp4',identity:'idB',crossVolume:false,regularFile:true,reparse:false,linkCount:1,originalAttributes:32,offset:[0,1]}],targets:[{path:desktop+'\\a.mp4',x:100,y:140},{path:desktop+'\\b.mp4',x:100,y:210}]};
+const raw=JSON.stringify({positions:{'b.mp4':[3,4],'other.mp4':[7,8]},links:[{path:desktop+'\\a.mp4',extra:'selected'},{path:'D:\\other.mp4',extra:'preserved'}],future:{one:[1,2]}});
+test(()=>assert.deepEqual(p(s).rollbackModes,['rehide-samepath','restore-source-no-replace']));
+test(()=>{const after=JSON.parse(m(raw,s,board));assert.deepEqual(after,{positions:{'other.mp4':[7,8]},links:[{path:'D:\\other.mp4',extra:'preserved'}],future:{one:[1,2]}})});
+for(const mutate of [x=>x.items[1].identity='idA',x=>x.items[1].crossVolume=true,x=>x.items[1].originalAttributes=128,x=>x.items[0].originalHidden=false,x=>x.targets[1].y=280,x=>x.targets[1].x=101,x=>x.targets.pop(),x=>x.items[1].destination=x.items[0].source,x=>x.grid=null])test(()=>{const x=structuredClone(s);mutate(x);assert.throws(()=>p(x))});
+test(()=>assert.throws(()=>m(JSON.stringify({...JSON.parse(raw),links:[]}),s,board)));
+for(const phase of ['prepared','off-intent','staging','placing','restoring'])test(()=>assert(r(phase).includes('whole-group')));
+for(const phase of ['permit-intent','permitted','committed'])test(()=>assert(r(phase).includes('no-ordinary-rollback')));
+test(()=>assert.equal(r('unexpected'),'blocked-unknown-no-mutation'));
+console.log('mixed lease prototype '+n+' PASS; no native operations');
