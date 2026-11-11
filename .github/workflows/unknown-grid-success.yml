@@ -17,6 +17,8 @@ jobs:
       - name: Pure success and existing abort regressions
         shell: pwsh
         run: |
+          node tools/unknown-grid-result-assert-selftest.js
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
           node tools/unknown-grid-success-model-selftest.js
           if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
           node tools/unknown-grid-adaptive-driver-selftest.js

@@ -1,6 +1,7 @@
 'use strict';
 if(process.platform!=='win32'||process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Windows'||process.env.RUNNER_ENVIRONMENT!=='github-hosted')throw Error('Hosted Windows CI only');
 const fs=require('fs'),path=require('path'),os=require('os'),crypto=require('crypto'),assert=require('assert/strict'),{fork}=require('child_process');const {build,ownedTempDirectory}=require('./unknown-grid-lease-copy-ci');const {createShellHelperClient}=require('../lib/shellhelper');const {planCalibration,searchBounds}=require('../lib/desktop-calibration');const {sameSnapshot}=require('../lib/safe-desktop');
+const {assertCalibrationResult}=require('./unknown-grid-result-assert-ci');
 const {retryableSnapshotRead}=require('./unknown-grid-recovery-policy-ci');
 const config=require('./unknown-grid-run-config-ci').readConfig(process.env);
 const root=path.resolve(__dirname,'..'),desktop=path.resolve(process.argv[2]),report={passed:false,cleanupVerified:false,scope:'CI-only N3 sparse success/duplicate/no-fit; single actual monitor, not mixed-DPI proof or transport reply loss',expectedScale:config.expectedScale,cases:config.cases,events:[]};const sleep=ms=>new Promise(r=>setTimeout(r,ms));const note=(phase,data)=>{report.events.push({phase,data});console.log(phase+' '+JSON.stringify(data));};const hash=p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
@@ -33,7 +34,7 @@ async function main(){const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-unk
    assert.equal(response.phase,'done',response.error);assert.equal(response.outcome,commits?'committed':'aborted');
    if(scenario==='duplicate-requests')assert.deepEqual(response.duplicateChecks,{samePermit:true,resolveCommitted:true,commitDoneCommitted:true});
    const after=await stable('after-case');assert.equal(after.icons.length,before.icons.length+(commits?3:0));
-   if(commits){assert.deepEqual(response.observed.grid,before.areas[0].grid);assert.equal(fs.readFileSync(metadata,'utf8'),'{"committed":true}');for(const t of response.resolved.targets){const icon=after.icons.find(i=>i.path&&path.resolve(i.path).toLowerCase()===t.path.toLowerCase());assert(icon&&icon.x===t.x&&icon.y===t.y);}}
+   if(commits){assertCalibrationResult({before,after,response,selected});assert.equal(fs.readFileSync(metadata,'utf8'),'{"committed":true}');for(const t of response.resolved.targets){const icon=after.icons.find(i=>i.path&&path.resolve(i.path).toLowerCase()===t.path.toLowerCase());assert(icon&&icon.x===t.x&&icon.y===t.y);}}
    else assert.equal(fs.readFileSync(metadata,'utf8'),'{"unchanged":true}');
    for(const item of selected){const n=await request('readHiddenFile',{path:item.path});for(const key of ['identity','size','mtime'])assert.equal(n[key],item.attrs[key]);assert.equal(n.hidden,!commits);assert.equal(n.attributes,commits?item.attrs.attributes&~2:item.attrs.attributes);assert.equal(hash(item.path),item.hash);}
    const closing=receive(owner,90000);owner.send({cmd:'close'});assert((await closing).result.ok);await stop(owner);

@@ -22,6 +22,8 @@ jobs:
       - name: Empty native argument projection
         shell: powershell
         run: ./tools/desktop-empty-array-selftest.ps1
+      - name: Native calibrated result assertion
+        run: node tools/unknown-grid-result-assert-selftest.js
       - name: Single actual 150 empty fixture only
         shell: powershell
         run: ./tools/desktop-dpi-empty-ci.ps1
