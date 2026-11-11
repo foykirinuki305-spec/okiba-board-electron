@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'tools/desktop-dpi-ui-ci.ps1'
+      - 'tools/desktop-dpi-metrics-copy-ci.js'
       - '.github/workflows/desktop-dpi-ui.yml'
 jobs:
   display-ui:

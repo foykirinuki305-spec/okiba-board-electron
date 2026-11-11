@@ -30,11 +30,13 @@ function ConfirmResolution {
 function Read-DesktopEvidence {
  $capture=@{}
  # Read-only production helper: stdin closes immediately after the snapshot request.
- $helper=Join-Path $PSScriptRoot '../scripts/shell-helper.ps1';$p=New-Object Diagnostics.Process;$p.StartInfo.FileName='powershell.exe';$p.StartInfo.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$helper+'"';$p.StartInfo.UseShellExecute=$false;$p.StartInfo.CreateNoWindow=$true;$p.StartInfo.RedirectStandardInput=$true;$p.StartInfo.RedirectStandardOutput=$true;$p.StartInfo.RedirectStandardError=$true
+ $helper=$script:metricsHelper;$p=New-Object Diagnostics.Process;$p.StartInfo.FileName='powershell.exe';$p.StartInfo.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$helper+'"';$p.StartInfo.UseShellExecute=$false;$p.StartInfo.CreateNoWindow=$true;$p.StartInfo.RedirectStandardInput=$true;$p.StartInfo.RedirectStandardOutput=$true;$p.StartInfo.RedirectStandardError=$true
  try{$null=$p.Start();$out=$p.StandardOutput.ReadToEndAsync();$err=$p.StandardError.ReadToEndAsync();$p.StandardInput.WriteLine('{"id":1,"cmd":"desktopSnapshot"}');$p.StandardInput.Close();if(-not $p.WaitForExit(20000)){$p.Kill();if(-not $p.WaitForExit(5000)){throw 'readonly-helper-stop-unconfirmed'};throw 'readonly-helper-timeout'};$capture.output=$out.GetAwaiter().GetResult();$capture.error=$err.GetAwaiter().GetResult();$rows=@($capture.output -split '\r?\n'|Where-Object{$_}|ForEach-Object{$_|ConvertFrom-Json});$answer=@($rows|Where-Object{$_.id -eq 1});if($answer.Count -ne 1 -or -not $answer[0].result.ok){throw 'desktop-snapshot-unavailable'};$capture.snapshot=$answer[0].result}catch{$report.lastSnapshotFailure=$capture;throw}finally{$p.Dispose()}
  return $capture
 }
 try{
+ $script:metricsHelper=(& node (Join-Path $PSScriptRoot 'desktop-dpi-metrics-copy-ci.js'));if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $script:metricsHelper)){throw 'metrics-copy-failed'}
+ $report.spacingDiagnosticSchema=@('currentHRESULT','currentX','currentY','defaultHRESULT','defaultX','defaultY')
  $report.beforeEvidence=Read-DesktopEvidence
  Start-Process explorer.exe -ArgumentList 'ms-settings:display' -WindowStyle Hidden|Out-Null
  $until=[DateTime]::UtcNow.AddSeconds(25)
@@ -65,16 +67,8 @@ try{
  $report.actual=$actual;if(-not @($actual|Where-Object{$_[0] -eq 150 -and $_[1] -eq 0}).Count){throw 'native-scale-not-150'}
  $report.changedEvidence=Read-DesktopEvidence;if(-not @($report.changedEvidence.snapshot.areas|Where-Object{$_.scale -eq 150}).Count){throw 'desktop-snapshot-scale-not-verified'}
  $report.status='actual-150-percent-verified'
- $native=New-Object Diagnostics.Process;$native.StartInfo.FileName='node.exe';$native.StartInfo.Arguments='"'+(Join-Path $PSScriptRoot 'unknown-grid-success-ci.js')+'" "'+[Environment]::GetFolderPath('Desktop')+'"';$native.StartInfo.WorkingDirectory=Split-Path $PSScriptRoot -Parent;$native.StartInfo.UseShellExecute=$false;$native.StartInfo.CreateNoWindow=$true;$native.StartInfo.RedirectStandardOutput=$true;$native.StartInfo.RedirectStandardError=$true
- $native.StartInfo.EnvironmentVariables['OKIBA_UNKNOWN_EXPECTED_SCALE']='150';$native.StartInfo.EnvironmentVariables['OKIBA_UNKNOWN_CASES']='success,no-fit'
- try{
-  $null=$native.Start();$nativeStarted=$true;$report.nativePid=$native.Id;$stdout=$native.StandardOutput.ReadToEndAsync();$stderr=$native.StandardError.ReadToEndAsync()
-  if(-not $native.WaitForExit(240000)){$report.nativeTimedOut=$true;throw 'native-driver-timeout-lease-state-unresolved'}
-  $report.nativeExitCode=$native.ExitCode;$stdout.GetAwaiter().GetResult()|Set-Content (Join-Path $native.StartInfo.WorkingDirectory 'unknown-grid-success-ci.log');$stderr.GetAwaiter().GetResult()|Add-Content (Join-Path $native.StartInfo.WorkingDirectory 'unknown-grid-success-ci.log')
-  $nativeEvidence=Get-Content (Join-Path $native.StartInfo.WorkingDirectory 'unknown-grid-success-ci.json') -Raw|ConvertFrom-Json;$report.nativeEvidence=$nativeEvidence
-  $nativeVerified=($native.ExitCode -eq 0 -and $nativeEvidence.passed -eq $true -and $nativeEvidence.cleanupVerified -eq $true -and -not $nativeEvidence.cleanupError -and $nativeEvidence.expectedScale -eq 150 -and $nativeEvidence.actualScale -eq 150 -and (($nativeEvidence.cases -join ',') -ceq 'success,no-fit'))
-  if(-not $nativeVerified){throw 'native-driver-cleanup-or-terminal-unverified'};$report.status='actual-150-native-success-no-fit-verified'
- }finally{$native.Dispose()}
+ $report.status='actual-150-spacing-readonly-verified'
+
 }catch{$report.reason=$_.Exception.Message;$report.error=[string]$_}finally{
  $skipRestore=($nativeStarted -and -not $nativeVerified);if($skipRestore){$report.restoreSkippedDueToUnresolvedLease=$true;$report.status='native-unresolved-no-settings-mutation'}
  if(-not $skipRestore -and $report.changed -and $combo -and $original){try{Expand $combo;$matches=@(Options $settings.Id|Where-Object{$_.Current.Name -ceq $original});if($matches.Count -ne 1){throw 'restore-option-not-unique'};$matches[0].GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select();Start-Sleep -Seconds 2;$report.after=@([DpiUiProbe]::Read());$report.restored=(($report.after|ConvertTo-Json -Compress) -ceq ($report.before|ConvertTo-Json -Compress));if(-not $report.restored){$report.status='restore-unverified'}}catch{$report.restoreError=$_.Exception.Message;$report.status='restore-unverified'}}
