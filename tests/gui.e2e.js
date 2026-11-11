@@ -454,8 +454,8 @@ async function main() {
   assert(true, 'positioning script invoked with the drop point and landed name');
   await waitFor(async () => {
     const t = await page.evaluate(() => document.getElementById('toast').textContent);
-    return t.includes('戻し先フォルダへ移動しました');
-  }, 'status line says 戻し先フォルダへ移動しました');
+    return t.includes('デスクトップへ移動しました');
+  }, 'status line says デスクトップへ移動しました');
   await waitFor(async () => {
     const ns = await page.locator('.item .name').allTextContents();
     return !ns.some((t) => t.includes('デスクトップ移動'));
