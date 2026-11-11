@@ -13,7 +13,7 @@ function generateMixedDriver(copy,source){let s=fs.readFileSync(source,'utf8');
  replace('({path:i.path,destination:i.dest})','({path:i.path,destination:i.dest,hidden:i.mode===\'hidden-link\',mode:i.mode})');
  const a=s.indexOf("   if(name.startsWith('fault-')||name==='hang-first-move'){");const b=s.indexOf('   if(showCase){',a);if(a<0||b<a)throw Error('fault injection anchors');
  s=s.slice(0,a)+`   if(name.startsWith('fault-')||name==='hang-first-move'){
-    const hd=path.join(dir,'helper');fs.mkdirSync(hd);for(const f of ['shell-helper.ps1','snap-lease.ps1','resident-lease.ps1','resident-file-native.cs','mixed-lease-native-ci.ps1'])fs.copyFileSync(path.join(root,'scripts',f),path.join(hd,f));helperPath=path.join(hd,'shell-helper.ps1');
+    const hd=path.join(dir,'helper');fs.mkdirSync(hd);for(const f of ['shell-helper.ps1','snap-lease.ps1','resident-lease.ps1','resident-file-native.cs','mixed-lease-native-ci.ps1','mixed-rename-notify-ci.cs'])fs.copyFileSync(path.join(root,'scripts',f),path.join(hd,f));helperPath=path.join(hd,'shell-helper.ps1');
     const f=path.join(hd,'mixed-lease-native-ci.ps1');let code=fs.readFileSync(f,'utf8');const marker=name==='fault-first-reveal'?'# CI-MIXED-AFTER-FIRST-REVEAL':'# CI-MIXED-AFTER-FIRST-STAGE';assert.equal(code.split(marker).length-1,1);
     const fault=name==='hang-first-move'?'Start-Sleep -Seconds 60':"throw 'CI mixed partial mutation'";
     fs.writeFileSync(f,code.replace(marker,marker+"\\n if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'CI only'};"+fault));

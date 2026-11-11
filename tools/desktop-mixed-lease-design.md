@@ -57,3 +57,25 @@ is NOT implemented here.
 
 Current evidence: pure plan/metadata/phase checks only. No native mixed command,
 no main route, no production dispatch or default activation.
+
+## 8f9 rollback visibility observation and notification hypothesis
+
+The first mixed success completed, but the next abort restored all three resident
+files through native handle rename while Shell still enumerated their old Desktop
+paths. Trace showed selected indices 3,4,5 on 73 polls; link indices 0,1,2 disappeared.
+Native visibility wait failed after approximately 16 seconds. The subsequent OFF
+adoption refusal is a conservative result of prior durable restore-attempt, not a
+reason to weaken that guard.
+
+Next CI-only change: after a successful RestoreMoved, independently locate the
+pair again (original source owns exact ID/size/mtime/ancestor proof and original
+attributes, destination absent). Only then send SHCNE_RENAMEITEM with old Desktop
+path and new original source path. No notification for an unmoved item, uncertain
+native outcome, occupied old path, changed attributes, or unknown locator error.
+The official SHChangeNotify contract describes notifications of actions the app
+actually performed. PATHW plus FLUSH delivers this two-path event; it does NOT
+prove Explorer visibility completion. All old-position and final visibility checks
+remain required. No Refresh, synthetic DELETE, or existing-icon repositioning.
+
+Reference verified 2026-11-11:
+https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shchangenotify

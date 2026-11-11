@@ -23,6 +23,20 @@ function Mixed-WaitVisibility($r,[bool]$visible){
  }while([DateTime]::UtcNow -lt $until)
  throw 'lease-visibility-timeout'
 }
+function Mixed-RenameNotification([string]$oldPath,[string]$newPath){
+ Mixed-CIOnly
+ if(-not ('OkibaMixedRenameNotify' -as [type])){Add-Type -Path (Join-Path $PSScriptRoot 'mixed-rename-notify-ci.cs')}
+ [OkibaMixedRenameNotify]::Renamed($oldPath,$newPath)
+}
+function Mixed-NotifyRestored($record,[string]$beforeState){
+ if($beforeState -cne 'moved'){throw 'mixed-notify-no-completed-move'}
+ # Locate validates both parent chains, destination absence, source native ID,
+ # size/mtime and allowed substantive attributes. Require original attrs too.
+ $after=Resident-Locate $record
+ if($after.state -cne 'unmoved' -or -not (Resident-Same $after.record $record) -or [uint32]$after.record.attributes -ne [uint32]$record.originalAttributes){throw 'mixed-rename-postcondition-failed'}
+ Mixed-RenameNotification $record.destination $record.source
+ return $after
+}
 function Mixed-Is($r){return ($r.kind -ceq 'mixed-hidden-resident-prototype')}
 function Mixed-ProjectionSame($a,$b){return ($a.identity -ceq $b.identity -and $a.size -ceq $b.size -and $a.mtime -ceq $b.mtime -and [uint32]$a.attributes -eq [uint32]$b.attributes)}
 function Mixed-Validate($r,$current){
@@ -144,7 +158,11 @@ function Lease-Rollback([string]$token){
   foreach($i in $r.residentRecords){
    $script:LeasePhase='mixed-rollback-resident';Mixed-Trace 'resident-restore-before' @{index=$index}
    $null=Lease-Guard $r (Lease-Snapshot);$n=Resident-Locate $i;Mixed-Trace 'resident-located' @{index=$index;state=$n.state}
-   if($n.state -ceq 'moved'){$null=[OkibaResidentFiles]::RestoreMoved($i.destination,$i.source,$i.identity,$i.size,$i.mtime,[uint32]$i.originalAttributes,$i.sourceParentID,$i.destParentID)}
+   if($n.state -ceq 'moved'){
+    $null=[OkibaResidentFiles]::RestoreMoved($i.destination,$i.source,$i.identity,$i.size,$i.mtime,[uint32]$i.originalAttributes,$i.sourceParentID,$i.destParentID)
+    $after=Mixed-NotifyRestored $i $n.state
+    Mixed-Trace 'resident-restore-postcondition-notified' @{index=$index;state=$after.state;identityMatches=($after.record.identity -ceq $i.identity);attributes=$after.record.attributes}
+   }
    else{$null=[OkibaResidentFiles]::RestoreUnmoved($i.source,$i.identity,$i.size,$i.mtime,[uint32]$i.originalAttributes,$i.sourceParentID)}
    Mixed-Trace 'resident-restore-after' @{index=$index};$index++
   }

@@ -34,6 +34,7 @@ function buildMixedCopy(destination){
  for(const name of functions)patch('scripts/snap-lease.ps1','function Lease-'+name+'(','function Lease-'+name+'-CoreMixedBase(');
  const native=path.join(root,'tools/mixed-lease-native-ci.ps1');if(!fs.existsSync(native))throw Error('Mixed native prototype unavailable');
  fs.copyFileSync(native,path.join(destination,'scripts/mixed-lease-native-ci.ps1'));
+ fs.copyFileSync(path.join(root,'tools/mixed-rename-notify-ci.cs'),path.join(destination,'scripts/mixed-rename-notify-ci.cs'));
  fs.appendFileSync(path.join(destination,'scripts/snap-lease.ps1'),"\n. (Join-Path $PSScriptRoot 'mixed-lease-native-ci.ps1')\n");
  let host=fs.readFileSync(path.join(root,'tools/desktop-lease-protocol-host-ci.js'),'utf8').replace('hidden:true})),snapshot:spec.baseline','hidden:true,mode:i.mode})),snapshot:spec.baseline');
  host=host.replace("helper:{command:'powershell.exe'","helper:{env:{...process.env,OKIBA_MIXED_TRACE_PATH:path.join(spec.journalDir,'mixed-trace.jsonl')},command:'powershell.exe'");
