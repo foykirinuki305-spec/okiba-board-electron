@@ -36,7 +36,7 @@ try{
  $report.combos=@($combos|ForEach-Object{@{name=$_.Current.Name;id=$_.Current.AutomationId}})
  $candidates=@($combos|Where-Object{($_.Current.Name+' '+$_.Current.AutomationId) -match '(?i)scale|scaling|dpi|拡大|縮小'})
  if($candidates.Count -ne 1){throw 'scale-combo-not-unambiguous'};$combo=$candidates[0]
- $selection=$combo.GetCurrentPattern([Windows.Automation.SelectionPattern]::Pattern).GetCurrentSelection();if($selection.Count -ne 1){throw 'original-scale-unknown'};$original=$selection[0].Current.Name;$report.original=$original
+ $selection=$combo.GetCurrentPattern([Windows.Automation.SelectionPattern]::Pattern).Current.GetSelection();if($selection.Count -ne 1){throw 'original-scale-unknown'};$original=$selection[0].Current.Name;$report.original=$original
  Expand $combo;$options=@(Options $settings.Id);$report.options=@($options|ForEach-Object{$_.Current.Name})
  $target=@($options|Where-Object{$_.Current.Name -match '^150\s*%($|\s|\()'});if($target.Count -ne 1){throw '150-option-unavailable-or-ambiguous'}
  $report.changed=$true;$target[0].GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select()
