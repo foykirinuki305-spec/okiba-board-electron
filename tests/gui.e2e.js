@@ -1464,6 +1464,9 @@ async function main() {
   step('upgrade layout: v6 data and old home positions survive update and restart');
   await require('./upgrade-layout.e2e')();
 
+  step('desktop calibration: probe ordering, rollback and cache restart in isolated fake helper');
+  await require('./calibration.e2e')();
+
   console.log('\nGUI E2E: all steps passed');
 }
 

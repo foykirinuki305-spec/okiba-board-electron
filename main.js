@@ -671,6 +671,31 @@ function registerIpc() {
   // Desktop returns are planned as a complete group before any mutation.
   // No legacy cold positioner is used by this strict path.
   const safeDesk = require('./lib/safe-desktop');
+  const desktopCalibration = require('./lib/desktop-calibration');
+  const calibrationCacheStore=require('./lib/desktop-calibration-cache');
+  const calibrationCacheFile=path.join(app.getPath('userData'),'desktop-calibration-cache.json');
+  let calibrationImportGeneration=-1,calibrationImportPromise=null;
+  async function ensureCalibrationImported(){
+    if(!shellHelper)return;
+    shellHelper.start();
+    const generation=shellHelper.stats().spawns;
+    if(calibrationImportGeneration===generation)return calibrationImportPromise;
+    calibrationImportGeneration=generation;
+    calibrationImportPromise=(async()=>{
+      const saved=calibrationCacheStore.load(calibrationCacheFile);
+      if(!saved)return;
+      const response=await shellHelper.request('importDesktopCalibration',saved,{timeoutMs:10000});
+      try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' calibration-cache import '+JSON.stringify({generation,transportOk:response.ok,result:response.result})+'\n');}catch(_){}
+    })();
+    return calibrationImportPromise;
+  }
+  async function persistCalibrationEvidence(){
+    if(!shellHelper)return;
+    const response=await shellHelper.request('exportDesktopCalibration',{}, {timeoutMs:10000});
+    if(response.ok&&response.result?.ok&&calibrationCacheStore.save(calibrationCacheFile,response.result))return;
+    try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' calibration-cache save unavailable\n');}catch(_){}
+  }
+
   const {createCrossVolumeMove}=require('./lib/cross-volume-move');
   function desktopReturnDir(){
     if(process.env.OKIBA_TEST_HOOKS==='1')return process.env.OKIBA_TEST_DESKTOP_DIR||process.env.OKIBA_SHORTCUT_DESKTOP||null;
@@ -696,6 +721,7 @@ function registerIpc() {
         areas:[{left:-1000,top:-1000,right:10000,bottom:10000}],icons:[]};
     }
     if(!shellHelper) return {ok:false};
+    await ensureCalibrationImported();
     const r=await shellHelper.request('desktopSnapshot',{}, {timeoutMs:3000});
     return r.ok && r.result ? r.result : {ok:false};
   }
@@ -780,12 +806,41 @@ function registerIpc() {
       for(const item of planned)item.offset=[item.cell[0]-anchor[0],item.cell[1]-anchor[1]];
       const snap=await desktopSnapshot();
       const point=payload.automatic?null:{x:Number(payload.screenX)+Number(snap.origin?.x),y:Number(payload.screenY)+Number(snap.origin?.y)};
-      const plan=safeDesk.planDesktop({snapshot:snap,items:planned,point,automatic:!!payload.automatic});
+      let plan=safeDesk.planDesktop({snapshot:snap,items:planned,point,automatic:!!payload.automatic});
+      let calibrationPlan=null,calibrationEvidence=null;
+      if(!plan.ok&&(plan.reason==='unknown-desktop'||(payload.automatic&&plan.reason==='no-space'))) {
+        const candidateAreas=(snap.areas||[]).map((area,index)=>({area,index})).filter(({area})=>Object.hasOwn(area,'grid')&&area.grid===null&&(payload.automatic||(point&&point.x>=area.left&&point.x<area.right&&point.y>=area.top&&point.y<area.bottom)));
+        if(payload.automatic||candidateAreas.length===1)for(const {area,index} of candidateAreas) {
+          const ratio=Number(area.scale)*96/(Number(snap.viewDpi)*100);
+          if(!Number.isFinite(ratio)||ratio<=0||!Number.isInteger(snap.sx)||!Number.isInteger(snap.sy))continue;
+          const maxSpacing={x:Math.ceil(snap.sx*Math.max(1,ratio)*1.25),y:Math.ceil(snap.sy*Math.max(1,ratio)*1.25)};
+          const step=Math.ceil(Math.max(maxSpacing.x,maxSpacing.y)/16);
+          const candidate=desktopCalibration.planCalibration({snapshot:snap,areaIndex:index,probeId:planned[0].dest,maxSpacing,step});
+          if(candidate.ok&&candidate.requests.length<=192){calibrationPlan=candidate;plan={ok:true,calibrationPending:true};break;}
+        }
+      }
       planMs=Date.now()-started;
       diagnostic('plan',{automatic:!!payload.automatic,screenPoint:{x:payload.screenX,y:payload.screenY},clientPoint:point,anchor,geometry:{origin:snap.origin,sx:snap.sx,sy:snap.sy,gx:snap.gx,gy:snap.gy,areas:snap.areas,autoArrange:snap.autoArrange,snap:snap.snap,iconCount:snap.icons?.length},displays:screen.getAllDisplays().map(d=>({id:d.id,bounds:d.bounds,workArea:d.workArea,scaleFactor:d.scaleFactor})),items:planned.map(i=>({name:i.name,source:i.path,destination:i.dest,isLink:i.isLink,hidden:i.hidden,samePath:ln.samePath(i.path,i.dest),crossVolume:i.crossVolume,cell:i.cell,offset:i.offset})),plan});
       if(!plan.ok)return desktopBlocked(plan.reason);
       const tx=await safeDesk.executeDesktop({items:planned,plan,snapshot:snap,adapter:{
         snapshot:desktopSnapshot,
+        completePlanAfterFirstMove:calibrationPlan?async probe=>{
+          if(!shellHelper)return {ok:false,reason:'helper-unavailable'};
+          const calibrationStarted=Date.now();
+          const response=await shellHelper.request('calibrateDesktopGrid',{snapshot:snap,probe:{path:probe.dest,name:probe.name},plan:calibrationPlan},{timeoutMs:100000});
+          diagnostic('calibration-result',{elapsedMs:Date.now()-calibrationStarted,transportOk:response.ok,transportError:response.error,result:response.result});
+          if(!response.ok){const stopped=await shellHelper.stopAndWait();if(!stopped)desktopUnsafe=true;diagnostic('calibration-helper-stop',{stopped});return {ok:false,reason:'calibration-unavailable',unsafe:!stopped};}
+          if(!response.result?.ok)return response.result||{ok:false,reason:'calibration-unavailable'};
+          const inferred=desktopCalibration.inferCalibration({plan:calibrationPlan,samples:response.result.samples});
+          if(!inferred.ok)return inferred;
+          if(typeof response.result.token!=='string'||!response.result.token)return {ok:false,reason:'missing-calibration-token'};
+          calibrationEvidence={token:response.result.token,grid:inferred.grid};
+          const calibrated={...snap,areas:snap.areas.map((area,index)=>index===calibrationPlan.areaIndex?{...area,grid:inferred.grid}:area)};
+          // Reuse the user's original point and offsets, never the probe location.
+          const completed=safeDesk.planDesktop({snapshot:calibrated,items:planned,point,automatic:!!payload.automatic});
+          diagnostic('calibrated-plan',{areaIndex:calibrationPlan.areaIndex,grid:inferred.grid,plan:completed});
+          return completed;
+        }:null,
         async move(item) {
           const st=fs.statSync(item.path);if(st.dev!==item.identity.dev||st.ino!==item.identity.ino)throw Error('source-changed');
           if(!ln.samePath(item.path,item.dest)) {
@@ -813,7 +868,7 @@ function registerIpc() {
           if(process.env.OKIBA_TEST_HOOKS==='1'&&process.env.OKIBA_TEST_POSITIONER==='stub')return {ok:true};
           if(!shellHelper)return {ok:false,reason:'helper-unavailable'};
           const posStart=Date.now();
-          const r=await shellHelper.request('positionDesktopPlan',{snapshot,targets:p.targets.map(t=>({...t,path:planned.find(i=>i.path===t.path).dest})),buffer:p.buffer},{timeoutMs:60000});
+          const r=await shellHelper.request('positionDesktopPlan',{snapshot,targets:p.targets.map(t=>({...t,path:planned.find(i=>i.path===t.path).dest})),buffer:p.buffer,...(calibrationEvidence?{calibration:calibrationEvidence}:{})},{timeoutMs:60000});
           positionMs=Date.now()-posStart;
           diagnostic('position-result',{elapsedMs:positionMs,transportOk:r.ok,transportError:r.error,result:r.result});
           if(!r.ok){const stopped=await shellHelper.stopAndWait();if(!stopped)desktopUnsafe=true;diagnostic('helper-stop',{stopped});return {ok:false,reason:'position-unavailable',unsafe:!stopped,detail:r.error};}
@@ -837,6 +892,7 @@ function registerIpc() {
       }});
       diagnostic('transaction-result',{result:tx});
       if(!tx.ok){try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop '+JSON.stringify(tx)+'\n');}catch(_){}return desktopBlocked(tx.reason,tx.recovery);}
+      if(calibrationEvidence){try{await persistCalibrationEvidence();}catch(_){}}
       const warnings=[];
       for(const item of planned)if(item.crossTx){try{const cleaned=await item.crossTx.cleanup();if(!cleaned.ok)warnings.push(cleaned);}catch(e){warnings.push({warning:String(e.message||e),recovery:item.crossTx.recoveryPaths});}}
       for(const item of planned)if(item.crossTx){try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop cross-volume '+JSON.stringify(item.crossTx.timings)+'\n');}catch(_){}}
@@ -974,7 +1030,7 @@ function registerIpc() {
     });
   }
   shellHelper = createShellHelper();
-  if (shellHelper) shellHelper.start();
+  if (shellHelper) {shellHelper.start();ensureCalibrationImported().catch(()=>{});}
 
   // The SHELL Desktop folder (what the helper reads icons from);
   // bf.desktopDir() is the plain ~/Desktop path. Both are accepted

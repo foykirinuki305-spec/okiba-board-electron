@@ -788,6 +788,7 @@ function Get-DesktopPositions([string[]]$Names) {
 # ---- Strict desktop transactions (no legacy fallback) -----------------
 # Only the new transaction commands use these rules. They never set the
 # position of an icon belonging to the pre-move snapshot.
+$script:CalibratedDesktopGrids=@{}
 Add-Type -AssemblyName System.Windows.Forms
 # ListView spacing is valid only for the actual view-window DPI. A single
 # icon on another-DPI monitor cannot establish that monitor's spacing.
@@ -827,15 +828,30 @@ function Get-RawStrictDesktopSnapshot {
       @{left=[int]$tl[0];top=[int]$tl[1];right=[int]$br[0];bottom=[int]$br[1];grid=$areaGrid;scale=[int]$r[6];monitorOrigin=@{x=$monitorOrigin[0];y=$monitorOrigin[1]}}
     })
     if ($areas.Count -eq 0) { return @{ok=$false;reason='unknown-monitors'} }
-    return @{ok=$true;autoArrange=($shellState[1] -ne 0 -or ($shellState[0] -band 1) -ne 0 -or ([OkibaDesk]::GetWindowLong($lv,-16) -band 0x0100) -ne 0);
+    $explorerProcess=[uint32]0;[void][OkibaDesk]::GetWindowThreadProcessId($lv,[ref]$explorerProcess)
+    $explorerStarted=[Diagnostics.Process]::GetProcessById([int]$explorerProcess).StartTime.ToUniversalTime().Ticks.ToString()
+    $snapshot=@{ok=$true;explorerPid=$explorerProcess;explorerStarted=$explorerStarted;listviewHwnd=$lv.ToInt64();autoArrange=($shellState[1] -ne 0 -or ($shellState[0] -band 1) -ne 0 -or ([OkibaDesk]::GetWindowLong($lv,-16) -band 0x0100) -ne 0);
       snap=(($shellState[0] -band 4) -ne 0);viewDpi=$viewDpi;folderFlags=$shellState[0];shellAutoArrange=($shellState[1] -ne 0);sx=$sx;sy=$sy;gx=$grid[0];gy=$grid[1];
       origin=@{x=$origin[0];y=$origin[1]};areas=$areas;icons=@($icons.ToArray())}
+    $physicalKey=Strict-GeometryKey $snapshot
+    foreach($key in @($script:CalibratedDesktopGrids.Keys)){
+      $cached=$script:CalibratedDesktopGrids[$key]
+      if($cached.geometry -cne $physicalKey -or [DateTime]::Parse([string]$cached.expiresUtc).ToUniversalTime() -le [DateTime]::UtcNow){$script:CalibratedDesktopGrids.Remove($key);continue}
+      $area=$areas[[int]$key];$g=$cached.grid;$valid=$true
+      foreach($i in $icons){
+        if($i.x -ge $area.left -and $i.x -lt $area.right -and $i.y -ge $area.top -and $i.y -lt $area.bottom){
+          if((($i.x-$g.gx)%$g.sx) -ne 0 -or (($i.y-$g.gy)%$g.sy) -ne 0){$valid=$false;break}
+        }
+      }
+      if($valid){$area.grid=$g}else{$script:CalibratedDesktopGrids.Remove($key)}
+    }
+    return $snapshot
   } finally { $reader.Dispose() }
 }
 function Strict-IconKey($i) { return (@([string]$i.label,[int]$i.x,[int]$i.y) | ConvertTo-Json -Compress) }
 function Strict-GeometryKey($s) {
-  $areas=@($s.areas | ForEach-Object { @([int]$_.left,[int]$_.top,[int]$_.right,[int]$_.bottom,$_.grid,$_.scale,$_.monitorOrigin) })
-  return (@([bool]$s.autoArrange,[bool]$s.snap,[int]$s.sx,[int]$s.sy,[int]$s.origin.x,[int]$s.origin.y,$areas) | ConvertTo-Json -Compress -Depth 8)
+  $areas=@($s.areas | ForEach-Object { @([int]$_.left,[int]$_.top,[int]$_.right,[int]$_.bottom,$_.scale,$_.monitorOrigin) })
+  return (@($s.explorerPid,$s.explorerStarted,$s.listviewHwnd,$s.folderFlags,[bool]$s.autoArrange,[bool]$s.snap,[int]$s.sx,[int]$s.sy,[int]$s.viewDpi,[int]$s.origin.x,[int]$s.origin.y,$areas) | ConvertTo-Json -Compress -Depth 8)
 }
 function Strict-AreaGrid($area,$s) {
   if(($area -is [System.Collections.IDictionary] -and $area.Contains('grid')) -or $null -ne $area.PSObject.Properties['grid']) {return $area.grid}
@@ -866,7 +882,16 @@ function Strict-PointInside($p,$s) {
   }
   return $false
 }
-function Strict-Overlap($a,$b,$s) { return [Math]::Abs($a.x-$b.x) -lt ($s.sx-1) -and [Math]::Abs($a.y-$b.y) -lt ($s.sy-1) }
+function Strict-Overlap($a,$b,$s) {
+  $sx=[int]$s.sx;$sy=[int]$s.sy
+  foreach($p in @($a,$b)){foreach($area in $s.areas){
+    if($p.x -ge $area.left -and $p.x -lt $area.right -and $p.y -ge $area.top -and $p.y -lt $area.bottom){
+      $g=Strict-AreaGrid $area $s
+      if($null -ne $g){$sx=[Math]::Max($sx,[int]$g.sx);$sy=[Math]::Max($sy,[int]$g.sy)}
+    }
+  }}
+  return [Math]::Abs($a.x-$b.x) -lt ($sx-1) -and [Math]::Abs($a.y-$b.y) -lt ($sy-1)
+}
 function Strict-Near($a,$b) { return [Math]::Abs($a.x-$b.x) -le 1 -and [Math]::Abs($a.y-$b.y) -le 1 }
 function Get-StrictTransactionState($baseline,$current,$targets) {
   if (-not $current.ok -or (Strict-GeometryKey $baseline) -cne (Strict-GeometryKey $current)) { return @{ok=$false;reason='desktop-changed'} }
@@ -894,10 +919,120 @@ function Get-StrictTransactionState($baseline,$current,$targets) {
   }
   return @{ok=$true;new=$new;current=$current}
 }
-function Position-DesktopPlan($baseline,$targets,$buffer) {
+# One transaction-local proof only. Never persist calibration from another
+# desktop state, and never accept caller-supplied grid without measured proof.
+$script:DesktopCalibration=$null
+function Calibrate-DesktopGrid($baseline,$probe,$plan) {
+  $script:DesktopCalibration=$null
+  $clock=[Diagnostics.Stopwatch]::StartNew()
+  try {
+    if(-not $baseline.ok -or $baseline.autoArrange -or -not $baseline.snap){return @{ok=$false;reason='invalid-calibration-baseline'}}
+    $areaIndex=[int]$plan.areaIndex
+    if($areaIndex -lt 0 -or $areaIndex -ge @($baseline.areas).Count){return @{ok=$false;reason='invalid-calibration-area'}}
+    $area=$baseline.areas[$areaIndex];$patch=$plan.patch
+    $maxX=[int]$plan.maxSpacing.x;$maxY=[int]$plan.maxSpacing.y
+    if($maxX -lt 8 -or $maxY -lt 8 -or $maxX -gt 512 -or $maxY -gt 512 -or $null -eq $patch -or $patch.left -lt $area.left -or $patch.top -lt $area.top -or $patch.right -gt $area.right -or $patch.bottom -gt $area.bottom){return @{ok=$false;reason='unsafe-calibration-patch'}}
+    foreach($i in $baseline.icons){if($i.x -ge $patch.left-$maxX -and $i.x -le $patch.right+$maxX -and $i.y -ge $patch.top-$maxY -and $i.y -le $patch.bottom+$maxY){return @{ok=$false;reason='calibration-patch-occupied'}}}
+    $dest=[IO.Path]::GetFullPath([string]$probe.path)
+    $desktop=[IO.Path]::GetFullPath([Environment]::GetFolderPath('DesktopDirectory')).TrimEnd('\')
+    if([IO.Path]::GetDirectoryName($dest).TrimEnd('\') -ine $desktop -or [IO.Path]::GetFileName($dest) -cne [string]$probe.name -or -not (Test-Path -LiteralPath $dest) -or $plan.probeId -cne $dest){return @{ok=$false;reason='invalid-calibration-probe'}}
+    $requests=@($plan.requests)
+    if($requests.Count -lt 12 -or $requests.Count -gt 192){return @{ok=$false;reason='calibration-sample-limit'}}
+    foreach($q in $requests){
+      if(-not (Strict-PointValid $q) -or $q.x -lt $patch.left+$maxX -or $q.y -lt $patch.top+$maxY -or $q.x -gt $patch.right-$maxX -or $q.y -gt $patch.bottom-$maxY -or @('x','y') -notcontains $q.axis -or @('forward','reverse') -notcontains $q.pass){return @{ok=$false;reason='invalid-calibration-request'}}
+    }
+    $samples=New-Object 'System.Collections.Generic.List[object]'
+    $state=$null
+    foreach($q in $requests){
+      if($clock.ElapsedMilliseconds -ge 90000){return @{ok=$false;reason='calibration-deadline'}}
+      $until=[DateTime]::UtcNow.AddSeconds(8)
+      do {
+        $now=Get-StrictDesktopSnapshot
+        if(-not $now.ok -and $now.reason -eq 'desktop-changing'){Start-Sleep -Milliseconds 50;continue}
+        $fresh=Get-StrictTransactionState $baseline $now @($probe)
+        if(-not $fresh.ok){$fresh.phase='calibration-before';return $fresh}
+        if($fresh.new.Count -eq 1){break}
+        Start-Sleep -Milliseconds 50
+      }while([DateTime]::UtcNow -lt $until)
+      if($fresh.new.Count -ne 1){return @{ok=$false;reason='calibration-probe-not-ready'}}
+      if($null -ne $state -and -not (Strict-Near $state.new[0] $fresh.new[0])){return @{ok=$false;reason='calibration-probe-changed'}}
+      $i=$fresh.new[0]
+      if($clock.ElapsedMilliseconds -ge 90000){return @{ok=$false;reason='calibration-deadline'}}
+      [OkibaFolderView]::PositionNewItem([int]$i.index,$dest,[int]$i.x,[int]$i.y,[int]$q.x,[int]$q.y)
+      Start-Sleep -Milliseconds 180
+      $after=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) @($probe)
+      if(-not $after.ok){$after.phase='calibration-after';return $after}
+      if($after.new.Count -ne 1){return @{ok=$false;reason='calibration-probe-disappeared'}}
+      $i=$after.new[0]
+      if($i.x -lt $patch.left -or $i.y -lt $patch.top -or $i.x -gt $patch.right -or $i.y -gt $patch.bottom){return @{ok=$false;reason='calibration-left-patch'}}
+      $samples.Add(@{id=$q.id;axis=$q.axis;pass=$q.pass;probeId=$plan.probeId;geometryKey=$plan.geometryKey;iconsKey=$plan.iconsKey;requestX=$q.x;requestY=$q.y;x=$i.x;y=$i.y})
+      $state=$after
+    }
+    $token=[Guid]::NewGuid().ToString('N')
+    $script:DesktopCalibration=@{token=$token;expires=[DateTime]::UtcNow.AddMinutes(2);geometry=(Strict-GeometryKey $baseline);oldIcons=(Strict-IconsKey $baseline);areaIndex=$areaIndex;probePath=$dest;probeName=$probe.name;probePosition=$state.new[0];samples=@($samples.ToArray());maxSpacing=@{x=$maxX;y=$maxY}}
+    return @{ok=$true;token=$token;samples=@($samples.ToArray());snapshot=$state.current;elapsedMs=$clock.ElapsedMilliseconds}
+  }catch{return @{ok=$false;reason='calibration-error';detail=$_.Exception.Message}}
+}
+function Confirm-CalibrationGrid($e,$g) {
+  if($null -eq $g -or $g.sx -lt 2 -or $g.sy -lt 2 -or $g.sx -gt $e.maxSpacing.x -or $g.sy -gt $e.maxSpacing.y){return $false}
+  foreach($key in @('gx','gy','sx','sy')){if([double]$g.$key -ne [int]$g.$key){return $false}}
+  if($g.gx -lt 0 -or $g.gx -ge $g.sx -or $g.gy -lt 0 -or $g.gy -ge $g.sy){return $false}
+  foreach($s in $e.samples){if((($s.x-$g.gx)%$g.sx) -ne 0 -or (($s.y-$g.gy)%$g.sy) -ne 0){return $false}}
+  foreach($axis in @('x','y')){
+    $rows=@($e.samples | Where-Object {$_.axis -eq $axis -and $_.pass -eq 'forward'})
+    $back=@($e.samples | Where-Object {$_.axis -eq $axis -and $_.pass -eq 'reverse'})
+    $values=@($rows | ForEach-Object {$_.$axis} | Sort-Object -Unique)
+    $pitch=if($axis -eq 'x'){$g.sx}else{$g.sy}
+    if($values.Count -lt 3 -or $rows.Count -ne $back.Count -or @($rows|Group-Object {$_.$axis}|Where-Object {$_.Count -gt 1}).Count -lt 2){return $false}
+    for($n=1;$n -lt $values.Count;$n++){if($values[$n]-$values[$n-1] -ne $pitch){return $false}}
+    $other=if($axis -eq 'x'){'y'}else{'x'}
+    if(@($rows|ForEach-Object {$_.$other}|Select-Object -Unique).Count -ne 1){return $false}
+    foreach($r in $rows){$match=@($back|Where-Object {$_.requestX -eq $r.requestX -and $_.requestY -eq $r.requestY});if($match.Count -ne 1 -or $match[0].x -ne $r.x -or $match[0].y -ne $r.y){return $false}}
+  }
+  return $true
+}
+function Import-DesktopCalibration($version,$entries) {
+  $accepted=0;$rejected=0
+  try {
+    $entries=@($entries)
+    if($version -ne 1 -or $entries.Count -gt 4 -or [Text.Encoding]::UTF8.GetByteCount(($entries|ConvertTo-Json -Depth 12 -Compress)) -gt 1048576){return @{ok=$false;reason='calibration-cache-limit'}}
+    $snapshot=Get-StrictDesktopSnapshot
+    if(-not $snapshot.ok){return @{ok=$false;reason='calibration-cache-snapshot'}}
+    $physical=Strict-GeometryKey $snapshot
+    foreach($e in $entries){
+      try {
+        $n=[int]$e.areaIndex;$created=[DateTime]::Parse([string]$e.createdUtc).ToUniversalTime();$expires=[DateTime]::Parse([string]$e.expiresUtc).ToUniversalTime()
+        if($n -lt 0 -or $n -ge @($snapshot.areas).Count -or $e.geometry -cne $physical -or $created -gt [DateTime]::UtcNow.AddMinutes(5) -or $expires -le [DateTime]::UtcNow -or $expires -le $created -or ($expires-$created).TotalHours -gt 24 -or @($e.proof.samples).Count -gt 192 -or -not (Confirm-CalibrationGrid $e.proof $e.grid)){throw 'invalid-evidence'}
+        $a=$snapshot.areas[$n];$g=$e.grid
+        foreach($i in $snapshot.icons){if($i.x -ge $a.left -and $i.x -lt $a.right -and $i.y -ge $a.top -and $i.y -lt $a.bottom){if((($i.x-$g.gx)%$g.sx) -ne 0 -or (($i.y-$g.gy)%$g.sy) -ne 0){throw 'icon-grid-mismatch'}}}
+        $script:CalibratedDesktopGrids[$n]=$e;$accepted++
+      }catch{$rejected++}
+    }
+    return @{ok=$true;accepted=$accepted;rejected=$rejected}
+  }catch{return @{ok=$false;reason='calibration-cache-invalid'}}
+}
+function Export-DesktopCalibration {
+  try {
+    $snapshot=Get-StrictDesktopSnapshot
+    if(-not $snapshot.ok){return @{ok=$false;reason='calibration-cache-snapshot'}}
+    $entries=@($script:CalibratedDesktopGrids.Values | Select-Object -First 4)
+    return @{ok=$true;version=1;entries=$entries}
+  }catch{return @{ok=$false;reason='calibration-cache-unavailable'}}
+}
+function Position-DesktopPlan($baseline,$targets,$buffer,$calibration=$null) {
   $operation=[System.Diagnostics.Stopwatch]::StartNew()
   $targets=@($targets)
   if(-not $baseline.ok -or $baseline.autoArrange -or -not $baseline.snap -or $targets.Count -eq 0 -or -not (Strict-PointValid $buffer)) {return @{ok=$false;reason='invalid-plan'}}
+  $proof=$null
+  if($null -ne $calibration){
+    $proof=$script:DesktopCalibration;$script:DesktopCalibration=$null
+    if($null -eq $proof -or $proof.token -cne $calibration.token -or $proof.expires -lt [DateTime]::UtcNow -or $proof.geometry -cne (Strict-GeometryKey $baseline) -or $proof.oldIcons -cne (Strict-IconsKey $baseline) -or -not (Confirm-CalibrationGrid $proof $calibration.grid)){return @{ok=$false;reason='invalid-calibration-proof'}}
+    if(@($targets|Where-Object {$_.path -ieq $proof.probePath -and $_.name -ceq $proof.probeName}).Count -ne 1){return @{ok=$false;reason='calibration-probe-not-selected'}}
+    $baseline=$baseline|ConvertTo-Json -Depth 12|ConvertFrom-Json
+    $baseline.areas[$proof.areaIndex].grid=$calibration.grid
+    $a=$baseline.areas[$proof.areaIndex];$g=$calibration.grid
+    foreach($i in $baseline.icons){if($i.x -ge $a.left -and $i.x -lt $a.right -and $i.y -ge $a.top -and $i.y -lt $a.bottom){if((($i.x-$g.gx)%$g.sx) -ne 0 -or (($i.y-$g.gy)%$g.sy) -ne 0){return @{ok=$false;reason='calibration-existing-grid-mismatch'}}}}
+  }
   $all=@($targets)+@($buffer)
   $selectedArea=$null
   foreach($area in $baseline.areas){
@@ -944,6 +1079,10 @@ function Position-DesktopPlan($baseline,$targets,$buffer) {
     } while([DateTime]::UtcNow -lt $deadline)
     if($state.new.Count -ne $targets.Count){return @{ok=$false;reason='new-icons-not-ready'}}
     if($null -eq $state -or -not $state.ok){return @{ok=$false;reason='desktop-changing'}}
+    if($null -ne $proof){
+      $pn=@(0..($targets.Count-1)|Where-Object {$targets[$_].path -ieq $proof.probePath})[0]
+      if(-not (Strict-Near $state.new[$pn] $proof.probePosition)){return @{ok=$false;reason='calibration-probe-changed'}}
+    }
     $maxSteps=$targets.Count*3+3
     for($step=0;$step -lt $maxSteps;$step++) {
       if($operation.ElapsedMilliseconds -ge 50000){return @{ok=$false;reason='position-deadline'}}
@@ -954,6 +1093,7 @@ function Position-DesktopPlan($baseline,$targets,$buffer) {
         if(-not $last.ok){$last.phase='final';return $last}
         if($last.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed';phase='final'}}
         foreach($n in 0..($targets.Count-1)){if(-not (Strict-Near $last.new[$n] $targets[$n])){return @{ok=$false;reason='late-position-change'}}}
+        if($null -ne $proof){$cacheNow=[DateTime]::UtcNow;$script:CalibratedDesktopGrids[[int]$proof.areaIndex]=@{areaIndex=[int]$proof.areaIndex;geometry=(Strict-GeometryKey $last.current);grid=$calibration.grid;proof=@{samples=$proof.samples;maxSpacing=$proof.maxSpacing};createdUtc=$cacheNow.ToString("o");expiresUtc=$cacheNow.AddHours(24).ToString("o")}}
         return @{ok=$true;positioned=$targets.Count;reason=''}
       }
       $chosen=-1; $destination=$null
@@ -1014,7 +1154,7 @@ while ($true) {
     $req = $line | ConvertFrom-Json
     $id = $req.id
     $result = $null
-    if(@('resolveDrop','cursorState','desktopSnapshot','positionDesktopPlan') -contains $req.cmd){$dpiPrevious=[OkibaWin32]::EnterPhysicalScope()}
+    if(@('resolveDrop','cursorState','desktopSnapshot','positionDesktopPlan','calibrateDesktopGrid','importDesktopCalibration','exportDesktopCalibration') -contains $req.cmd){$dpiPrevious=[OkibaWin32]::EnterPhysicalScope()}
     switch ($req.cmd) {
       'resolveDrop'         { $result = Resolve-DropTarget ([int]$req.x) ([int]$req.y) }
       'positionIcons'       { $result = Position-Icons ([int]$req.x) ([int]$req.y) ([string[]]@($req.names)) }
@@ -1025,7 +1165,10 @@ while ($true) {
         $code=[OkibaDesk]::MoveNoReplace([string]$req.source,[string]$req.destination)
         $result=@{ok=($code -eq 0);errorCode=$code;reason=$(if($code -eq 0){''}else{'move-no-replace-failed'})}
       }
-      'positionDesktopPlan' { $result = Position-DesktopPlan $req.snapshot @($req.targets) $req.buffer }
+      'positionDesktopPlan' { $result = Position-DesktopPlan $req.snapshot @($req.targets) $req.buffer $req.calibration }
+      'calibrateDesktopGrid' { $result = Calibrate-DesktopGrid $req.snapshot $req.probe $req.plan }
+      'importDesktopCalibration' { $result = Import-DesktopCalibration $req.version @($req.entries) }
+      'exportDesktopCalibration' { $result = Export-DesktopCalibration }
       default               { throw "unknown-cmd: $($req.cmd)" }
     }
     $resp = @{ id = $id; result = $result }

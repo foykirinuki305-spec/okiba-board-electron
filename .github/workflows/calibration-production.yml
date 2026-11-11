@@ -1,0 +1,32 @@
+name: calibration-production
+on:
+  push:
+    paths:
+      - 'scripts/shell-helper.ps1'
+      - 'lib/desktop-calibration.js'
+      - 'lib/desktop-calibration-cache.js'
+      - 'tools/calibration-production-ci.*'
+      - '.github/workflows/calibration-production.yml'
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Production calibration API, single-display only
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/calibration-production-ci.ps1 2>&1 | Tee-Object -FilePath calibration-production-ci.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve evidence including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibration-production-evidence
+          path: |
+            calibration-production-ci.json
+            calibration-production-ci.log
