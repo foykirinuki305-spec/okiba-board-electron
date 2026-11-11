@@ -1,0 +1,32 @@
+name: hidden-shortcuts-dense
+on:
+  push:
+    paths:
+      - 'scripts/shell-helper.ps1'
+      - 'lib/safe-desktop.js'
+      - 'lib/links.js'
+      - 'tools/hidden-shortcuts-dense-ci.*'
+      - '.github/workflows/hidden-shortcuts-dense.yml'
+  workflow_dispatch:
+jobs:
+  reproduce:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Dense hidden shortcuts, preserve every pre-existing icon
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/hidden-shortcuts-dense-ci.ps1 2>&1 | Tee-Object -FilePath hidden-shortcuts-dense-ci.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve reproduction evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hidden-shortcuts-dense-evidence
+          path: |
+            hidden-shortcuts-dense-ci.json
+            hidden-shortcuts-dense-ci.log
