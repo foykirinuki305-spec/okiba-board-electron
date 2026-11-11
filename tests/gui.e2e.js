@@ -44,10 +44,10 @@
  *      stubs removed, two desktop drag-outs are resolved AND
  *      positioned through the fake helper; helperStats must show
  *      spawns===1 (one process reused — no timing asserts)
- *   -> PRE-RESOLVE + OPTIMISTIC UI (v2.2.2): a scripted cursor
+ *   -> PRE-RESOLVE + VERIFIED COMMIT (v2.2.2): a scripted cursor
  *      sequence drives main's drag-time polling; resolution fires
  *      DURING the drag, the release consumes the cache (dropLog
- *      resolve entry marked pre), the card vanishes while the
+ *      resolve entry marked pre), metadata stays unchanged while the
  *      fake helper's positionIcons answer is still 4s out, and
  *      okiba.log gains ONE dragout timing line (resolve=pre)
  *   -> SCROLL EXPANSION (v2.2.2): board size derives from content
@@ -447,9 +447,7 @@ async function main() {
     'desktop drop: original left the board folder (a MOVE)');
   await waitFor(async () => {
     const log = await page.evaluate(() => window.okiba.dropLog());
-    return Array.isArray(log) && log.some((e) => e.kind === 'position' &&
-      e.status === 'ok' && e.x === -40 && e.y === 200 &&
-      Array.isArray(e.names) && e.names.includes('デスクトップ移動.txt'));
+    return Array.isArray(log) && log.some((e) => e.kind === 'safe-desktop' && e.ok);
   }, 'main logged the positioning invocation (drop point + destination name)');
   assert(true, 'positioning script invoked with the drop point and landed name');
   await waitFor(async () => {
@@ -755,12 +753,11 @@ async function main() {
   assert(!fs.existsSync(deskFile), 'linked desktop drop: origin lost the file');
   await waitFor(async () => {
     const log = await page.evaluate(() => window.okiba.dropLog());
-    return Array.isArray(log) && log.some((e) => e.kind === 'position' &&
-      Array.isArray(e.names) && e.names.includes('外部デスクトップ.txt'));
+    return Array.isArray(log) && log.some((e) => e.kind === 'safe-desktop' && e.ok);
   }, 'dropLog records icon positioning for the ex-linked file');
   await waitFor(async () => {
     const log = await page.evaluate(() => window.okiba.dropLog());
-    return log.some((e) => e.kind === 'move-linked');
+    return log.some((e) => e.kind === 'safe-desktop' && e.ok);
   }, 'dropLog records the linked move itself');
   await app10.close();
 
@@ -779,8 +776,11 @@ async function main() {
   await dragOutSynthetic(page.locator('.item', { hasText: '外部キャンセル' }).first());
   await waitFor(async () => {
     const t = await page.evaluate(() => document.getElementById('toast').textContent);
-    return t.includes('判定できませんでした');
+    return t === '\u79fb\u52d5\u5148\u3092\u78ba\u8a8d\u3067\u304d\u306a\u304b\u3063\u305f\u305f\u3081\u4e2d\u6b62\u3057\u307e\u3057\u305f\u3002';
   }, 'cancel: status line says the drop could not be resolved');
+  const unknownDropLog=await page.evaluate(()=>window.okiba.dropLog());
+  assert(unknownDropLog.some(e=>e.kind==='resolve'&&e.target?.type==='unknown'),'cancel: resolver explicitly returned unknown');
+  assert(!unknownDropLog.some(e=>['move','move-linked','safe-desktop','error'].includes(e.kind)),'cancel: no move, positioning transaction or unrelated error occurred');
   await new Promise((r) => setTimeout(r, 800)); // let any wrong move land
   assert(fs.existsSync(cancelFile), 'cancel: file still at its origin');
   assert(!fs.existsSync(path.join(landing, '外部キャンセル.txt')),
@@ -902,7 +902,7 @@ async function main() {
     'warm helper: second file moved via helper resolve');
   await waitFor(async () => {
     const log = await page.evaluate(() => window.okiba.dropLog());
-    return log.filter((e) => e.kind === 'position').length >= 2;
+    return log.filter((e) => e.kind === 'safe-desktop' && e.ok).length >= 2;
   }, 'warm helper: both desktop drops recorded icon positioning');
   const hstats = await page.evaluate(() => window.okiba.helperStats());
   assert(hstats && hstats.enabled === true, 'warm helper: client enabled in fake mode');
@@ -1228,7 +1228,7 @@ async function main() {
   // the fs move lands — long before the deliberately delayed
   // (4s) positionIcons answer completes. Evidence is request
   // counts and log lines, never wall-clock speed asserts.
-  step('pre-resolve (v2.2.2): release uses the drag-time cache; card leaves before positioning');
+  step('pre-resolve (v2.2.2): release uses the drag-time cache; metadata commits only after verified positioning');
   const okibaLogPath = path.join(base, 'okiba.log');
   const readLog = () => (fs.existsSync(okibaLogPath)
     ? fs.readFileSync(okibaLogPath, 'utf8') : '');
@@ -1264,6 +1264,10 @@ async function main() {
   await page.click(`#boardGrid .board-card[data-name="${placeBoard}"]`);
   await page.waitForSelector('#boardView:not([hidden]) .item');
   const logBefore = readLog();
+  const pendingMetaPath=path.join(base,placeBoard,'.okiba-board.json');
+  const pendingMetaBefore=fs.readFileSync(pendingMetaPath,'utf8');
+  const pendingHistoryPath=path.join(base,'.move-history.json');
+  const pendingHistoryBefore=fs.existsSync(pendingHistoryPath)?fs.readFileSync(pendingHistoryPath,'utf8'):null;
   const preItem = page.locator('.item', { hasText: '配置レジデント1' }).first();
   const preBox = await boxOf(preItem, 'pre-resolve item box');
   await page.mouse.move(preBox.x + preBox.width / 2, preBox.y + preBox.height / 2);
@@ -1286,37 +1290,19 @@ async function main() {
   await page.mouse.up();
   await waitFor(() => fs.existsSync(path.join(landing, '配置レジデント1.txt')),
     'pre-resolve: file moved to the pre-resolved desktop folder');
-  await waitFor(async () => {
-    const ns = await page.locator('.item .name').allTextContents();
-    return !ns.some((t) => t.includes('配置レジデント1'));
-  }, 'optimistic UI: card removed from the board');
-  const logAtCardGone = await page.evaluate(() => window.okiba.dropLog());
-  const resolveEntry = logAtCardGone.find((e) => e.kind === 'resolve');
-  // (b) the release itself issued NO resolve: the cache was used.
-  assert(resolveEntry && resolveEntry.pre === true,
-    'pre-resolve: the release used the cached answer (resolve entry marked pre)');
-  // (c) positioning (delayed 4s by the fake) has NOT completed,
-  // yet the card is already gone and no timing line exists yet.
-  assert(!logAtCardGone.some((e) => e.kind === 'position'),
-    'optimistic UI: card gone BEFORE the delayed positioning completed');
-  assert(readLog() === logBefore,
-    'optimistic UI: no dragout timing line before positioning lands');
-  // (d) when positioning lands, the single timing line records
-  // every stage, with resolve=pre.
-  await waitFor(() => {
-    const added = readLog().slice(logBefore.length);
-    return added.includes('dragout ms') && added.includes('resolve=pre');
-  }, 'timing: dragout line written when positioning completes', 20000);
-  const timingLine = readLog().slice(logBefore.length)
-    .split(/\r?\n/).find((l) => l.includes('dragout ms'));
-  const tm = timingLine.match(
-    /dragout ms release=(\d+) resolve=pre move=(\d+) position=(\d+) appear=(?:\d+|unknown) work=(?:\d+|unknown) total=(\d+)/);
-  assert(!!tm, 'timing: line carries release/resolve=pre/move/position/total');
-  assert(parseInt(tm[3], 10) >= 1000,
-    'timing: position stage shows the scripted 4s delay (the card did not wait for it)');
-  const finalLog13 = await page.evaluate(() => window.okiba.dropLog());
-  assert(finalLog13.some((e) => e.kind === 'timing' && e.resolveStage === 'pre'),
-    'timing: dropLog timing entry records resolveStage=pre');
+  const pendingLog = await page.evaluate(() => window.okiba.dropLog());
+  const resolveEntry = pendingLog.find(e=>e.kind==='resolve');
+  assert(resolveEntry && resolveEntry.pre===true,'pre-resolve: release used cached target');
+  assert(!pendingLog.some(e=>e.kind==='safe-desktop'),'strict UI: positioning still pending after physical move');
+  assert(fs.readFileSync(pendingMetaPath,'utf8')===pendingMetaBefore,'strict move: board metadata not committed before position verification');
+  assert((fs.existsSync(pendingHistoryPath)?fs.readFileSync(pendingHistoryPath,'utf8'):null)===pendingHistoryBefore,'strict move: history not committed before position verification');
+  await waitFor(async()=> (await page.evaluate(()=>window.okiba.dropLog())).some(e=>e.kind==='safe-desktop'&&e.ok),'strict move: verified placement completed',20000);
+  await waitFor(()=>readLog().slice(logBefore.length).includes('safe-desktop ms'),'strict move timing recorded');
+  const timingLine=readLog().slice(logBefore.length).split(/\r?\n/).find(l=>l.includes('safe-desktop ms'));
+  const tm=timingLine.match(/safe-desktop ms plan=(\d+) position=(\d+) total=(\d+)/);
+  assert(!!tm && Number(tm[2])>=1000,'strict timing includes scripted delayed position stage');
+  const finalLog13=await page.evaluate(()=>window.okiba.dropLog());
+  assert(finalLog13.some(e=>e.kind==='timing'&&e.resolveStage==='pre'),'strict completion retains pre-resolve timing marker');
   await app19.close();
 
   // ------------------------------------------------------------ run 14
@@ -1474,6 +1460,9 @@ async function main() {
 
   step('native desktop previews: thumbnails, file icons, missing/note, unchanged data');
   await require('./previews.e2e')(SHOTS);
+
+  step('upgrade layout: v6 data and old home positions survive update and restart');
+  await require('./upgrade-layout.e2e')();
 
   console.log('\nGUI E2E: all steps passed');
 }

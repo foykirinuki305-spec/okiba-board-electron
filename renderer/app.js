@@ -635,7 +635,7 @@ function renderBoard() {
           { label: '名前を変更', action: () => renameItemFlow(key, fullPath, label) },
           { label: '場所を開く', action: () => api.showItem(fullPath) },
           { label: 'デスクトップへ移動', action: async () => {
-              await api.moveToDesktop(fullPath, boardData.name); refreshBoard();
+              const result=await api.safeTakeout({boardName:boardData.name,paths:[fullPath],linkedPaths:[],layout:[{path:fullPath,cell:cells.get(key)}]}); if(result?.error)toast(result.error,15000); refreshBoard();
             } },
           { label: 'ゴミ箱へ削除', danger: true, action: async () => {
               await api.trashItem(fullPath); refreshBoard();
@@ -715,9 +715,9 @@ async function unlinkFlow(paths) {
 async function moveLinkedToDesktopFlow(paths) {
   if (!paths.length) return;
   try {
-    const r = await api.moveLinkedToDesktop(boardData.name, paths);
+    const r = await api.safeTakeout({boardName:boardData.name,paths:[],linkedPaths:paths,layout:paths.map(path=>({path,cell:cells.get('link:'+path)}))});
     if (r && r.moved && r.moved.length) toast('デスクトップへ移動しました');
-    else toast('移動できませんでした');
+    else toast(r?.error || '移動できませんでした',15000);
   } catch (e) { toast(String(e.message || e)); }
   refreshBoard();
 }
@@ -738,14 +738,11 @@ async function takeOutSelection() {
   // makes, and main merges them into a single history entry.
   const groupId = 'op-' + Date.now().toString(36) + '-' +
     Math.floor(Math.random() * 0xffffff).toString(36);
-  if (linkedPaths.length) {
-    try { await api.moveLinkedToDesktop(boardData.name, linkedPaths, groupId); }
-    catch (e) { toast(String(e.message || e)); }
-  }
-  for (const p of residentPaths) {
-    try { await api.moveToDesktop(p, boardData.name, groupId); }
-    catch (e) { toast(String(e.message || e)); }
-  }
+  try {
+    const result=await api.safeTakeout({boardName:boardData.name,paths:residentPaths,linkedPaths,groupId,
+      layout:keys.map(key=>({path:pathOfKey(key),cell:cells.get(key)})).filter(i=>i.path)});
+    if(result?.error)toast(result.error+(result.recovery?.length?' '+result.recovery.map(i=>i.path).join(' / '):''),15000);
+  } catch(e){toast(String(e.message||e));}
   refreshBoard();
 }
 
@@ -939,6 +936,8 @@ function itemPointer(e, el, key, fullPath) {
         boardName: boardData.name,
         paths: residentPaths,
         linkedPaths,
+        layout: group.filter(g=>g.path).map(g=>({path:g.path,cell:g.cell})),
+        anchorCell: anchor.cell,
         screenX: screenPt.x,
         screenY: screenPt.y,
       });
@@ -965,9 +964,9 @@ function itemPointer(e, el, key, fullPath) {
       toast(isDesktop ? 'デスクトップへ移動しました' : 'フォルダへ移動しました');
       refreshBoard();
     } else {
-      // unknown target / failure: NOTHING was moved or unlinked.
+      // Invalid plans do not mutate; unexpected move errors are rolled back.
       // Plain removal without moving is the ボードから外す menu.
-      toast('落とした場所が判定できませんでした');
+      toast(res?.error || '移動先を確認できなかったため中止しました。',15000);
       renderBoard();
     }
   };

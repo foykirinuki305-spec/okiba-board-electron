@@ -602,6 +602,175 @@ function Get-DesktopPositions([string[]]$Names) {
   } finally { $reader.Dispose() }
 }
 
+# ---- Strict desktop transactions (no legacy fallback) -----------------
+# Only the new transaction commands use these rules. They never set the
+# position of an icon belonging to the pre-move snapshot.
+Add-Type -AssemblyName System.Windows.Forms
+function Get-RawStrictDesktopSnapshot {
+  $lv = Find-BestListView
+  if ($lv -eq [IntPtr]::Zero) { return @{ok=$false; reason='no-listview'} }
+  $reader = New-Object OkibaDesk+Reader -ArgumentList $lv
+  try {
+    $sx = [OkibaDesk]::GetSpacingX($lv); $sy = [OkibaDesk]::GetSpacingY($lv)
+    if ($sx -le 0 -or $sy -le 0) { return @{ok=$false;reason='unknown-spacing'} }
+    $count = [OkibaDesk]::GetItemCount($lv)
+    $icons = New-Object 'System.Collections.Generic.List[object]'
+    for ($i=0; $i -lt $count; $i++) {
+      $label = $reader.GetText($i); $pos = $reader.GetPosition($i)
+      if ([string]::IsNullOrEmpty($label) -or $null -eq $pos) { return @{ok=$false;reason='unreadable-icon'} }
+      $icons.Add(@{label=$label;x=[int]$pos[0];y=[int]$pos[1];index=$i})
+    }
+    if ([OkibaDesk]::GetItemCount($lv) -ne $count) { return @{ok=$false;reason='desktop-changing'} }
+    $grid = [OkibaDesk]::ReadGridOrigin($reader,$count,$sx,$sy,[int[]]@())
+    $origin = [OkibaDesk]::ToClient($lv,0,0)
+    $areas = @([System.Windows.Forms.Screen]::AllScreens | Sort-Object DeviceName | ForEach-Object {
+      $r=$_.WorkingArea
+      $tl=[OkibaDesk]::ToClient($lv,$r.Left,$r.Top); $br=[OkibaDesk]::ToClient($lv,$r.Right,$r.Bottom)
+      @{left=[int]$tl[0];top=[int]$tl[1];right=[int]$br[0];bottom=[int]$br[1]}
+    })
+    if ($areas.Count -eq 0) { return @{ok=$false;reason='unknown-monitors'} }
+    return @{ok=$true;autoArrange=(([OkibaDesk]::GetWindowLong($lv,-16) -band 0x0100) -ne 0);
+      snap=[OkibaDesk]::IsSnapToGrid($lv);sx=$sx;sy=$sy;gx=$grid[0];gy=$grid[1];
+      origin=@{x=$origin[0];y=$origin[1]};areas=$areas;icons=@($icons.ToArray())}
+  } finally { $reader.Dispose() }
+}
+function Strict-IconKey($i) { return (@([string]$i.label,[int]$i.x,[int]$i.y) | ConvertTo-Json -Compress) }
+function Strict-GeometryKey($s) {
+  $areas=@($s.areas | ForEach-Object { @([int]$_.left,[int]$_.top,[int]$_.right,[int]$_.bottom) })
+  return (@([bool]$s.autoArrange,[bool]$s.snap,[int]$s.sx,[int]$s.sy,[int]$s.gx,[int]$s.gy,[int]$s.origin.x,[int]$s.origin.y,$areas) | ConvertTo-Json -Compress -Depth 8)
+}
+function Strict-IconsKey($s) { return (@($s.icons | ForEach-Object { Strict-IconKey $_ } | Sort-Object) | ConvertTo-Json -Compress) }
+function Get-StrictDesktopSnapshot {
+  try {
+    $a=Get-RawStrictDesktopSnapshot
+    if (-not $a.ok) { return $a }
+    Start-Sleep -Milliseconds 40
+    $b=Get-RawStrictDesktopSnapshot
+    if (-not $b.ok) { return $b }
+    if ((Strict-GeometryKey $a) -cne (Strict-GeometryKey $b) -or (Strict-IconsKey $a) -cne (Strict-IconsKey $b)) {
+      return @{ok=$false;reason='desktop-changing'}
+    }
+    return $b
+  } catch { return @{ok=$false;reason='snapshot-error'} }
+}
+function Strict-PointValid($p) {
+  if ($null -eq $p -or $null -eq $p.x -or $null -eq $p.y) { return $false }
+  try { return [double]$p.x -eq [int]$p.x -and [double]$p.y -eq [int]$p.y } catch { return $false }
+}
+function Strict-PointInside($p,$s) {
+  foreach($r in $s.areas) {
+    if ($p.x -ge $r.left -and $p.y -ge $r.top -and $p.x+$s.sx -le $r.right -and $p.y+$s.sy -le $r.bottom) { return $true }
+  }
+  return $false
+}
+function Strict-Overlap($a,$b,$s) { return [Math]::Abs($a.x-$b.x) -lt ($s.sx-1) -and [Math]::Abs($a.y-$b.y) -lt ($s.sy-1) }
+function Strict-Near($a,$b) { return [Math]::Abs($a.x-$b.x) -le 1 -and [Math]::Abs($a.y-$b.y) -le 1 }
+function Get-StrictTransactionState($baseline,$current,$targets) {
+  if (-not $current.ok -or (Strict-GeometryKey $baseline) -cne (Strict-GeometryKey $current)) { return @{ok=$false;reason='desktop-changed'} }
+  $old=New-Object 'System.Collections.Generic.Dictionary[string,int]' ([StringComparer]::Ordinal)
+  foreach($i in $baseline.icons) { $k=Strict-IconKey $i; if($old.ContainsKey($k)){$old[$k]++}else{$old[$k]=1} }
+  $extra=New-Object 'System.Collections.Generic.List[object]'
+  foreach($i in $current.icons) {
+    $k=Strict-IconKey $i
+    if($old.ContainsKey($k) -and $old[$k] -gt 0){$old[$k]--}else{$extra.Add($i)}
+  }
+  foreach($v in $old.Values){if($v -ne 0){return @{ok=$false;reason='existing-icon-changed'}}}
+  $new=@{}
+  foreach($i in $extra) {
+    $matches=@()
+    for($n=0;$n -lt $targets.Count;$n++) {
+      $name=[string]$targets[$n].name; $stem=[IO.Path]::GetFileNameWithoutExtension($name)
+      if($i.label -ceq $name -or ($stem -and $i.label -ceq $stem)){$matches+= $n}
+    }
+    if($matches.Count -ne 1 -or $new.ContainsKey([int]$matches[0])) {return @{ok=$false;reason='ambiguous-new-icon'}}
+    $new[[int]$matches[0]]=$i
+  }
+  return @{ok=$true;new=$new;current=$current}
+}
+function Position-DesktopPlan($baseline,$targets,$buffer) {
+  $targets=@($targets)
+  if(-not $baseline.ok -or $baseline.autoArrange -or -not $baseline.snap -or $targets.Count -eq 0 -or -not (Strict-PointValid $buffer)) {return @{ok=$false;reason='invalid-plan'}}
+  $all=@($targets)+@($buffer)
+  for($n=0;$n -lt $all.Count;$n++) {
+    $p=$all[$n]
+    if(-not (Strict-PointValid $p) -or -not (Strict-PointInside $p $baseline)) {return @{ok=$false;reason='outside-desktop'}}
+    if((($p.x-$baseline.gx)%$baseline.sx) -ne 0 -or (($p.y-$baseline.gy)%$baseline.sy) -ne 0) {return @{ok=$false;reason='off-grid'}}
+    foreach($old in $baseline.icons){if(Strict-Overlap $p $old $baseline){return @{ok=$false;reason='occupied'}}}
+    for($j=0;$j -lt $n;$j++){if(Strict-Overlap $p $all[$j] $baseline){return @{ok=$false;reason='overlapping-plan'}}}
+  }
+  for($n=0;$n -lt $targets.Count;$n++) {
+    $name=[string]$targets[$n].name
+    if([string]::IsNullOrEmpty($name) -or [IO.Path]::GetFileName($name) -cne $name) {return @{ok=$false;reason='invalid-name'}}
+    try {
+      $dest=[IO.Path]::GetFullPath([string]$targets[$n].path)
+      $desktop=[IO.Path]::GetFullPath([Environment]::GetFolderPath('DesktopDirectory')).TrimEnd('\')
+      if([IO.Path]::GetDirectoryName($dest).TrimEnd('\') -ine $desktop -or [IO.Path]::GetFileName($dest) -cne $name -or -not (Test-Path -LiteralPath $dest)) {return @{ok=$false;reason='invalid-destination'}}
+    } catch {return @{ok=$false;reason='invalid-destination'}}
+    $stem=[IO.Path]::GetFileNameWithoutExtension($name)
+    foreach($old in $baseline.icons){if($old.label -ieq $name -or $old.label -ieq $stem){return @{ok=$false;reason='ambiguous-name'}}}
+    for($j=0;$j -lt $n;$j++){if($targets[$j].name -ieq $name){return @{ok=$false;reason='duplicate-name'}}}
+  }
+  try {
+    # Do not force a shell refresh that might rearrange existing icons.
+    $deadline=[DateTime]::UtcNow.AddSeconds(8)
+    do {
+      $current=Get-StrictDesktopSnapshot
+      if(-not $current.ok -and $current.reason -eq 'desktop-changing') {
+        Start-Sleep -Milliseconds 50
+        continue
+      }
+      $state=Get-StrictTransactionState $baseline $current $targets
+      if(-not $state.ok){return $state}
+      if($state.new.Count -eq $targets.Count){break}
+      Start-Sleep -Milliseconds 50
+    } while([DateTime]::UtcNow -lt $deadline)
+    if($state.new.Count -ne $targets.Count){return @{ok=$false;reason='new-icons-not-ready'}}
+    if($null -eq $state -or -not $state.ok){return @{ok=$false;reason='desktop-changing'}}
+    $maxSteps=$targets.Count*3+3
+    for($step=0;$step -lt $maxSteps;$step++) {
+      $unfinished=@(0..($targets.Count-1) | Where-Object {-not (Strict-Near $state.new[$_] $targets[$_])})
+      if($unfinished.Count -eq 0) {
+        Start-Sleep -Milliseconds 180
+        $last=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) $targets
+        if(-not $last.ok -or $last.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed'}}
+        foreach($n in 0..($targets.Count-1)){if(-not (Strict-Near $last.new[$n] $targets[$n])){return @{ok=$false;reason='late-position-change'}}}
+        return @{ok=$true;positioned=$targets.Count;reason=''}
+      }
+      $chosen=-1; $destination=$null
+      foreach($n in $unfinished) {
+        $free=$true
+        foreach($k in $state.new.Keys){if($k -ne $n -and (Strict-Overlap $targets[$n] $state.new[$k] $baseline)){$free=$false;break}}
+        if($free){$chosen=$n;$destination=$targets[$n];break}
+      }
+      if($chosen -lt 0) {
+        foreach($k in $state.new.Keys){if(Strict-Overlap $buffer $state.new[$k] $baseline){return @{ok=$false;reason='buffer-occupied'}}}
+        $chosen=[int]$unfinished[0];$destination=$buffer
+      }
+      # Revalidate immediately before each write, including every new icon's
+      # exact current location. A user move aborts, it is never overwritten.
+      $fresh=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) $targets
+      if(-not $fresh.ok -or $fresh.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed'}}
+      foreach($k in $state.new.Keys){if(-not (Strict-Near $fresh.new[$k] $state.new[$k])){return @{ok=$false;reason='new-icon-changed'}}}
+      $lv=Find-BestListView
+      if($lv -eq [IntPtr]::Zero){return @{ok=$false;reason='no-listview'}}
+      $guard=New-Object OkibaDesk+Reader -ArgumentList $lv
+      try {
+        $index=[int]$fresh.new[$chosen].index
+        $label=$guard.GetText($index);$pos=$guard.GetPosition($index)
+        if([OkibaDesk]::GetItemCount($lv) -ne @($fresh.current.icons).Count -or $label -cne $fresh.new[$chosen].label -or $null -eq $pos -or $pos[0] -ne $fresh.new[$chosen].x -or $pos[1] -ne $fresh.new[$chosen].y) {return @{ok=$false;reason='desktop-changed-before-write'}}
+        [OkibaDesk]::SetItemPosition($lv,$index,[int]$destination.x,[int]$destination.y)
+      } finally {$guard.Dispose()}
+      Start-Sleep -Milliseconds 180
+      $after=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) $targets
+      if(-not $after.ok -or $after.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed'}}
+      if(-not (Strict-Near $after.new[$chosen] $destination)){return @{ok=$false;reason='position-unverified'}}
+      foreach($k in $fresh.new.Keys){if($k -ne $chosen -and -not (Strict-Near $fresh.new[$k] $after.new[$k])){return @{ok=$false;reason='other-new-icon-changed'}}}
+      $state=$after
+    }
+    return @{ok=$false;reason='position-step-limit'}
+  } catch { return @{ok=$false;reason='position-error'} }
+}
+
 # ---- cursorState (v2.2.2: drag pre-resolution witness) -------------
 function Get-CursorState {
   $s = [OkibaWin32]::CursorState()
@@ -626,6 +795,8 @@ while ($true) {
       'positionIcons'       { $result = Position-Icons ([int]$req.x) ([int]$req.y) ([string[]]@($req.names)) }
       'getDesktopPositions' { $result = Get-DesktopPositions ([string[]]@($req.names)) }
       'cursorState'         { $result = Get-CursorState }
+      'desktopSnapshot'     { $result = Get-StrictDesktopSnapshot }
+      'positionDesktopPlan' { $result = Position-DesktopPlan $req.snapshot @($req.targets) $req.buffer }
       default               { throw "unknown-cmd: $($req.cmd)" }
     }
     $resp = @{ id = $id; result = $result }

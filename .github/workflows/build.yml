@@ -54,6 +54,11 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/helper-position-test.ps1
 
+      # Refuses to run outside a disposable GitHub-hosted Windows runner.
+      - name: Safe Desktop transaction and immutable existing icons (CI only)
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/safe-desktop-test.ps1
+
       - name: GUI end-to-end test (Playwright Electron, real UI operations)
         run: node tests/gui.e2e.js
         env:
@@ -185,4 +190,5 @@ jobs:
           path: |
             desktop-position-diagnostics.txt
             helper-position-diagnostics.txt
+            safe-desktop-diagnostics.txt
           if-no-files-found: ignore

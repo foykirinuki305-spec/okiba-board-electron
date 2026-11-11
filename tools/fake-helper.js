@@ -76,6 +76,20 @@ rl.on('line', (line) => {
     });
     return;
   }
+  if (req.cmd === 'desktopSnapshot') {
+    let result = {ok:true,autoArrange:false,snap:true,sx:100,sy:100,gx:0,gy:0,
+      origin:{x:0,y:0},areas:[{left:-5000,top:-5000,right:10000,bottom:10000}],icons:[]};
+    try { if (process.env.OKIBA_TEST_DESKTOP_SNAPSHOT) result=JSON.parse(process.env.OKIBA_TEST_DESKTOP_SNAPSHOT); }
+    catch (_) { result={ok:false,reason:'invalid-test-snapshot'}; }
+    send({id:req.id,result}); return;
+  }
+  if (req.cmd === 'positionDesktopPlan') {
+    const answer=()=>send({id:req.id,result:process.env.OKIBA_FAKE_PLAN_FAIL === '1'
+      ? {ok:false,reason:'injected-position-failure',positioned:0}
+      : {ok:true,reason:'',positioned:Array.isArray(req.targets)?req.targets.length:0}});
+    const delayMs=parseInt(process.env.OKIBA_FAKE_POSITION_DELAY_MS || '0',10);
+    if(delayMs>0)setTimeout(answer,delayMs);else answer();return;
+  }
   if (req.cmd === 'positionIcons') {
     const answer = () => send({
       id: req.id,

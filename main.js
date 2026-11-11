@@ -666,35 +666,126 @@ function registerIpc() {
   // Menu counterpart of the linked drag-out (v2.1): move the real
   // file to the Desktop and detach the link. No drop point exists
   // here, so the icon takes the Desktop's default placement.
-  ipcMain.handle('move-linked-to-desktop', async (_e, boardName, paths, groupId) => {
-    const folder = guardBoard(boardName);
-    const snap = snapshotBoard(boardName);
-    const moved = [];
-    const destinations = [];
-    const histItems = [];
-    for (const lp of paths || []) {
-      const one = await ln.moveLinkedOut({
-        base: BASE, boardFolder: folder, targetPath: lp,
-        destDir: bf.desktopDir(), attrib, moveFile: moveFileViaDropmove,
-      });
-      if (one.moved) {
-        moved.push(lp);
-        if (one.dest) {
-          destinations.push(one.dest);
-          const [c, r] = cellOfLink(snap ? snap.links : [], lp);
-          histItems.push({
-            kind: 'linked', destPath: one.dest,
-            fileName: path.basename(one.dest), col: c, row: r,
-          });
-        }
+
+  // Desktop returns are planned as a complete group before any mutation.
+  // No legacy cold positioner is used by this strict path.
+  const safeDesk = require('./lib/safe-desktop');
+  function desktopReturnDir(){
+    if(process.env.OKIBA_TEST_HOOKS==='1')return process.env.OKIBA_TEST_DESKTOP_DIR||process.env.OKIBA_SHORTCUT_DESKTOP||null;
+    return shellDesktopDir()||bf.desktopDir();
+  }
+  let desktopBusy = false;
+  let desktopUnsafe = false;
+  function desktopBlocked(reason, recovery=[]) {
+    let message='安全を確認できなかったため中止しました。';
+    if(['occupied-or-outside','no-space'].includes(reason))message='並びを保って置けません。別の空いている場所へ戻してください。';
+    else if(reason==='busy')message='前の取り出し処理が終わるまでお待ちください。';
+    else if(reason==='helper-not-stopped')message='配置処理の停止を確認できません。アプリを再起動してください。';
+    else if(reason==='cross-volume')message='別ドライブへの安全な取り出しは未対応のため中止しました。';
+    else if(reason==='desktop-changed'||reason==='board-changed')message='配置が変わったため中止しました。もう一度操作してください。';
+    if(recovery.length)message='一部の素材を元に戻せませんでした。保存先: '+recovery.map(r=>r.path).join(' / ');
+    try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop blocked '+JSON.stringify({reason,recovery})+'\n');}catch(_){}
+    return {moved:[],skipped:[],failed:[],blocked:true,reason,recovery,error:message};
+  }
+  async function desktopSnapshot() {
+    if(process.env.OKIBA_TEST_HOOKS==='1' && process.env.OKIBA_TEST_POSITIONER==='stub') {
+      if(process.env.OKIBA_TEST_DESKTOP_SNAPSHOT) return JSON.parse(process.env.OKIBA_TEST_DESKTOP_SNAPSHOT);
+      return {ok:true,autoArrange:false,snap:true,sx:100,sy:100,gx:0,gy:0,origin:{x:0,y:0},
+        areas:[{left:-1000,top:-1000,right:10000,bottom:10000}],icons:[]};
+    }
+    if(!shellHelper) return {ok:false};
+    const r=await shellHelper.request('desktopSnapshot',{}, {timeoutMs:3000});
+    return r.ok && r.result ? r.result : {ok:false};
+  }
+  async function safeDesktopMove(payload,target) {
+    if(desktopUnsafe)return desktopBlocked('helper-not-stopped');
+    if(desktopBusy) return desktopBlocked('busy');
+    desktopBusy=true;
+    const started=Date.now();let planMs=0,positionMs=0;
+    try {
+      if(!payload?.boardName || !target?.path) return desktopBlocked('unknown-board');
+      const folder=guardBoard(payload.boardName), data=bf.loadBoard(folder);
+      const meta=path.join(folder,'.okiba-board.json');
+      const readMeta=()=>{try{return fs.readFileSync(meta,'utf8');}catch(e){if(e.code==='ENOENT')return null;throw e;}};
+      const before=readMeta();
+      const residents=Array.isArray(payload.paths)?payload.paths:[];
+      const linked=Array.isArray(payload.linkedPaths)?payload.linkedPaths:[];
+      const requested=[...residents,...linked];
+      if(!requested.length || new Set(requested.map(p=>path.resolve(p).toLowerCase())).size!==requested.length) return desktopBlocked('invalid-selection');
+      const layout=new Map((payload.layout||[]).filter(i=>i&&typeof i.path==='string').map(i=>[path.resolve(i.path).toLowerCase(),i.cell]));
+      const planned=[]; const reserved=new Set();
+      for(const src of requested) {
+        const isLink=linked.includes(src);
+        const link=data.links.find(l=>ln.samePath(l.path,src));
+        if(isLink ? !link : !ln.samePath(path.dirname(src),folder))return desktopBlocked('invalid-source');
+        const st=fs.statSync(src);
+        if(!st.isFile()&&!st.isDirectory())return desktopBlocked('invalid-source');
+        // Cross-volume copy/delete cannot offer this reversible move guarantee.
+        if(path.parse(path.resolve(src)).root.toLowerCase()!==path.parse(path.resolve(target.path)).root.toLowerCase())return desktopBlocked('cross-volume');
+        let cell=layout.get(path.resolve(src).toLowerCase()) || (isLink ? [link.col,link.row] : data.positions[path.basename(src)]);
+        if(!Array.isArray(cell)||cell.length!==2||!cell.every(Number.isInteger))return desktopBlocked('unknown-layout');
+        let dest=ln.samePath(path.dirname(src),target.path)?src:bf.uniqueDestination(target.path,path.basename(src));
+        if(reserved.has(dest.toLowerCase()))return desktopBlocked('duplicate-destination');reserved.add(dest.toLowerCase());
+        const attr=await attrib.readHidden(src);if(!attr?.ok)return desktopBlocked('unknown-attributes');
+        planned.push({path:src,dest,name:path.basename(dest),cell,isLink,hidden:attr.hidden,identity:{dev:st.dev,ino:st.ino},renamed:false,visibilityChanged:false});
       }
-    }
-    recordHistory(boardName, snap, histItems, groupId);
-    if (moved.length && win && !win.isDestroyed()) {
-      win.webContents.send('fs-changed');
-    }
-    return { moved, destinations };
-  });
+      const anchor=Array.isArray(payload.anchorCell)?payload.anchorCell:[Math.min(...planned.map(i=>i.cell[0])),Math.min(...planned.map(i=>i.cell[1]))];
+      if(anchor.length!==2||!anchor.every(Number.isInteger))return desktopBlocked('unknown-anchor');
+      for(const item of planned)item.offset=[item.cell[0]-anchor[0],item.cell[1]-anchor[1]];
+      const snap=await desktopSnapshot();
+      const point=payload.automatic?null:{x:Number(payload.screenX)+Number(snap.origin?.x),y:Number(payload.screenY)+Number(snap.origin?.y)};
+      const plan=safeDesk.planDesktop({snapshot:snap,items:planned,point,automatic:!!payload.automatic});
+      planMs=Date.now()-started;
+      if(!plan.ok)return desktopBlocked(plan.reason);
+      const tx=await safeDesk.executeDesktop({items:planned,plan,snapshot:snap,adapter:{
+        snapshot:desktopSnapshot,
+        async move(item) {
+          const st=fs.statSync(item.path);if(st.dev!==item.identity.dev||st.ino!==item.identity.ino)throw Error('source-changed');
+          if(!ln.samePath(item.path,item.dest)) {
+            if(fs.existsSync(item.dest))throw Error('destination-changed');
+            fs.renameSync(item.path,item.dest);item.renamed=true;
+          }
+          if(item.hidden){item.visibilityChanged=true;const a=await attrib.setHidden(item.dest,false);if(!a?.ok)throw Error('unhide-failed');}
+        },
+        async position(snapshot,p) {
+          if(process.env.OKIBA_TEST_HOOKS==='1'&&process.env.OKIBA_TEST_POSITIONER==='stub')return {ok:true};
+          if(!shellHelper)return {ok:false,reason:'helper-unavailable'};
+          const posStart=Date.now();
+          const r=await shellHelper.request('positionDesktopPlan',{snapshot,targets:p.targets.map(t=>({...t,path:planned.find(i=>i.path===t.path).dest})),buffer:p.buffer},{timeoutMs:60000});
+          positionMs=Date.now()-posStart;
+          if(!r.ok){const stopped=await shellHelper.stopAndWait();if(!stopped)desktopUnsafe=true;return {ok:false,reason:'position-unavailable',unsafe:!stopped};}
+          return r.result||{ok:false,reason:'position-unavailable'};
+        },
+        async commit() {
+          if(readMeta()!==before)throw Error('board-changed');
+          if(planned.some(i=>i.isLink)) {
+            const json=before===null?{version:6,positions:{},links:[],notes:[],size_percent:100}:JSON.parse(before);
+            json.links=(json.links||[]).filter(l=>!planned.some(i=>i.isLink&&ln.samePath(i.path,l.path)));
+            const tmp=meta+'.safe-'+process.pid+'-'+Date.now()+'.tmp';
+            try {fs.writeFileSync(tmp,JSON.stringify(json,null,2),'utf8');fs.renameSync(tmp,meta);}
+            finally {if(fs.existsSync(tmp))fs.unlinkSync(tmp);}
+          }
+        },
+        async rollback(item) {
+          const current=item.renamed?item.dest:item.path;
+          if(item.renamed) {
+            const st=fs.statSync(current);if(st.dev!==item.identity.dev||st.ino!==item.identity.ino)throw Error('destination-changed');
+            if(fs.existsSync(item.path))throw Error('original-path-occupied');
+            fs.renameSync(current,item.path);item.renamed=false;
+          }
+          if(item.visibilityChanged){const a=await attrib.setHidden(item.path,item.hidden);if(!a?.ok)throw Error('attributes-restore-failed');}
+        }
+      }});
+      if(!tx.ok){try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop '+JSON.stringify(tx)+'\n');}catch(_){}return desktopBlocked(tx.reason,tx.recovery);}
+      recordHistory(payload.boardName,{folder,positions:data.positions,links:data.links},planned.map(i=>({kind:i.isLink?'linked':'resident',destPath:i.dest,fileName:i.name,col:i.cell[0],row:i.cell[1]})),payload.groupId);
+      if(win&&!win.isDestroyed())win.webContents.send('fs-changed');
+      return {moved:planned.map(i=>i.path),destinations:planned.map(i=>i.dest),skipped:[],failed:[],error:null,position:{status:'ok',positioned:planned.length}};
+    } catch(e){return desktopBlocked(String(e.message||e));}
+    finally {desktopBusy=false;try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop ms plan='+planMs+' position='+positionMs+' total='+(Date.now()-started)+'\n');}catch(_){}}
+  }
+  ipcMain.handle('safe-takeout',(_e,payload)=>safeDesktopMove({...payload,automatic:true},{type:'desktop',path:desktopReturnDir()}));
+
+  ipcMain.handle('move-linked-to-desktop', (_e, boardName, paths, groupId) => safeDesktopMove({boardName,linkedPaths:paths,paths:[],groupId,automatic:true},{type:'desktop',path:desktopReturnDir()}));
   ipcMain.handle('trash-linked', async (_e, boardName, targetPath) => {
     const folder = guardBoard(boardName);
     // Explicit REAL-file delete (distinct from ボードから外す）:
@@ -730,31 +821,7 @@ function registerIpc() {
     fs.renameSync(fullPath, dest);
     return dest;
   });
-  ipcMain.handle('move-to-desktop', (_e, fullPath, boardName, groupId) => {
-    const snap = boardName ? snapshotBoard(boardName) : null;
-    const dest = bf.uniqueDestination(bf.desktopDir(), path.basename(fullPath));
-    // placeDroppedItems applies the same never-overwrite rule; call the
-    // move directly so a same-drive Desktop move always MOVES.
-    try { fs.renameSync(fullPath, dest); }
-    catch (e) {
-      if (fs.statSync(fullPath).isDirectory()) {
-        // cross-device fallback
-        const { execFileSync } = require('child_process');
-        execFileSync('robocopy', [fullPath, dest, '/E', '/MOVE'], { windowsHide: true });
-      } else {
-        fs.copyFileSync(fullPath, dest);
-        fs.rmSync(fullPath, { force: true });
-      }
-    }
-    if (boardName) {
-      const [c, r] = cellOfPos(snap ? snap.positions[path.basename(fullPath)] : null);
-      recordHistory(boardName, snap, [{
-        kind: 'resident', destPath: dest,
-        fileName: path.basename(dest), col: c, row: r,
-      }], groupId);
-    }
-    return dest;
-  });
+  ipcMain.handle('move-to-desktop', (_e, fullPath, boardName, groupId) => safeDesktopMove({boardName,paths:[fullPath],linkedPaths:[],groupId,automatic:true},{type:'desktop',path:desktopReturnDir()}));
   ipcMain.handle('drop-files', (_e, boardName, paths, placeOpts) => {
     const folder = guardBoard(boardName);
     const placed = bf.placeDroppedItems(paths, folder);
@@ -1192,6 +1259,11 @@ function registerIpc() {
       }
       result.resolved = target;
       dropLog.push({ kind: 'resolve', x, y, target, pre: resolveStage === 'pre' });
+      if(target?.type==='desktop' && target.path) {
+        const tm=Date.now();const strict=await safeDesktopMove(payload,target);moveMs=Date.now()-tm;
+        dropLog.push({kind:'safe-desktop',ok:!strict.error,reason:strict.reason||null});
+        writeTiming();return {...result,...strict,resolved:target};
+      }
       if (target && target.path) {
         let isDir = false;
         try { isDir = fs.statSync(target.path).isDirectory(); } catch (e) { isDir = false; }

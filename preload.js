@@ -45,6 +45,7 @@ contextBridge.exposeInMainWorld('okiba', {
   showItem: (p) => ipcRenderer.invoke('show-item', p),
   trashItem: (p) => ipcRenderer.invoke('trash-item', p),
   renameItem: (p, newName) => ipcRenderer.invoke('rename-item', p, newName),
+  safeTakeout: (payload) => ipcRenderer.invoke('safe-takeout', payload),
   moveToDesktop: (p, boardName, groupId) =>
     ipcRenderer.invoke('move-to-desktop', p, boardName, groupId),
   dropFiles: (boardName, paths, placeOpts) =>

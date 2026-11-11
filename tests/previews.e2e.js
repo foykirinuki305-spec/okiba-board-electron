@@ -18,20 +18,26 @@ async function run(shots = path.join(ROOT, 'screenshots')) {
   fs.writeFileSync(path.join(board,'unknown.customextension'),'unknown icon fallback');
   fs.writeFileSync(path.join(board,'broken.mp4'),'intentionally invalid video');
   fs.mkdirSync(path.join(board,'folder'));
-  const names = [...fixtures,'document.txt','unknown.customextension','broken.mp4','folder'];
+  const shortcuts = process.platform==='win32' ? ['cmd.exe','notepad.exe'].map(exe=>({name:exe+'.lnk',target:path.join(process.env.WINDIR || 'C:\\Windows','System32',exe)})) : [];
+  for (const shortcut of shortcuts) assert(fs.existsSync(shortcut.target),'Windows shortcut target exists: '+shortcut.target);
+  const names = [...shortcuts.map(s=>s.name),...fixtures,'document.txt','unknown.customextension','broken.mp4','folder'];
   const positions = Object.fromEntries(names.map((name,i)=>[name,{col:i%4,row:Math.floor(i/4)}]));
   const meta = path.join(board,'.okiba-board.json');
-  fs.writeFileSync(meta,JSON.stringify({version:6,size_percent:100,positions,notes:[{id:'preview-note',text:'Keep note text',col:0,row:2}],
-    links:[{path:path.join(tmp,'missing.png'),col:1,row:2,wasHidden:false}]}));
+  fs.writeFileSync(meta,JSON.stringify({version:6,size_percent:100,positions,notes:[{id:'preview-note',text:'Keep note text',col:2,row:2}],
+    links:[{path:path.join(tmp,'missing.png'),col:3,row:2,wasHidden:false}]}));
   const files = [meta,...names.filter(n=>n!=='folder').map(n=>path.join(board,n))];
   const snapshot = () => files.map(p=>({path:p,hash:crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'),mtime:fs.statSync(p).mtimeMs}));
-  const before = snapshot();
+  let before;
   let app;
   try {
     app = await electron.launch({args:[ROOT,'--no-sandbox','--user-data-dir='+path.join(tmp,'userdata')],timeout:60000,env:{...process.env,
       OKIBA_BASE:base,OKIBA_OLD_BASE:old,OKIBA_SHORTCUT_DESKTOP:desktop,OKIBA_CLEANUP_DESKTOP:desktop,OKIBA_CLEANUP_DOWNLOADS:desktop,
       OKIBA_TEST_HELPER:'fake',OKIBA_TEST_ATTRIB:'stub',OKIBA_TEST_POSITIONER:'stub',
       OKIBA_TEST_RESOLVER_DIR:desktop,OKIBA_TEST_HOOKS:'1',ELECTRON_DISABLE_SECURITY_WARNINGS:'1'}});
+    await app.evaluate(({shell}, shortcuts) => {
+      for (const shortcut of shortcuts) if (!shell.writeShortcutLink(shortcut.file,'create',{target:shortcut.target})) throw Error('fixture shortcut creation failed');
+    }, shortcuts.map(s=>({...s,file:path.join(board,s.name)})));
+    before=snapshot();
     const page = await app.firstWindow();
     await page.waitForSelector('#boardGrid .board-card[data-name="Preview Test"]');
     await page.click('#boardGrid .board-card[data-name="Preview Test"]');
@@ -70,6 +76,11 @@ async function run(shots = path.join(ROOT, 'screenshots')) {
     const sources=await page.locator('.item').evaluateAll(els=>Object.fromEntries(els.map(e=>[e.querySelector('.name')?.textContent,e.querySelector('.thumb img')?.src])));
     assert(new Set(['preview-wide.png','preview-tall.png','preview-wide.mp4','preview-green.mp4'].map(n=>sources[n])).size===4,'two images and two real videos have distinguishable thumbnail content');
     assert(sources['preview-wide.mp4']!==sources['broken.mp4'] && sources['preview-green.mp4']!==sources['broken.mp4'],'real videos use frame thumbnails rather than shared MP4 icon fallback');
+    if (shortcuts.length) {
+      const targetIcons=await page.evaluate(async targets=>Promise.all(targets.map(p=>window.okiba.thumb(p))),shortcuts.map(s=>s.target));
+      assert(targetIcons.every(Boolean) && targetIcons[0]!==targetIcons[1],'two executable targets have distinct native icons');
+      shortcuts.forEach((shortcut,i)=>assert(sources[shortcut.name]===targetIcons[i],shortcut.name+': shortcut icon equals its target executable icon'));
+    }
     const geometry=await page.locator('.item').evaluateAll(els=>Object.fromEntries(els.map(e=>[e.dataset.key,[e.style.left,e.style.top]])));
     for (const [name,cell] of Object.entries(positions)) assert(JSON.stringify(geometry['file:'+name])===JSON.stringify([16+cell.col*164+'px',16+cell.row*158+'px']),name+': original cell coordinates unchanged');
     fs.mkdirSync(shots,{recursive:true});await page.screenshot({path:path.join(shots,'native-previews.png')});
