@@ -10,6 +10,14 @@
  *   OKIBA_FAKE_TYPE       'desktop' | 'explorer' (default explorer)
  *   OKIBA_FAKE_POSITIONS  JSON map name -> {x, y} for
  *                         getDesktopPositions
+ *   OKIBA_FAKE_CURSOR     JSON array of {x, y, lbtn} served by
+ *                         cursorState (v2.2.2): one entry per
+ *                         request, the last entry repeats forever.
+ *                         Absent → { x:0, y:0, lbtn:false }.
+ *   OKIBA_FAKE_POSITION_DELAY_MS
+ *                         positionIcons answers only after this
+ *                         many ms (v2.2.2 optimistic-UI test: the
+ *                         card must be gone long before it lands)
  *
  * Special requests:
  *   cmd 'hang'      → never answered (client timeout tests)
@@ -22,6 +30,16 @@ function send(obj) {
 }
 
 send({ ready: true });
+
+// Scripted cursor sequence for cursorState (v2.2.2 pre-resolve
+// tests): consumed one entry per request; once exhausted, the
+// last state repeats (a resting cursor keeps reporting itself).
+let cursorSeq = null;
+try {
+  const parsed = JSON.parse(process.env.OKIBA_FAKE_CURSOR || 'null');
+  if (Array.isArray(parsed) && parsed.length) cursorSeq = parsed;
+} catch { cursorSeq = null; }
+let cursorIdx = 0;
 
 const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', (line) => {
@@ -46,11 +64,26 @@ rl.on('line', (line) => {
     }
     return;
   }
-  if (req.cmd === 'positionIcons') {
+  if (req.cmd === 'cursorState') {
+    let st = { x: 0, y: 0, lbtn: false };
+    if (cursorSeq) {
+      st = cursorSeq[Math.min(cursorIdx, cursorSeq.length - 1)];
+      cursorIdx++;
+    }
     send({
+      id: req.id,
+      result: { x: st.x | 0, y: st.y | 0, lbtn: !!st.lbtn },
+    });
+    return;
+  }
+  if (req.cmd === 'positionIcons') {
+    const answer = () => send({
       id: req.id,
       result: { status: 'ok', positioned: Array.isArray(req.names) ? req.names.length : 0 },
     });
+    const delayMs = parseInt(process.env.OKIBA_FAKE_POSITION_DELAY_MS || '0', 10);
+    if (delayMs > 0) setTimeout(answer, delayMs);
+    else answer();
     return;
   }
   if (req.cmd === 'getDesktopPositions') {

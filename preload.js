@@ -57,6 +57,14 @@ contextBridge.exposeInMainWorld('okiba', {
   // `linkedPaths` (v2.1: a real move + detach for them too).
   // cursorPoint is the OS cursor position (backup signal).
   resolveDropMove: (payload) => ipcRenderer.invoke('resolve-drop-move', payload),
+  // drag-out pre-resolve (v2.2.2): the renderer starts main's
+  // cursor poll when an item drag first moves (main pre-resolves
+  // outside drop targets during the drag so the release starts
+  // the move instantly) and stops it when the gesture ends
+  // inside the window. An outside release is consumed — and the
+  // poll stopped — by resolveDropMove itself.
+  dragWatchStart: () => ipcRenderer.invoke('drag-watch-start'),
+  dragWatchStop: () => ipcRenderer.invoke('drag-watch-stop'),
   moveLinkedToDesktop: (boardName, paths, groupId) =>
     ipcRenderer.invoke('move-linked-to-desktop', boardName, paths, groupId),
 

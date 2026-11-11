@@ -954,6 +954,57 @@ function placementMain() {
     ok(eq(plan.offsets, [[0, 0], [0, 1], [1, 0]]),
       'desktop plan: offsets normalised to the top-left item');
   }
+  // ---------- board extent derivation (v2.2.2, scroll expansion) --
+  {
+    ok(pl.EXTENT_MARGIN === 2, 'extent: slack margin is 2 rows/cols');
+    const empty = pl.boardExtent({ viewportRows: 4, viewportCols: 6, cells: [] });
+    ok(empty.heightRows === 6 && empty.widthCols === 8,
+      'extent: empty board = viewport + slack on both axes');
+    const small = pl.boardExtent({
+      viewportRows: 4, viewportCols: 6, cells: [[0, 0], [2, 1]],
+    });
+    ok(small.heightRows === 6 && small.widthCols === 8,
+      'extent: content inside the viewport does not shrink the slack');
+    const tall = pl.boardExtent({
+      viewportRows: 4, viewportCols: 6, cells: [[0, 0], [0, 12]],
+    });
+    ok(tall.heightRows === 15 && tall.widthCols === 8,
+      'extent: an item at row 12 extends the height to 13 + slack');
+    const wide = pl.boardExtent({
+      viewportRows: 4, viewportCols: 6, cells: [[9, 0]],
+    });
+    ok(wide.heightRows === 6 && wide.widthCols === 12,
+      'extent: an item at col 9 extends the width to 10 + slack');
+  }
+  {
+    // With the EXTENDED height as rowsPerCol, a vertical strip
+    // anchored near the new bottom fills to that bottom and only
+    // then wraps — the wrap point moved with the extension.
+    const cells = pl.placeItems({
+      occupied: new Set(), anchor: [0, 13], count: 3, rowsPerCol: 15,
+      offsets: [[0, 0], [0, 1], [0, 2]],
+    });
+    ok(eq(cells, [[0, 13], [0, 14], [1, 0]]),
+      'placement: strip wraps at the EXTENDED bottom (rowsPerCol=15)');
+    const low = pl.placeItems({
+      occupied: new Set(), anchor: [0, 12], count: 1, rowsPerCol: 15,
+      offsets: [[0, 0]],
+    });
+    ok(eq(low, [[0, 12]]), 'placement: below-viewport anchor lands exactly');
+  }
+  {
+    // computeCells with the derived height: appends fill the
+    // TALLER column before wrapping (renderer parity at the new
+    // rowsPerCol the renderer now passes in placeOpts).
+    const { cells } = pl.computeCells({
+      entries: [{ name: 'a.txt' }, { name: 'b.txt' }, { name: 'c.txt' }],
+      positions: {}, notes: [], links: [], rowsPerCol: 15,
+    });
+    ok(eq(cells.get('file:a.txt'), [0, 0]) &&
+       eq(cells.get('file:b.txt'), [0, 1]) &&
+       eq(cells.get('file:c.txt'), [0, 2]),
+      'computeCells: appends run down the extended column');
+  }
 }
 
 async function shellhelperMain() {
@@ -1017,7 +1068,106 @@ async function shellhelperMain() {
     ok(!/[^\x00-\x7F]/.test(line) && JSON.parse(line).name === '素材データ.mp4',
       'helper: non-ASCII is \\u-escaped on the wire and round-trips');
   }
+  {
+    // cursorState (v2.2.2): the fake serves the scripted sequence,
+    // one entry per request, and the last state repeats (a resting
+    // cursor). This is the witness the drag pre-resolver polls.
+    const seq = [{ x: 10, y: 20, lbtn: true }, { x: -40, y: 200, lbtn: false }];
+    const client = sh.createShellHelperClient({
+      command: process.execPath, args: [fake],
+      env: { ...process.env, OKIBA_FAKE_CURSOR: JSON.stringify(seq) },
+    });
+    const c1 = await client.request('cursorState', {});
+    ok(c1.ok && c1.result.x === 10 && c1.result.y === 20 && c1.result.lbtn === true,
+      'helper: cursorState serves the scripted cursor + button state');
+    const c2 = await client.request('cursorState', {});
+    const c3 = await client.request('cursorState', {});
+    ok(c2.ok && c2.result.x === -40 && c2.result.lbtn === false &&
+       c3.ok && c3.result.x === -40,
+      'helper: cursorState repeats the last scripted state once consumed');
+    client.dispose();
+  }
+  {
+    // Delayed positionIcons (v2.2.2 optimistic-UI fixture): the
+    // answer still arrives, just late — the client does not care.
+    const client = sh.createShellHelperClient({
+      command: process.execPath, args: [fake],
+      env: { ...process.env, OKIBA_FAKE_POSITION_DELAY_MS: '60' },
+    });
+    const r = await client.request('positionIcons', { x: 1, y: 2, names: ['a'] });
+    ok(r.ok && r.result.status === 'ok' && r.result.positioned === 1,
+      'helper: delayed positionIcons answer is delivered intact');
+    client.dispose();
+  }
   delete process.env.OKIBA_FAKE_LANDING;
+}
+
+// ------------------------------------------------ preresolve (v2.2.2)
+// The drag-time pre-resolution cache (lib/preresolve.js): pure and
+// clock-injected, so every rule — fire throttle, staleness,
+// acceptance radius, superseded answers — is asserted by REQUEST
+// COUNT and cache behaviour, never by wall-clock timing.
+async function preresolveMain() {
+  const pr = require('../lib/preresolve');
+  console.log('\n[preresolve] drag-out pre-resolution cache (v2.2.2)');
+  {
+    const calls = [];
+    const cache = pr.createPreResolver({
+      resolve: (x, y) => { calls.push([x, y]); return { type: 'desktop', path: 'D' }; },
+    });
+    ok(cache.lookup(100, 100, 1000) === null, 'preresolve: empty cache misses');
+    cache.observe(100, 100, 1000);
+    ok(calls.length === 1, 'preresolve: first outside point fires a resolve');
+    const hit = cache.lookup(105, 108, 1100);
+    ok(hit && hit.target.type === 'desktop' && hit.ageMs === 100,
+      'preresolve: near-point fresh lookup hits and reports its age');
+    ok(cache.lookup(140, 100, 1100) === null,
+      'preresolve: a far release point (>12px) misses');
+    ok(cache.lookup(100, 100, 1000 + pr.MAX_AGE_MS + 1) === null,
+      'preresolve: an answer older than MAX_AGE misses');
+    cache.observe(102, 101, 1150); // 2.2px move, 150ms old: throttled
+    ok(calls.length === 1, 'preresolve: small move within the window does not refire');
+    cache.observe(102, 101, 1000 + pr.REFETCH_AFTER_MS + 1); // stale: refire
+    ok(calls.length === 2, 'preresolve: the same point refires once the answer is stale');
+    cache.observe(200, 200, 2000); // >= 8px jump: refire immediately
+    ok(calls.length === 3, 'preresolve: a jump of >=8px refires at once');
+    const latest = cache.lookup(200, 200, 2000);
+    ok(latest && latest.target.type === 'desktop',
+      'preresolve: the latest answer is the one served');
+    cache.reset();
+    ok(cache.lookup(200, 200, 2000) === null && cache.size() === 0,
+      'preresolve: reset clears the cache');
+  }
+  {
+    // Async resolver: an answer that lands AFTER a newer fire was
+    // issued is superseded and must never be served.
+    const pending = [];
+    const cache = pr.createPreResolver({
+      resolve: (x, y) => new Promise((res) => pending.push({ x, y, res })),
+    });
+    cache.observe(10, 10, 0);
+    cache.observe(90, 90, 10); // supersedes the first fire
+    ok(pending.length === 2, 'preresolve: the second point fired while the first was in flight');
+    const flush = () => new Promise((r) => setImmediate(r));
+    pending[1].res({ type: 'explorer', path: 'B' }); // newer lands first
+    await flush();
+    pending[0].res({ type: 'explorer', path: 'A' }); // stale lands late
+    await flush();
+    const hitB = cache.lookup(90, 90, 20);
+    ok(hitB && hitB.target.path === 'B', 'preresolve: the newer answer is served');
+    ok(cache.lookup(10, 10, 20) === null,
+      'preresolve: the superseded late answer was dropped');
+  }
+  {
+    // A resolver failure caches nothing: the release-time resolve
+    // must still get its own chance.
+    const cache = pr.createPreResolver({
+      resolve: () => { throw new Error('boom'); },
+    });
+    cache.observe(5, 5, 0);
+    ok(cache.lookup(5, 5, 0) === null && cache.size() === 0,
+      'preresolve: a throwing resolver caches nothing');
+  }
 }
 
 // ------------------------------------------------ cleanup (v2.2.1 Job 2)
@@ -1208,6 +1358,7 @@ function movehistoryMain() {
     shortcutMain();
     placementMain();
     await shellhelperMain();
+    await preresolveMain();
     cleanupMain();
     movehistoryMain();
     console.log('\nselftest: ' + passed + ' checks passed');

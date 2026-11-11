@@ -11,6 +11,7 @@ const pl = require('./lib/placement');
 const sh = require('./lib/shellhelper');
 const mh = require('./lib/movehistory');
 const cu = require('./lib/cleanup');
+const pr = require('./lib/preresolve');
 
 // Hidden-attribute runner for linked items (v2.0). Real attrib.exe
 // in production; OKIBA_TEST_ATTRIB=stub swaps in the counting stub.
@@ -777,10 +778,12 @@ function registerIpc() {
   // at the edge). Instead the renderer detects an OUTSIDE RELEASE
   // itself (pointerup coordinates outside the window, cross-checked
   // with the OS cursor position) and asks main to do the move:
-  //   resolveDropTarget(screen point) -> folder under the pointer
-  //   (PowerShell: WindowFromPoint -> Progman/WorkerW = Desktop, or
-  //    the ShellWindows Explorer window's folder path; else unknown)
-  //   -> move the real files there with the intake rules.
+  //   resolve the folder under the release point (PowerShell:
+  //   WindowFromPoint -> Progman/WorkerW = Desktop, or the
+  //   ShellWindows Explorer window's folder path; else unknown) —
+  //   since v2.2.2 usually PRE-resolved during the drag itself
+  //   (see startDragWatch) -> move the real files there with the
+  //   intake rules.
   // Unknown target => nothing is moved. Ever.
   function bundledScriptPath(fileName) {
     // Packaged: scripts ship via extraResources (PowerShell cannot
@@ -852,7 +855,11 @@ function registerIpc() {
 
   const testResolveDrop = dm.testResolverFromEnv();
   const coldResolveDrop = dm.createPowerShellResolver(bundledScriptPath('resolve-drop.ps1'));
-  async function resolveDropTarget(x, y) {
+  // One resolution through the channels, in precedence order: the
+  // env test stub, the warm helper, the v2.1 cold-spawn script.
+  // Used both by the drag-time pre-resolver below and by the
+  // release-time fallback when no (usable) cache entry exists.
+  async function resolveViaChannels(x, y) {
     if (testResolveDrop) return testResolveDrop(x, y);
     if (shellHelper) {
       const r = await shellHelper.request(
@@ -863,6 +870,77 @@ function registerIpc() {
     }
     return coldResolveDrop(x, y);
   }
+
+  // ------------------------- drag-out pre-resolve (v2.2.2)
+  // Even with the warm helper, v2.2's release pipeline ran strictly
+  // AFTER the release (detect -> resolve -> move -> position) and
+  // the card waited for all of it. Now, while an item drag is in
+  // progress, main polls the OS cursor through the helper
+  // (cursorState, ~40ms — the renderer cannot see the pointer
+  // reliably once it leaves the window) and PRE-RESOLVES the drop
+  // target for outside points into lib/preresolve.js's cache. On
+  // release the resolve-drop-move handler consults the cache
+  // first: a fresh hit within ~12px of the release point starts
+  // the move with NO resolve round-trip at all.
+  //
+  // The poll loop exists only for the life of one drag: the
+  // renderer starts it when a drag first moves and stops it when
+  // the gesture ends inside the window; an outside release is
+  // consumed (and the loop stopped) by resolve-drop-move itself.
+  // A button-up witnessed by the poll arms a safety stop so a
+  // renderer that never reports cannot leave the loop running.
+  // Zero cost while no drag is active.
+  let dragWatch = null;
+  const DRAG_POLL_MS = 40;
+  function stopDragWatch() {
+    if (!dragWatch) return;
+    clearInterval(dragWatch.timer);
+    dragWatch = null;
+  }
+  async function dragCursorState() {
+    if (!shellHelper) return null;
+    const r = await shellHelper.request('cursorState', {}, { timeoutMs: 1200 });
+    if (!r.ok || !r.result) return null;
+    const { x, y, lbtn } = r.result;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return { x, y, lbtn: !!lbtn };
+  }
+  function startDragWatch() {
+    stopDragWatch();
+    if (!shellHelper) return false; // no cursor witness -> no pre-resolve
+    const cache = pr.createPreResolver({
+      resolve: (x, y) => resolveViaChannels(x, y).then((t) => {
+        dropLog.push({ kind: 'preresolve', x, y, type: t && t.type });
+        return t;
+      }),
+    });
+    const session = { cache, lastButton: null, upSeenAt: 0, timer: null };
+    const tick = async () => {
+      if (dragWatch !== session) return;
+      const cs = await dragCursorState();
+      if (dragWatch !== session || !cs) return;
+      const now = Date.now();
+      const b = (win && !win.isDestroyed()) ? win.getBounds() : null;
+      const outside = !b || cs.x < b.x || cs.y < b.y ||
+        cs.x >= b.x + b.width || cs.y >= b.y + b.height;
+      if (outside) session.cache.observe(cs.x, cs.y, now);
+      // Button-up seen by the OS witness: the release happened
+      // (usually a beat before the renderer's own pointerup lands),
+      // so the cache is already warm for the handler — and if the
+      // renderer never reports, the loop still retires itself.
+      if (session.lastButton === true && cs.lbtn === false && !session.upSeenAt) {
+        session.upSeenAt = now;
+      }
+      session.lastButton = cs.lbtn;
+      if (session.upSeenAt && now - session.upSeenAt > 1500) stopDragWatch();
+    };
+    session.timer = setInterval(() => { tick().catch(() => {}); }, DRAG_POLL_MS);
+    if (session.timer.unref) session.timer.unref();
+    dragWatch = session;
+    return true;
+  }
+  ipcMain.handle('drag-watch-start', () => ({ active: startDragWatch() }));
+  ipcMain.handle('drag-watch-stop', () => { stopDragWatch(); return true; });
   // Desktop icon positioning (v1.3): after a Desktop move, place the
   // new icons at the drop point. Strictly best-effort — see
   // lib/iconpos.js. v2.2 routes it through the warm helper first
@@ -1035,6 +1113,32 @@ function registerIpc() {
   // even though a real OS drop gesture cannot be automated.
   const dropLog = [];
   ipcMain.handle('resolve-drop-move', async (_e, payload) => {
+    // Stage timings for the v2.2.2 latency work: one summary line
+    // per real drag-out lands in <base>\okiba.log —
+    //   dragout ms release=<epoch> resolve=<ms|pre> move=<ms>
+    //              position=<ms|skip> total=<ms>
+    // so the next "still slow" report points at a stage, not a
+    // feeling. `release` is when this handler was entered.
+    const t0 = Date.now();
+    let resolveStage = 'resolve'; // 'pre' when the drag-time cache hit
+    let resolveMs = 0;
+    let moveMs = 0;
+    let positionMs = null; // null -> 'skip' in the timing line
+    const writeTiming = () => {
+      const totalMs = Date.now() - t0;
+      try {
+        fs.appendFileSync(path.join(BASE, 'okiba.log'),
+          new Date().toISOString() + ' dragout ms' +
+          ' release=' + t0 +
+          ' resolve=' + (resolveStage === 'pre' ? 'pre' : resolveMs) +
+          ' move=' + moveMs +
+          ' position=' + (positionMs === null ? 'skip' : positionMs) +
+          ' total=' + totalMs + '\n');
+      } catch (e) { /* diagnostics must never break a move */ }
+      dropLog.push({
+        kind: 'timing', resolveStage, resolveMs, moveMs, positionMs, totalMs,
+      });
+    };
     const paths = (payload && Array.isArray(payload.paths)) ? payload.paths : [];
     const x = payload ? Number(payload.screenX) : NaN;
     const y = payload ? Number(payload.screenY) : NaN;
@@ -1047,15 +1151,31 @@ function registerIpc() {
       ? snapshotBoard(payload.boardName) : null;
     const histItems = [];
     try {
-      const target = (Number.isFinite(x) && Number.isFinite(y))
-        ? await resolveDropTarget(x, y)
-        : { type: 'unknown' };
+      // v2.2.2: a drag-time PRE-RESOLVED answer (see startDragWatch)
+      // whose point is within ~12px of the release point and still
+      // fresh is used IMMEDIATELY — the move starts with no resolve
+      // round-trip on the critical path. Anything else falls back
+      // to resolving here, exactly as before.
+      let target = null;
+      if (dragWatch && Number.isFinite(x) && Number.isFinite(y)) {
+        const hit = dragWatch.cache.lookup(Math.round(x), Math.round(y), t0);
+        if (hit) { target = hit.target; resolveStage = 'pre'; }
+      }
+      stopDragWatch(); // this drag is over either way
+      if (!target) {
+        const rs = Date.now();
+        target = (Number.isFinite(x) && Number.isFinite(y))
+          ? await resolveViaChannels(x, y)
+          : { type: 'unknown' };
+        resolveMs = Date.now() - rs;
+      }
       result.resolved = target;
-      dropLog.push({ kind: 'resolve', x, y, target });
+      dropLog.push({ kind: 'resolve', x, y, target, pre: resolveStage === 'pre' });
       if (target && target.path) {
         let isDir = false;
         try { isDir = fs.statSync(target.path).isDirectory(); } catch (e) { isDir = false; }
         if (isDir) {
+          const tm = Date.now();
           const r = dm.moveItemsOut(paths, target.path);
           result.moved = r.moved;
           result.skipped = r.skipped;
@@ -1107,6 +1227,7 @@ function registerIpc() {
               }
             }
           }
+          moveMs = Date.now() - tm;
           if (histItems.length && payload.boardName) {
             recordHistory(payload.boardName, histSnap, histItems);
           }
@@ -1115,39 +1236,56 @@ function registerIpc() {
             win.webContents.send('fs-changed');
           }
           // Desktop drops only: put the new icon(s) where the user
-          // actually dropped them. The move is already done — any
-          // positioning failure is reported in the log/result but
-          // never changes the move outcome.
+          // actually dropped them. v2.2.2 OPTIMISTIC REPLY: the
+          // handler returns as soon as the fs move is done — the
+          // renderer removes the cards and shows the result right
+          // away instead of waiting out positioning (icon-appear
+          // polling + set/read-back retries can take seconds).
+          // Positioning continues fire-and-forget as a cosmetic
+          // follow-up: it still logs its dropLog entry and its
+          // okiba.log lines when it lands, completes the dragout
+          // timing line, and only touches the status line if it
+          // FAILS in a way v1.3.1+ reported (via the 'status'
+          // push the renderer's onStatus shows as a toast).
           if (target.type === 'desktop' && result.moved.length && allDestinations.length) {
             const names = allDestinations.map((d) => path.basename(d));
-            result.position = { status: 'script-error', positioned: 0, detail: 'not-run' };
-            try {
-              result.position = await positionDesktopIcons(x, y, names);
-            } catch (e) {
-              result.position = {
-                status: 'script-error', positioned: 0,
-                detail: String((e && e.message) || e).slice(0, 200),
-              };
-            }
-            result.positionNote = ip.statusNoteFor(result.position);
-            dropLog.push({
-              kind: 'position', x, y, names,
-              status: result.position.status,
-              positioned: result.position.positioned,
-              detail: result.position.detail || '',
-            });
-            // Diagnostics: positioning must never fail silently
-            // again (v1.3.0's invisible bug). One line per drop in
-            // <base>\okiba.log with the full result + the args.
-            try {
-              const line = new Date().toISOString() +
-                ' drop-position status=' + result.position.status +
-                ' positioned=' + result.position.positioned +
-                ' detail=' + (result.position.detail || '') +
-                ' names=' + names.join(', ') +
-                ' drop=' + x + ',' + y + '\n';
-              fs.appendFileSync(path.join(BASE, 'okiba.log'), line);
-            } catch (e) { /* diagnostics must never break a move */ }
+            (async () => {
+              const tp = Date.now();
+              let pos = { status: 'script-error', positioned: 0, detail: 'not-run' };
+              try {
+                pos = await positionDesktopIcons(x, y, names);
+              } catch (e) {
+                pos = {
+                  status: 'script-error', positioned: 0,
+                  detail: String((e && e.message) || e).slice(0, 200),
+                };
+              }
+              positionMs = Date.now() - tp;
+              dropLog.push({
+                kind: 'position', x, y, names,
+                status: pos.status,
+                positioned: pos.positioned,
+                detail: pos.detail || '',
+              });
+              // Diagnostics: positioning must never fail silently
+              // again (v1.3.0's invisible bug). One line per drop
+              // in <base>\okiba.log with the full result + the args.
+              try {
+                const line = new Date().toISOString() +
+                  ' drop-position status=' + pos.status +
+                  ' positioned=' + pos.positioned +
+                  ' detail=' + (pos.detail || '') +
+                  ' names=' + names.join(', ') +
+                  ' drop=' + x + ',' + y + '\n';
+                fs.appendFileSync(path.join(BASE, 'okiba.log'), line);
+              } catch (e) { /* diagnostics must never break a move */ }
+              writeTiming();
+              const note = ip.statusNoteFor(pos);
+              if (note && win && !win.isDestroyed()) {
+                win.webContents.send('status', 'デスクトップへ移動しました。' + note);
+              }
+            })().catch(() => { /* positioning is best-effort, always */ });
+            return result;
           }
         } else {
           result.resolved = { type: 'unknown' };
@@ -1158,6 +1296,7 @@ function registerIpc() {
       result.resolved = { type: 'unknown' };
       dropLog.push({ kind: 'error', error: result.error });
     }
+    writeTiming();
     return result;
   });
   // Backup for outside-release detection: the true OS cursor position.

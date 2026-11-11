@@ -3,9 +3,11 @@
 # operation (scripts/resolve-drop.ps1, scripts/position-desktop-icons.ps1).
 # Protocol: JSON lines on stdin -> JSON lines on stdout, matched by
 # "id". Commands: resolveDrop {x,y}, positionIcons {x,y,names[]},
-# getDesktopPositions {names[]}. The helper stays sequential, so
-# responses are written in request order. All literals are ASCII on
-# purpose (console codepages); the client \u-escapes non-ASCII.
+# getDesktopPositions {names[]}, cursorState {} (v2.2.2: OS cursor
+# position + left-button state for drag pre-resolution). The helper
+# stays sequential, so responses are written in request order. All
+# literals are ASCII on purpose (console codepages); the client
+# \u-escapes non-ASCII.
 # Keep the cold-spawn scripts in sync behaviour-wise: they are the
 # fallback when this helper is unavailable.
 #
@@ -62,6 +64,25 @@ public static class OkibaWin32 {
 
   [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
   public static extern int GetClassName(IntPtr hwnd, StringBuilder sb, int maxCount);
+
+  // v2.2.2: global cursor witness for drag pre-resolution. The
+  // renderer cannot reliably see the pointer once it leaves the
+  // window (pointer capture clamps it), so during a drag main
+  // polls this instead: the true OS cursor position (screen
+  // coordinates) plus whether the left button is currently down
+  // (GetAsyncKeyState's high bit = key is down right now).
+  [DllImport("user32.dll")]
+  public static extern bool GetCursorPos(out POINT pt);
+
+  [DllImport("user32.dll")]
+  public static extern short GetAsyncKeyState(int vKey);
+
+  public static int[] CursorState() {
+    POINT pt;
+    if (!GetCursorPos(out pt)) return null;
+    bool lbtn = (GetAsyncKeyState(0x01) & 0x8000) != 0; // VK_LBUTTON
+    return new int[] { pt.X, pt.Y, lbtn ? 1 : 0 };
+  }
 }
 '@
 
@@ -437,6 +458,13 @@ function Get-DesktopPositions([string[]]$Names) {
   return $out
 }
 
+# ---- cursorState (v2.2.2: drag pre-resolution witness) -------------
+function Get-CursorState {
+  $s = [OkibaWin32]::CursorState()
+  if ($null -eq $s) { return @{ x = 0; y = 0; lbtn = $false } }
+  return @{ x = [int]$s[0]; y = [int]$s[1]; lbtn = ($s[2] -ne 0) }
+}
+
 # ---- Main loop ------------------------------------------------------
 [Console]::Out.WriteLine('{"ready":true}')
 [Console]::Out.Flush()
@@ -453,6 +481,7 @@ while ($true) {
       'resolveDrop'         { $result = Resolve-DropTarget ([int]$req.x) ([int]$req.y) }
       'positionIcons'       { $result = Position-Icons ([int]$req.x) ([int]$req.y) ([string[]]@($req.names)) }
       'getDesktopPositions' { $result = Get-DesktopPositions ([string[]]@($req.names)) }
+      'cursorState'         { $result = Get-CursorState }
       default               { throw "unknown-cmd: $($req.cmd)" }
     }
     $resp = @{ id = $id; result = $result }

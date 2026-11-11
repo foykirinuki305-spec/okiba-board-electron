@@ -167,7 +167,19 @@ body {
 .board-card-sub { color: var(--dim); font-size: 12.5px; margin-top: 3px; }
 
 /* ------------------------------------------------------------- board */
-.board-area { position: relative; flex: 1; overflow: hidden; margin: 6px 8px 0; }
+/* v2.2.2: the board scrolls on BOTH axes — its logical size is
+   derived from the content (lib/placement.js boardExtent), and
+   this invisible sizer is what gives the scroll area its size. */
+.board-area { position: relative; flex: 1; overflow: auto; margin: 6px 8px 0; scrollbar-width: thin; }
+.board-sizer { position: absolute; left: 0; top: 0; pointer-events: none; }
+.board-area::-webkit-scrollbar { width: 10px; height: 10px; }
+.board-area::-webkit-scrollbar-track { background: transparent; }
+.board-area::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, .16); border-radius: 6px;
+  border: 2px solid transparent; background-clip: padding-box;
+}
+.board-area::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .3); background-clip: padding-box; }
+.board-area::-webkit-scrollbar-corner { background: transparent; }
 .board-area.drop-active { outline: 2px dashed var(--accent); outline-offset: -10px; border-radius: 16px; }
 .board-hint { color: var(--dim); font-size: 12px; text-align: center; margin: 4px 0 10px; opacity: .75; }
 .item {

@@ -44,6 +44,16 @@
  *      stubs removed, two desktop drag-outs are resolved AND
  *      positioned through the fake helper; helperStats must show
  *      spawns===1 (one process reused — no timing asserts)
+ *   -> PRE-RESOLVE + OPTIMISTIC UI (v2.2.2): a scripted cursor
+ *      sequence drives main's drag-time polling; resolution fires
+ *      DURING the drag, the release consumes the cache (dropLog
+ *      resolve entry marked pre), the card vanishes while the
+ *      fake helper's positionIcons answer is still 4s out, and
+ *      okiba.log gains ONE dragout timing line (resolve=pre)
+ *   -> SCROLL EXPANSION (v2.2.2): board size derives from content
+ *      on both axes; items at row 12 / col 7 are reachable by
+ *      wheel and by edge auto-scroll drags (saved cells match the
+ *      rendered positions), and survive a restart in place
  *
  * Screenshots of home and board are written to $OKIBA_SHOTS (default
  * ./screenshots). Any failure exits non-zero, failing the CI build.
@@ -1187,6 +1197,245 @@ async function main() {
     'history group: group consumed by the restore');
   await page.click('#historyClose');
   await app18.close();
+
+  // ------------------------------------------------------------ run 13
+  // v2.2.2 drag-out latency: while the drag is in progress, main
+  // polls the (fake) helper's cursorState and PRE-RESOLVES the
+  // drop target; the release must then use the cache (ZERO
+  // resolve round-trip), and the card must disappear as soon as
+  // the fs move lands — long before the deliberately delayed
+  // (4s) positionIcons answer completes. Evidence is request
+  // counts and log lines, never wall-clock speed asserts.
+  step('pre-resolve (v2.2.2): release uses the drag-time cache; card leaves before positioning');
+  const okibaLogPath = path.join(base, 'okiba.log');
+  const readLog = () => (fs.existsSync(okibaLogPath)
+    ? fs.readFileSync(okibaLogPath, 'utf8') : '');
+  const cursorSeq = [
+    { x: 300, y: 300, lbtn: true },
+    { x: 320, y: 300, lbtn: true },
+    ...Array.from({ length: 80 }, () => ({ x: -40, y: 200, lbtn: true })),
+    { x: -40, y: 200, lbtn: false },
+  ];
+  const env13 = {
+    ...env,
+    OKIBA_TEST_HELPER: 'fake',
+    OKIBA_FAKE_LANDING: landing,
+    OKIBA_FAKE_TYPE: 'desktop',
+    OKIBA_FAKE_CURSOR: JSON.stringify(cursorSeq),
+    OKIBA_FAKE_POSITION_DELAY_MS: '4000',
+  };
+  delete env13.OKIBA_TEST_RESOLVER_DIR;
+  delete env13.OKIBA_TEST_POSITIONER;
+  const app19 = await electron.launch({
+    args: [ROOT, '--no-sandbox'], env: env13, timeout: 60000,
+  });
+  page = await app19.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click(`#boardGrid .board-card[data-name="${placeBoard}"]`);
+  await page.waitForSelector('#boardView:not([hidden]) .item');
+  const logBefore = readLog();
+  const preItem = page.locator('.item', { hasText: '配置レジデント1' }).first();
+  const preBox = await boxOf(preItem, 'pre-resolve item box');
+  await page.mouse.move(preBox.x + preBox.width / 2, preBox.y + preBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(preBox.x + preBox.width / 2 + 30, preBox.y + preBox.height / 2,
+    { steps: 5 });
+  // (a) resolution happens DURING the drag, before any release:
+  await waitFor(async () => {
+    const log = await page.evaluate(() => window.okiba.dropLog());
+    return log.some((e) => e.kind === 'preresolve' && e.type === 'desktop');
+  }, 'pre-resolve: a resolveDrop fired during the drag (dropLog)', 15000);
+  assert(true, 'pre-resolve: drop target resolved DURING the drag');
+  // synthetic OUTSIDE release at exactly the scripted cursor point
+  await preItem.evaluate((el) => {
+    el.dispatchEvent(new PointerEvent('pointerup', {
+      bubbles: true, cancelable: true, pointerId: 1,
+      clientX: -80, clientY: 120, screenX: -40, screenY: 200,
+    }));
+  });
+  await page.mouse.up();
+  await waitFor(() => fs.existsSync(path.join(landing, '配置レジデント1.txt')),
+    'pre-resolve: file moved to the pre-resolved desktop folder');
+  await waitFor(async () => {
+    const ns = await page.locator('.item .name').allTextContents();
+    return !ns.some((t) => t.includes('配置レジデント1'));
+  }, 'optimistic UI: card removed from the board');
+  const logAtCardGone = await page.evaluate(() => window.okiba.dropLog());
+  const resolveEntry = logAtCardGone.find((e) => e.kind === 'resolve');
+  // (b) the release itself issued NO resolve: the cache was used.
+  assert(resolveEntry && resolveEntry.pre === true,
+    'pre-resolve: the release used the cached answer (resolve entry marked pre)');
+  // (c) positioning (delayed 4s by the fake) has NOT completed,
+  // yet the card is already gone and no timing line exists yet.
+  assert(!logAtCardGone.some((e) => e.kind === 'position'),
+    'optimistic UI: card gone BEFORE the delayed positioning completed');
+  assert(readLog() === logBefore,
+    'optimistic UI: no dragout timing line before positioning lands');
+  // (d) when positioning lands, the single timing line records
+  // every stage, with resolve=pre.
+  await waitFor(() => {
+    const added = readLog().slice(logBefore.length);
+    return added.includes('dragout ms') && added.includes('resolve=pre');
+  }, 'timing: dragout line written when positioning completes', 20000);
+  const timingLine = readLog().slice(logBefore.length)
+    .split(/\r?\n/).find((l) => l.includes('dragout ms'));
+  const tm = timingLine.match(
+    /dragout ms release=(\d+) resolve=pre move=(\d+) position=(\d+) total=(\d+)/);
+  assert(!!tm, 'timing: line carries release/resolve=pre/move/position/total');
+  assert(parseInt(tm[3], 10) >= 1000,
+    'timing: position stage shows the scripted 4s delay (the card did not wait for it)');
+  const finalLog13 = await page.evaluate(() => window.okiba.dropLog());
+  assert(finalLog13.some((e) => e.kind === 'timing' && e.resolveStage === 'pre'),
+    'timing: dropLog timing entry records resolveStage=pre');
+  await app19.close();
+
+  // ------------------------------------------------------------ run 14
+  // v2.2.2 scroll expansion (both axes): the board's size derives
+  // from its content — an item at row 12 / col 7 lives below/right
+  // of the viewport, reachable by wheel, by programmatic scroll,
+  // and by dragging with edge auto-scroll; saved (col,row) and
+  // rendered positions agree, and a restart restores them.
+  step('scroll expansion (v2.2.2): below/right items, auto-scroll drag, restart');
+  const scrollBoard = 'スクロールボード';
+  const scrollDir = path.join(base, scrollBoard);
+  fs.mkdirSync(scrollDir, { recursive: true });
+  for (const n of ['縦上.txt', '横移動.txt', '右端.txt', '下段.txt']) {
+    fs.writeFileSync(path.join(scrollDir, n), 'scroll seed');
+  }
+  fs.writeFileSync(path.join(scrollDir, '.okiba-board.json'), JSON.stringify({
+    version: 6, size_percent: 100,
+    positions: {
+      '縦上.txt': { col: 0, row: 0 },
+      '横移動.txt': { col: 1, row: 0 },
+      '右端.txt': { col: 7, row: 0 },
+      '下段.txt': { col: 0, row: 12 },
+    },
+    links: [], notes: [],
+  }, null, 2));
+  const scrollJson = () => readJson(path.join(scrollDir, '.okiba-board.json'));
+  const app20 = await launch();
+  page = await app20.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click(`#boardGrid .board-card[data-name="${scrollBoard}"]`);
+  await page.waitForSelector('#boardView:not([hidden]) .item');
+  const areaDims = await page.evaluate(() => {
+    const a = document.getElementById('boardArea');
+    return {
+      scrollHeight: a.scrollHeight, clientHeight: a.clientHeight,
+      scrollWidth: a.scrollWidth, clientWidth: a.clientWidth,
+    };
+  });
+  assert(areaDims.scrollHeight > areaDims.clientHeight + 200,
+    'scroll: content is taller than the viewport (rows derived from content)');
+  assert(areaDims.scrollWidth > areaDims.clientWidth + 200,
+    'scroll: content is wider than the viewport (cols derived from content)');
+  const sAreaBox = await boxOf(page.locator('#boardArea'), 'scroll board area box');
+  await page.mouse.move(sAreaBox.x + sAreaBox.width / 2, sAreaBox.y + sAreaBox.height / 2);
+  await page.mouse.wheel(0, 600);
+  await waitFor(async () => (await page.evaluate(
+    () => document.getElementById('boardArea').scrollTop)) > 100,
+    'scroll: mouse wheel scrolls the board vertically');
+  // Jump to the bottom: the row-12 item renders at its saved cell.
+  await page.evaluate(() => {
+    const a = document.getElementById('boardArea');
+    a.scrollTop = a.scrollHeight;
+    a.scrollLeft = 0;
+  });
+  const lowItem = page.locator('.item', { hasText: '下段' }).first();
+  await waitFor(async () => {
+    const b = await lowItem.boundingBox();
+    return b && b.y > sAreaBox.y - 4 && b.y < sAreaBox.y + sAreaBox.height;
+  }, 'scroll: the row-12 item is visible after scrolling to the bottom');
+  const lowTop = await lowItem.evaluate((el) => el.style.top);
+  assert(lowTop === (16 + 12 * 158) + 'px',
+    'scroll: rendered top matches the saved row 12 (content coordinates)');
+  // Back to the top-left, then an auto-scroll drag DOWNWARD: hold
+  // the item at the bottom edge; the board scrolls under the drag
+  // and the drop lands in a row below the original viewport.
+  await page.evaluate(() => {
+    const a = document.getElementById('boardArea');
+    a.scrollTop = 0;
+    a.scrollLeft = 0;
+  });
+  const topItem = page.locator('.item', { hasText: '縦上' }).first();
+  const topBox = await boxOf(topItem, 'auto-scroll drag item box');
+  await page.mouse.move(topBox.x + topBox.width / 2, topBox.y + topBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(topBox.x + topBox.width / 2, sAreaBox.y + sAreaBox.height - 8,
+    { steps: 10 });
+  await new Promise((r) => setTimeout(r, 900)); // held at the edge
+  const scrolledDown = await page.evaluate(
+    () => document.getElementById('boardArea').scrollTop);
+  assert(scrolledDown > 250,
+    `auto-scroll: holding at the bottom edge scrolled the board (scrollTop=${scrolledDown})`);
+  await page.mouse.up();
+  await waitFor(() => {
+    const p = (scrollJson().positions || {})['縦上.txt'];
+    return p && p.row >= 5;
+  }, 'auto-scroll: the drop landed in a row below the original viewport');
+  assert(true, 'auto-scroll: vertical drag past the fold saved a lower row');
+  // Same to the RIGHT with the second item.
+  await page.evaluate(() => {
+    const a = document.getElementById('boardArea');
+    a.scrollTop = 0;
+    a.scrollLeft = 0;
+  });
+  const sideItem = page.locator('.item', { hasText: '横移動' }).first();
+  const sideBox = await boxOf(sideItem, 'auto-scroll side item box');
+  await page.mouse.move(sideBox.x + sideBox.width / 2, sideBox.y + sideBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(sAreaBox.x + sAreaBox.width - 8, sideBox.y + sideBox.height / 2,
+    { steps: 10 });
+  await new Promise((r) => setTimeout(r, 900)); // held at the edge
+  const scrolledRight = await page.evaluate(
+    () => document.getElementById('boardArea').scrollLeft);
+  assert(scrolledRight > 250,
+    `auto-scroll: holding at the right edge scrolled the board (scrollLeft=${scrolledRight})`);
+  await page.mouse.up();
+  await waitFor(() => {
+    const p = (scrollJson().positions || {})['横移動.txt'];
+    return p && p.col >= 7;
+  }, 'auto-scroll: the drop landed in a column beyond the original viewport');
+  assert(true, 'auto-scroll: horizontal drag past the edge saved a further column');
+  await app20.close();
+
+  step('scroll expansion (v2.2.2): restart restores the far items in place');
+  const app21 = await launch();
+  page = await app21.firstWindow();
+  await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
+  await page.click(`#boardGrid .board-card[data-name="${scrollBoard}"]`);
+  await page.waitForSelector('#boardView:not([hidden]) .item');
+  const kept = scrollJson().positions;
+  assert(kept['下段.txt'].col === 0 && kept['下段.txt'].row === 12 &&
+         kept['右端.txt'].col === 7 && kept['右端.txt'].row === 0,
+    'scroll: far positions persisted verbatim (no migration)');
+  await page.evaluate(() => {
+    const a = document.getElementById('boardArea');
+    a.scrollTop = a.scrollHeight;
+    a.scrollLeft = 0;
+  });
+  const lowItem2 = page.locator('.item', { hasText: '下段' }).first();
+  const lowTop2 = await lowItem2.evaluate((el) => el.style.top);
+  assert(lowTop2 === (16 + 12 * 158) + 'px',
+    'scroll: after restart the row-12 item renders at the same place');
+  await page.evaluate(() => {
+    const a = document.getElementById('boardArea');
+    a.scrollTop = 0;
+    // Scroll so the col-7 item (content left = 16 + 7*164 = 1164)
+    // sits inside the view — scrolling to the very end could push
+    // it off the LEFT edge once earlier drags widened the board.
+    a.scrollLeft = 964;
+  });
+  const rightItem2 = page.locator('.item', { hasText: '右端' }).first();
+  const rightLeft2 = await rightItem2.evaluate((el) => el.style.left);
+  assert(rightLeft2 === (16 + 7 * 164) + 'px',
+    'scroll: after restart the col-7 item renders at the same place');
+  await waitFor(async () => {
+    const b = await rightItem2.boundingBox();
+    const ab = await page.locator('#boardArea').boundingBox();
+    return b && ab && b.x > ab.x - 4 && b.x < ab.x + ab.width;
+  }, 'scroll: the col-7 item is visible after scrolling right');
+  await app21.close();
 
   console.log('\nGUI E2E: all steps passed');
 }

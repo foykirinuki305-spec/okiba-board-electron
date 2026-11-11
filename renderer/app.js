@@ -313,8 +313,88 @@ function metrics() {
   const cellH = Math.max(64, Math.round(158 * s));
   const thumb = Math.max(30, Math.round(96 * s));
   const font = Math.max(9, Math.round(12.5 * s));
-  const rows = Math.max(1, Math.floor((boardArea.clientHeight - ORIGIN * 1.5) / cellH));
-  return { cellW, cellH, thumb, font, rows, percent: p };
+  const viewportRows = Math.max(1, Math.floor((boardArea.clientHeight - ORIGIN * 1.5) / cellH));
+  const viewportCols = Math.max(1, Math.floor((boardArea.clientWidth - ORIGIN * 1.5) / cellW));
+  return { cellW, cellH, thumb, font, viewportRows, viewportCols, percent: p };
+}
+
+// ---- board extent + scrolling (v2.2.2) ----
+// The board's logical size is derived from its CONTENT on both
+// axes (the user: 「範囲が狭い」 — the visible window used to be
+// the whole board). deriveExtent mirrors lib/placement.js
+// boardExtent exactly (same duplication pattern as bfNextFree):
+// max(viewport, furthest occupied cell + 1) + 2 slack rows/cols.
+// boardRows/boardCols hold the current derivation; the board
+// area scrolls over a sizer element of that many cells, and
+// positions stay plain (col,row) — nothing extra is persisted.
+let boardRows = 1;
+let boardCols = 1;
+// While an item/band drag is active the content is temporarily
+// padded by this many rows/cols so auto-scroll can carry the
+// drag far past the current edge in ONE gesture; the drop is
+// validated against the padded size and the real extent is
+// re-derived on the next render.
+let dragPad = 0;
+const DRAG_PAD_CELLS = 24;
+let sizerEl = null;
+function deriveExtent(vpRows, vpCols, cellList) {
+  let maxRow = -1;
+  let maxCol = -1;
+  for (const c of cellList) {
+    if (c[1] > maxRow) maxRow = c[1];
+    if (c[0] > maxCol) maxCol = c[0];
+  }
+  return {
+    heightRows: Math.max(vpRows, maxRow + 1) + 2,
+    widthCols: Math.max(vpCols, maxCol + 1) + 2,
+  };
+}
+function liveRows() { return boardRows + dragPad; }
+function liveCols() { return boardCols + dragPad; }
+function layoutSizer() {
+  if (!sizerEl || !boardData) return;
+  const m = metrics();
+  sizerEl.style.width = (ORIGIN * 2 + liveCols() * m.cellW) + 'px';
+  sizerEl.style.height = (ORIGIN * 2 + liveRows() * m.cellH) + 'px';
+}
+
+// Edge auto-scroll shared by item drags and the rubber band:
+// while the pointer sits within EDGE px of the board area's
+// edge, scroll smoothly (faster the deeper the penetration) and
+// re-run onScroll so the dragged visuals follow even when no
+// pointermove event fires (a held-still pointer at the edge).
+const EDGE_PX = 40;
+function makeEdgeScroller(onScroll) {
+  let timer = null;
+  let pt = null;
+  const speed = (pen) =>
+    Math.ceil(3 + (Math.min(pen, EDGE_PX) / EDGE_PX) * 13);
+  return {
+    update(x, y) { pt = { x, y }; },
+    start() {
+      if (timer) return;
+      timer = setInterval(() => {
+        if (!pt) return;
+        const rect = boardArea.getBoundingClientRect();
+        let dx = 0;
+        let dy = 0;
+        if (pt.y > rect.bottom - EDGE_PX) dy = speed(pt.y - (rect.bottom - EDGE_PX));
+        else if (pt.y < rect.top + EDGE_PX) dy = -speed((rect.top + EDGE_PX) - pt.y);
+        if (pt.x > rect.right - EDGE_PX) dx = speed(pt.x - (rect.right - EDGE_PX));
+        else if (pt.x < rect.left + EDGE_PX) dx = -speed((rect.left + EDGE_PX) - pt.x);
+        if (dx || dy) {
+          boardArea.scrollLeft += dx;
+          boardArea.scrollTop += dy;
+          onScroll();
+        }
+      }, 16);
+    },
+    stop() {
+      if (timer) clearInterval(timer);
+      timer = null;
+      pt = null;
+    },
+  };
 }
 
 function buildCells() {
@@ -330,10 +410,17 @@ function buildCells() {
     }
   }
   const m = metrics();
+  // The append fill wraps at the height derived from the SAVED
+  // cells — the same number main's computeCells receives as
+  // placeOpts.rows, so both sides append position-less items to
+  // the same cells.
+  const fill = deriveExtent(m.viewportRows, m.viewportCols, [...cells.values()]);
+  boardRows = fill.heightRows;
+  boardCols = fill.widthCols;
   const occupied = new Set([...cells.values()].map((c) => c[0] + ',' + c[1]));
   const place = (key) => {
     if (!cells.has(key)) {
-      const c = bfNextFree(occupied, m.rows);
+      const c = bfNextFree(occupied, boardRows);
       cells.set(key, c);
       occupied.add(c[0] + ',' + c[1]);
     }
@@ -341,6 +428,11 @@ function buildCells() {
   for (const e of boardData.entries) place('file:' + e.name);
   for (const n of boardData.notes) place('note:' + n.id);
   for (const l of boardData.links || []) place('link:' + l.path);
+  // Final extent from ALL cells (appends may have reached further
+  // right than any saved cell).
+  const fin = deriveExtent(m.viewportRows, m.viewportCols, [...cells.values()]);
+  boardRows = fin.heightRows;
+  boardCols = fin.widthCols;
 }
 function bfNextFree(occupied, rows) {
   for (let col = 0; ; col++) {
@@ -383,9 +475,18 @@ function renderBoard() {
   if (!boardData) return;
   $('boardTitle').textContent = boardData.name;
   $('percentSel').value = String(boardData.sizePercent);
+  // Rebuilding the DOM collapses the scroll area for a moment;
+  // remember where the user was scrolled to and put it back, so
+  // a background refresh never yanks the view to the top.
+  const keepScrollTop = boardArea.scrollTop;
+  const keepScrollLeft = boardArea.scrollLeft;
   buildCells();
   const m = metrics();
   boardArea.innerHTML = '';
+  sizerEl = document.createElement('div');
+  sizerEl.className = 'board-sizer';
+  boardArea.appendChild(sizerEl);
+  layoutSizer();
   const renderItem = (key, kind, label, fullPath, noteText, opts) => {
     opts = opts || {};
     const itemKind = opts.itemKind || 'resident';
@@ -521,6 +622,8 @@ function renderBoard() {
   for (const n of boardData.notes) {
     renderItem('note:' + n.id, 'note', n.text.split('\n')[0] || 'メモ', null, n.text);
   }
+  boardArea.scrollTop = keepScrollTop;
+  boardArea.scrollLeft = keepScrollLeft;
 }
 
 function renderBoardSelection() {
@@ -675,7 +778,14 @@ function itemPointer(e, el, key, fullPath) {
   const anchor = group.find((g) => g.key === key) || group[0];
   if (!anchor) { dragging = false; return; }
   const startX = e.clientX, startY = e.clientY;
+  // Scroll compensation (v2.2.2): item positions live in CONTENT
+  // coordinates, the pointer in client coordinates — the delta
+  // between them is exactly how far the board has scrolled since
+  // the drag began (auto-scroll included).
+  const startScrollTop = boardArea.scrollTop;
+  const startScrollLeft = boardArea.scrollLeft;
   let moved = false;
+  let lastClient = null; // latest pointer position (client coords)
   let lastCursor = null; // OS cursor position (screen coords), polled
   el.setPointerCapture(e.pointerId);
   // Backup exit signal: while dragging, poll the OS cursor position
@@ -685,8 +795,22 @@ function itemPointer(e, el, key, fullPath) {
   const poll = setInterval(() => {
     api.cursorPoint().then((p) => { if (p) lastCursor = p; }).catch(() => {});
   }, 120);
+  const applyDrag = () => {
+    if (!lastClient) return;
+    const dx = (lastClient.x - startX) + (boardArea.scrollLeft - startScrollLeft);
+    const dy = (lastClient.y - startY) + (boardArea.scrollTop - startScrollTop);
+    for (const g of group) {
+      g.el.style.left = (g.left + dx) + 'px';
+      g.el.style.top = (g.top + dy) + 'px';
+    }
+  };
+  // Edge auto-scroll: holding the drag near the board's edge
+  // scrolls the content (both axes), so items can be carried far
+  // below/right of the visible area in one gesture.
+  const scroller = makeEdgeScroller(applyDrag);
   const cleanup = () => {
     clearInterval(poll);
+    scroller.stop();
     el.removeEventListener('pointermove', onMove);
     el.removeEventListener('pointerup', onUp);
     el.removeEventListener('pointercancel', onUp);
@@ -696,21 +820,33 @@ function itemPointer(e, el, key, fullPath) {
     if (!moved && Math.hypot(dx, dy) > 6) {
       moved = true;
       for (const g of group) g.el.classList.add('dragging');
+      // v2.2.2: a real drag has started — tell main to poll the
+      // OS cursor and PRE-RESOLVE outside drop targets while the
+      // drag is still in progress, so an outside release starts
+      // the move with no resolution wait.
+      api.dragWatchStart().catch(() => {});
+      // Pad the content so auto-scroll can run past the current
+      // edge; the drop is validated against the padded size.
+      dragPad = DRAG_PAD_CELLS;
+      layoutSizer();
+      scroller.start();
     }
     if (!moved) return;
-    for (const g of group) {
-      g.el.style.left = (g.left + dx) + 'px';
-      g.el.style.top = (g.top + dy) + 'px';
-    }
+    lastClient = { x: ev.clientX, y: ev.clientY };
+    scroller.update(ev.clientX, ev.clientY);
+    applyDrag();
   };
-  const finishInternal = () => {
-    // nearest cell to the anchor item's top-left (v7 pos_to_cell rule)
+  const finishInternal = (rowsLimit) => {
+    api.dragWatchStop().catch(() => {}); // gesture stayed inside
+    // nearest cell to the anchor item's top-left (v7 pos_to_cell
+    // rule) — offsetTop/Left are content coordinates, so this is
+    // already correct wherever the board is scrolled to.
     const target = [
       Math.max(0, Math.round((anchor.el.offsetLeft - ORIGIN) / m.cellW)),
       Math.max(0, Math.round((anchor.el.offsetTop - ORIGIN) / m.cellH)),
     ];
     const plan = planGroupMove(group.map((g) => g.key),
-      target[0] - anchor.cell[0], target[1] - anchor.cell[1], m.rows);
+      target[0] - anchor.cell[0], target[1] - anchor.cell[1], rowsLimit);
     if (plan === null) { renderBoard(); return; } // blocked -> whole group reverts
     for (const [k, c] of plan.entries()) cells.set(k, c);
     // persist FIRST: renderBoard() rebuilds cells from boardData.
@@ -723,10 +859,16 @@ function itemPointer(e, el, key, fullPath) {
     dragging = false;
     if (!moved) {
       // plain click: collapse to just this item
+      api.dragWatchStop().catch(() => {}); // never started, harmless
       selection = new Set([key]);
       renderBoardSelection();
       return;
     }
+    // The drop may legitimately target cells inside the drag pad
+    // (past the pre-drag edge); capture the padded row bound
+    // BEFORE the pad comes down for the next render.
+    const dropRows = liveRows();
+    dragPad = 0;
     // ---- was the pointer released OUTSIDE the window? ----
     let outside = ev.clientX < 0 || ev.clientY < 0 ||
       ev.clientX >= window.innerWidth || ev.clientY >= window.innerHeight;
@@ -752,7 +894,7 @@ function itemPointer(e, el, key, fullPath) {
     const residentPaths = group.filter((g) => g.key.startsWith('file:'))
       .map((g) => g.path).filter(Boolean);
     if (!outside || (!linkedPaths.length && !residentPaths.length)) {
-      finishInternal();
+      finishInternal(dropRows);
       return;
     }
     // ---- outside release: self-implemented MOVE (no startDrag) --
@@ -768,6 +910,7 @@ function itemPointer(e, el, key, fullPath) {
         screenY: screenPt.y,
       });
     } catch (err) { res = null; }
+    if (!res) api.dragWatchStop().catch(() => {}); // IPC died: retire the poll
     if (res && res.moved && res.moved.length) {
       const movedSet = new Set(res.moved);
       const movedLinked = new Set(linkedPaths.filter((p) => movedSet.has(p)));
@@ -782,11 +925,11 @@ function itemPointer(e, el, key, fullPath) {
       }
       await persistBoard();
       const isDesktop = res.resolved && res.resolved.type === 'desktop';
-      let msg = isDesktop ? 'デスクトップへ移動しました' : 'フォルダへ移動しました';
-      // Positioning is best-effort; only the auto-arrange case adds
-      // a note (the move itself still succeeded).
-      if (isDesktop && res.positionNote) msg += '。' + res.positionNote;
-      toast(msg);
+      // v2.2.2: this reply arrives as soon as the MOVE is done —
+      // desktop icon positioning finishes in the background, and
+      // if it fails in a reportable way main pushes the note
+      // through the status channel (onStatus above) instead.
+      toast(isDesktop ? 'デスクトップへ移動しました' : 'フォルダへ移動しました');
       refreshBoard();
     } else {
       // unknown target / failure: NOTHING was moved or unlinked.
@@ -887,7 +1030,14 @@ async function openBoard(name) {
 
   homeView.hidden = true;
   boardView.hidden = false;
+  // A freshly opened board starts at its top-left corner
+  // (renderBoard would otherwise restore the previous board's
+  // scroll offsets, which it keeps across re-renders).
+  boardArea.scrollTop = 0;
+  boardArea.scrollLeft = 0;
   renderBoard();
+  boardArea.scrollTop = 0;
+  boardArea.scrollLeft = 0;
 }
 
 // ==================================================== MOVE HISTORY
@@ -1100,21 +1250,23 @@ boardArea.addEventListener('pointerdown', (e) => {
   const additive = e.ctrlKey || e.metaKey;
   const baseSel = additive ? new Set(selection) : new Set();
   if (!additive) { selection = new Set(); renderBoardSelection(); }
-  const rect = boardArea.getBoundingClientRect();
-  const x0 = e.clientX - rect.left, y0 = e.clientY - rect.top;
+  // Band geometry lives in CONTENT coordinates (v2.2.2): the
+  // pointer's client position plus the current scroll offsets.
+  // Item offsetLeft/Top are content coordinates too, so the hit
+  // test below stays exact wherever the board is scrolled to.
+  const rect0 = boardArea.getBoundingClientRect();
+  const x0 = e.clientX - rect0.left + boardArea.scrollLeft;
+  const y0 = e.clientY - rect0.top + boardArea.scrollTop;
+  const startClient = { x: e.clientX, y: e.clientY };
   let band = null;
   let moved = false;
+  let lastClient = null;
   dragging = true; // pause auto-refresh from pointerdown, not threshold
-  const onMove = (ev) => {
-    const x1 = ev.clientX - rect.left, y1 = ev.clientY - rect.top;
-    if (!moved && Math.hypot(x1 - x0, y1 - y0) > 4) {
-      moved = true;
-      dragging = true; // pause auto-refresh while banding
-      band = document.createElement('div');
-      band.className = 'rubber-band';
-      boardArea.appendChild(band);
-    }
-    if (!moved) return;
+  const applyBand = () => {
+    if (!band || !lastClient) return;
+    const rect = boardArea.getBoundingClientRect();
+    const x1 = lastClient.x - rect.left + boardArea.scrollLeft;
+    const y1 = lastClient.y - rect.top + boardArea.scrollTop;
     const bx = Math.min(x0, x1), by = Math.min(y0, y1);
     const bw = Math.abs(x1 - x0), bh = Math.abs(y1 - y0);
     band.style.left = bx + 'px';
@@ -1132,9 +1284,25 @@ boardArea.addEventListener('pointerdown', (e) => {
     selection = sel;
     renderBoardSelection();
   };
+  const scroller = makeEdgeScroller(applyBand);
+  const onMove = (ev) => {
+    if (!moved && Math.hypot(ev.clientX - startClient.x, ev.clientY - startClient.y) > 4) {
+      moved = true;
+      dragging = true; // pause auto-refresh while banding
+      band = document.createElement('div');
+      band.className = 'rubber-band';
+      boardArea.appendChild(band);
+      scroller.start();
+    }
+    if (!moved) return;
+    lastClient = { x: ev.clientX, y: ev.clientY };
+    scroller.update(ev.clientX, ev.clientY);
+    applyBand();
+  };
   const onUp = () => {
     document.removeEventListener('pointermove', onMove);
     document.removeEventListener('pointerup', onUp);
+    scroller.stop();
     if (band) band.remove();
     dragging = false;
   };
@@ -1157,14 +1325,18 @@ boardArea.addEventListener('drop', async (e) => {
   // v2.2: pass the drop point as an anchor cell (same point->cell
   // math as an internal drag) plus the live row count, so the new
   // items land where they were dropped, keeping their arrangement.
+  // v2.2.2: the drop point is converted in CONTENT coordinates
+  // (scroll offsets added) and the row count is the board's
+  // derived height, so drops land correctly below/right of the
+  // visible area too.
   const m = metrics();
   const rect = boardArea.getBoundingClientRect();
   const placeOpts = {
     anchor: [
-      Math.max(0, Math.round((e.clientX - rect.left - ORIGIN) / m.cellW)),
-      Math.max(0, Math.round((e.clientY - rect.top - ORIGIN) / m.cellH)),
+      Math.max(0, Math.round((e.clientX - rect.left + boardArea.scrollLeft - ORIGIN) / m.cellW)),
+      Math.max(0, Math.round((e.clientY - rect.top + boardArea.scrollTop - ORIGIN) / m.cellH)),
     ],
-    rows: m.rows,
+    rows: boardRows,
   };
   try {
     const r = await api.linkFiles(boardData.name, paths, placeOpts);
