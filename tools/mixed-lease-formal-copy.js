@@ -21,6 +21,10 @@ function buildFormalMixedCopy(destination){
  if(!s.includes(",'show-hidden-mid-stage'"))throw Error('case list');s=s.replace(",'show-hidden-mid-stage'",'');s=s.replaceAll('createDesktopLeaseClient({','createDesktopLeaseClient({allowMixed:true,').replaceAll('runLease({','runLease({allowMixed:true,');fs.writeFileSync(driver,s);
  const sameFiles=['lib/desktop-snap-lease-controller.js','lib/desktop-lease-watchdog.js','scripts/snap-lease.ps1','scripts/mixed-lease.ps1','scripts/resident-lease.ps1','scripts/mixed-rename-notify.cs'];
  const hashes={};for(const file of sameFiles){const a=fs.readFileSync(path.join(root,file)),b=fs.readFileSync(path.join(destination,file));if(!a.equals(b))throw Error('runtime was patched '+file);hashes[file]=crypto.createHash('sha256').update(a).digest('hex');}
- fs.writeFileSync(path.join(destination,'copy-manifest.json'),JSON.stringify({formalRuntime:true,mainEnabled:false,helperFixtureCommandOnly:true,hashes},null,2));return destination;
+ // Prove original parity first, then label the sole observability-only private patch.
+ const diagnosticFile=path.join(destination,'scripts/mixed-lease.ps1');
+ fs.writeFileSync(diagnosticFile,require('./mixed-diagnostic-copy-ci').instrumentMixed(fs.readFileSync(diagnosticFile,'utf8')));
+ const diagnostics={file:'scripts/mixed-lease.ps1',purpose:'CI-only trace; no retry or mutation changes',patchedSha256:crypto.createHash('sha256').update(fs.readFileSync(diagnosticFile)).digest('hex')};
+ fs.writeFileSync(path.join(destination,'copy-manifest.json'),JSON.stringify({formalRuntime:true,mainEnabled:false,helperFixtureCommandOnly:true,hashes,diagnostics},null,2));return destination;
 }
 module.exports={buildFormalMixedCopy};
