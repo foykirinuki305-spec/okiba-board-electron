@@ -720,7 +720,7 @@ async function moveLinkedToDesktopFlow(paths) {
   try {
     const r = await api.safeTakeout({boardName:boardData.name,paths:[],linkedPaths:paths,layout:paths.map(path=>({path,cell:cells.get('link:'+path)}))});
     if (r && r.moved && r.moved.length) toast(r.warningText || 'デスクトップへ移動しました',15000);
-    else toast(r?.error || '移動できませんでした',15000);
+    else toast(r?.error || r?.warningText || '移動できませんでした',15000);
   } catch (e) { toast(String(e.message || e)); }
   refreshBoard();
 }
@@ -980,7 +980,7 @@ function itemPointer(e, el, key, fullPath) {
     } else {
       // Invalid plans do not mutate; unexpected move errors are rolled back.
       // Plain removal without moving is the ボードから外す menu.
-      toast(res?.error || '移動先を確認できなかったため中止しました。',15000);
+      toast(res?.error || res?.warningText || '移動先を確認できなかったため中止しました。',15000);
       renderBoard();
     }
   };

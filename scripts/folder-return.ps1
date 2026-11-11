@@ -28,7 +28,8 @@ try {
   foreach($v in $request.items){
    $x=New-Object OkibaFolderReturnFiles+Item
    foreach($k in @('src','dest','identity','volume','size','mtime','sourceAncestorKey','destAncestorKey')){if($v.$k -isnot [string] -or [string]::IsNullOrEmpty($v.$k)){throw 'return-invalid-field'};$x.$k=$v.$k}
-   if($v.attributes -notin @(32,34)){throw 'return-invalid-attributes'};$x.attributes=[uint32]$v.attributes
+   if($null -ne $v.mode){$x.mode=[string]$v.mode};if($null -ne $v.treeKey){$x.treeKey=[string]$v.treeKey}
+   if($null -eq $v.attributes -or ([uint32]$v.attributes -band 4294967116) -ne 0 -or (([uint32]$v.attributes -band 128) -ne 0 -and [uint32]$v.attributes -ne 128)){throw 'return-invalid-attributes'};$x.attributes=[uint32]$v.attributes
    if($seen.ContainsKey($x.src.ToLowerInvariant()) -or $destSeen.ContainsKey($x.dest.ToLowerInvariant())){throw 'return-duplicate-item'};$seen[$x.src.ToLowerInvariant()]=$true;$destSeen[$x.dest.ToLowerInvariant()]=$true;$items+=,$x
   }
   $results=@();foreach($x in $items){

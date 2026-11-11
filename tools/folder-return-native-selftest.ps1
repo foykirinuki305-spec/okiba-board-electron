@@ -34,7 +34,7 @@ try {
  $p7=File 'wrong-parent.mp4';$x7=[OkibaFolderReturnFiles]::Prepare($p7,$dst);$x7.destAncestorKey='wrong';$r7=[OkibaFolderReturnFiles]::Execute($x7);Assert (-not $r7.moved) 'changed parent proof rejected'
  $p8=File 'wrong-volume.mp4';$x8=[OkibaFolderReturnFiles]::Prepare($p8,$dst);$x8.volume='BAD';$r8=[OkibaFolderReturnFiles]::Execute($x8);Assert (-not $r8.moved -and $r8.reason -match 'cross-volume') 'volume proof mismatch rejected'
  $p9=File 'rename.mp4';$x9=[OkibaFolderReturnFiles]::Prepare($p9,$dst);$x9.dest=Join-Path $dst 'different.mp4';$r9=[OkibaFolderReturnFiles]::Execute($x9);Assert (-not $r9.moved) 'name changes refused'
- $rejected=$false;try{$null=[OkibaFolderReturnFiles]::Prepare($src,$dst)}catch{$rejected=$true};Assert $rejected 'folder refused'
+ $rejected=$false;try{$null=[OkibaFolderReturnFiles]::Prepare($root,$dst)}catch{$rejected=$true};Assert $rejected 'nested destination refused'
  $rejected=$false;try{$null=[OkibaFolderReturnFiles]::Prepare($p9,[Environment]::GetFolderPath('DesktopDirectory'))}catch{$rejected=$true};Assert $rejected 'desktop root refused without mutation'
  $hard=File 'hardlink.mp4';$hardAlias=Join-Path $src 'hardlink-alias.mp4';New-Item -ItemType HardLink -Path $hardAlias -Target $hard|Out-Null
  $rejected=$false;try{$null=[OkibaFolderReturnFiles]::Prepare($hard,$dst)}catch{$rejected=$true};Assert $rejected 'hardlink refused'
@@ -74,6 +74,28 @@ foreach($k in @('src','dest','identity','volume','size','mtime','sourceAncestorK
  $probe=[OkibaFolderReturnFiles]::Probe($x10);Assert ($probe.moved -and -not $probe.visible -and $probe.partial) 'interrupted hidden destination detected'
  $finish=[OkibaFolderReturnFiles]::FinalizeDestination($x10);Assert ($finish.moved -and $finish.visible -and -not $finish.partial) 'identity-bound visibility recovery'
  $probe=[OkibaFolderReturnFiles]::Probe($x10);Assert ($probe.visible -and $probe.moved) 'recovery final proof'
+ $same=File 'same-hidden.txt' $true;$sx=[OkibaFolderReturnFiles]::Prepare($same,$src);Assert ($sx.mode -eq 'same-path') 'same path prepare'
+ $sp=[OkibaFolderReturnFiles]::Probe($sx);Assert ($sp.moved -and -not $sp.visible) 'same path pending probe'
+ $sr=[OkibaFolderReturnFiles]::Execute($sx);Assert ($sr.moved -and $sr.visible -and [IO.File]::Exists($same)) ('same path clear '+$sr.reason)
+ Assert (([OkibaFolderReturnFiles]::Read($same)).identity -eq $sx.identity) 'same path identity unchanged'
+ $sp=[OkibaFolderReturnFiles]::FinalizeDestination($sx);Assert ($sp.visible) 'same path finalize idempotent'
+ $normal=File 'normal.txt';[IO.File]::SetAttributes($normal,128);$nx=[OkibaFolderReturnFiles]::Prepare($normal,$dst);$nr=[OkibaFolderReturnFiles]::Execute($nx);Assert ($nr.moved -and $nr.visible) ('normal128 move '+$nr.reason)
+ $ro=File 'readonly.txt' $true;[IO.File]::SetAttributes($ro,35);$rx=[OkibaFolderReturnFiles]::Prepare($ro,$dst);$rr=[OkibaFolderReturnFiles]::Execute($rx);Assert ($rr.moved -and $rr.visible -and (([IO.File]::GetAttributes($rx.dest) -band 1) -eq 1)) ('readonly preserved '+$rr.reason)
+ $dir=Join-Path $src 'nested';$sub=Join-Path $dir 'inner';[IO.Directory]::CreateDirectory($sub)|Out-Null;$content=Join-Path $sub 'content.txt';[IO.File]::WriteAllText($content,'preserve');[IO.File]::SetAttributes($content,35);[IO.File]::SetAttributes($dir,19)
+ $dx=[OkibaFolderReturnFiles]::Prepare($dir,$dst);$dr=[OkibaFolderReturnFiles]::Execute($dx);Assert ($dr.moved -and $dr.visible) ('nested directory move '+$dr.reason)
+ Assert ([IO.File]::ReadAllText((Join-Path $dx.dest 'inner\content.txt')) -eq 'preserve') 'descendant content preserved'
+ Assert (([IO.File]::GetAttributes((Join-Path $dx.dest 'inner\content.txt')) -band 3) -eq 3) 'descendant readonly hidden preserved'
+ Assert (([OkibaFolderReturnFiles]::Probe($dx)).visible) 'directory recovery probe'
+ [IO.File]::SetAttributes($dx.dest,19);$ds=[OkibaFolderReturnFiles]::Prepare($dx.dest,$dst);$dsr=[OkibaFolderReturnFiles]::Execute($ds);Assert ($dsr.visible) ('same path directory '+$dsr.reason)
+ $change=Join-Path $src 'tree-change';[IO.Directory]::CreateDirectory($change)|Out-Null;$cp=Join-Path $change 'item.txt';[IO.File]::WriteAllText($cp,'a');$cx=[OkibaFolderReturnFiles]::Prepare($change,$dst);[IO.File]::AppendAllText($cp,'b');$cr=[OkibaFolderReturnFiles]::Execute($cx);Assert (-not $cr.moved) 'changed descendant refused'
+ $ho=File 'hidden-only.txt';[IO.File]::SetAttributes($ho,2);$hx=[OkibaFolderReturnFiles]::Prepare($ho,$dst);$hr=[OkibaFolderReturnFiles]::Execute($hx);Assert ($hr.visible -and ([OkibaFolderReturnFiles]::Probe($hx)).visible) 'hidden-only normal recovery'
+ $sysdir=Join-Path $src 'custom-folder';[IO.Directory]::CreateDirectory($sysdir)|Out-Null;$ini=Join-Path $sysdir 'desktop.ini';[IO.File]::WriteAllText($ini,'generated');[IO.File]::SetAttributes($ini,6);$syx=[OkibaFolderReturnFiles]::Prepare($sysdir,$dst);$syr=[OkibaFolderReturnFiles]::Execute($syx);Assert ($syr.visible -and ([IO.File]::GetAttributes((Join-Path $syx.dest 'desktop.ini')) -band 6) -eq 6) ('system child unchanged '+$syr.reason)
+ $coll=Join-Path $src 'folder-collision';[IO.Directory]::CreateDirectory($coll)|Out-Null;$co=[OkibaFolderReturnFiles]::Prepare($coll,$dst);[IO.Directory]::CreateDirectory($co.dest)|Out-Null;$cor=[OkibaFolderReturnFiles]::Execute($co);Assert ($cor.skipped -and [IO.Directory]::Exists($coll)) 'directory collision no overwrite'
+ $danger=Join-Path $src 'danger';[IO.Directory]::CreateDirectory($danger)|Out-Null;$alias=Join-Path $danger 'hard.txt';New-Item -ItemType HardLink -Path $alias -Target $same|Out-Null;$reject=$false;try{$null=[OkibaFolderReturnFiles]::Prepare($danger,$dst)}catch{$reject=$true};Assert $reject 'descendant hardlink refused';[IO.File]::Delete($alias)
+ $junction=Join-Path $danger 'junction';New-Item -ItemType Junction -Path $junction -Target $dst|Out-Null;try{$reject=$false;try{$null=[OkibaFolderReturnFiles]::Prepare($danger,$dst)}catch{$reject=$true};Assert $reject 'descendant junction refused'}finally{[IO.Directory]::Delete($junction)}
+ $recoverDir=Join-Path $src 'folder-recovery';[IO.Directory]::CreateDirectory($recoverDir)|Out-Null;[IO.File]::WriteAllText((Join-Path $recoverDir 'a.txt'),'recovery');[IO.File]::SetAttributes($recoverDir,18);$fx=[OkibaFolderReturnFiles]::Prepare($recoverDir,$dst);[IO.Directory]::Move($recoverDir,$fx.dest)
+ $fp=[OkibaFolderReturnFiles]::Probe($fx);Assert ($fp.moved -and $fp.partial -and -not $fp.visible) 'folder after-rename crash state'
+ $fr=[OkibaFolderReturnFiles]::FinalizeDestination($fx);Assert ($fr.visible -and ([OkibaFolderReturnFiles]::Probe($fx)).visible) ('folder visibility recovery '+$fr.reason)
  $sourceText=Get-Content (Join-Path $repo 'scripts\folder-return-native.cs') -Raw -Encoding utf8
  Assert ($sourceText -notmatch 'File\.Copy|File\.Delete|CopyFile|DeleteFile') 'no copy/delete file APIs'
  Write-Output ('PASS folder-return-native '+$count+' checks')
