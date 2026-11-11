@@ -37,14 +37,27 @@ async function run(shots = path.join(ROOT, 'screenshots')) {
     await page.click('#boardGrid .board-card[data-name="Preview Test"]');
     await page.waitForSelector('#boardView:not([hidden]) .item');
     for (const name of names.filter(n=>n!=='folder')) {
-      const card = page.locator('.item').filter({has:page.locator('.name',{hasText:name})}).first();
-      await card.locator('.thumb img').waitFor({state:'attached',timeout:30000});
-      await page.waitForFunction(name=>{
-        const el=[...document.querySelectorAll('.item')].find(e=>e.querySelector('.name')?.textContent===name);
-        const img=el?.querySelector('.thumb img'); return img?.complete && img.naturalWidth>0;
-      }, name);
-      const details = await card.locator('.thumb img').evaluate(img=>({fit:getComputedStyle(img).objectFit,draggable:img.draggable,width:img.naturalWidth,height:img.naturalHeight,src:img.src}));
-      assert(details.fit==='contain'&&!details.draggable, name+': complete contained non-draggable native preview/icon');
+      // The board refresh replaces cards asynchronously. Query and inspect the
+      // current connected image in ONE renderer task, rather than holding a
+      // locator handle across attachment/load/style checks.
+      const deadline = Date.now() + 30000;
+      let details = null;
+      let ready = false;
+      while (Date.now() < deadline) {
+        details = await page.evaluate(name => {
+          const card = [...document.querySelectorAll('.item')].find(e=>e.querySelector('.name')?.textContent===name);
+          const img = card?.querySelector('.thumb img');
+          if (!img) return { found:false, cardConnected:!!card?.isConnected };
+          return { found:true, connected:img.isConnected && img.ownerDocument===document,
+            complete:img.complete, fit:getComputedStyle(img).objectFit,
+            draggable:img.draggable, width:img.naturalWidth, height:img.naturalHeight };
+        }, name);
+        ready = details.found && details.connected && details.complete &&
+          details.width>0 && details.height>0 && details.fit==='contain' && details.draggable===false;
+        if (ready) break;
+        await new Promise(resolve=>setTimeout(resolve,100));
+      }
+      assert(ready, name+': complete contained non-draggable native preview/icon; details='+JSON.stringify(details));
     }
     const folder=page.locator('.item[data-key="file:folder"]');
     assert(await folder.locator('.tile-folder svg').count()===1 && await folder.locator('.thumb img').count()===0,'folder keeps dedicated yellow folder SVG, not incorrect Windows drive icon');
@@ -66,6 +79,15 @@ async function run(shots = path.join(ROOT, 'screenshots')) {
     await app.close();app=null;
     assert(JSON.stringify(snapshot())===JSON.stringify(before),'closing the preview app leaves metadata and sources unchanged');
     console.log('NATIVE PREVIEW E2E PASSED');
+  } catch (error) {
+    if (app) {
+      try {
+        fs.mkdirSync(shots,{recursive:true});
+        const failurePage=await app.firstWindow();
+        await failurePage.screenshot({path:path.join(shots,'native-previews-failure.png')});
+      } catch (captureError) { console.error('preview failure screenshot unavailable: '+captureError.message); }
+    }
+    throw error;
   } finally { if(app) await app.close().catch(()=>{}); fs.rmSync(tmp,{recursive:true,force:true}); }
 }
 module.exports=run;
