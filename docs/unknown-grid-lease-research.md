@@ -158,3 +158,11 @@ The first hosted run failed in the copy destination guard before creating the ob
 Owner-death cases now pin the watchdog birth before terminating the owned owner process, then require watchdog and all reported helper PID/birth pairs to exit after the terminal journal and before checking or cleaning owned files. Unconfirmed termination sets unsafe and withholds cleanup.
 
 Conservative abort limitation: restoreAttempted is persisted before the abort RPC. If that RPC fails before even its read-only validation, an adopted OFF state can be blocked because the persisted state cannot distinguish an unexecuted read from an attempted restoration. This is an explicit fail-closed limitation, not a successful recovery. Calibration ON itself does not set restoreAttempted or restored.
+
+### Review corrections: stage-specific flags and terminal Hidden race
+
+The prototype now journals recovery.flagState=off-intent before reveal and on-intent before calibration ON, then records exact off/on after a successful reply. Native guards require that exact current flag value at each read, including after visibility waits and sample settling. Calibration ON never marks the lease finally restored. Thus external OFF during calibration, or external ON before calibration, blocks rather than being silently reversed.
+
+Abort-only adoption maps an outstanding intent solely to its post-change value and validates that exact value. A pre-change value is ambiguous and blocks. This cannot prove absence of a concurrent external change that happens to match the requested value; the prototype does not claim such attribution. Native state and durable state remain separate, with failed abort RPC recovery still conservatively blocking observed OFF.
+
+Both abort and release now freshly verify every selected file identity/size/mtime/other attributes through Lease-CheckRecord, then require Hidden=true and all original attributes. This rejects external unhide before Explorer has added the icon, even if selectedCount is still zero. Pure PowerShell mocks cover this false-positive and both external flag directions; no native/Desktop functions are invoked by those tests. Hosted native proof is still required.

@@ -20,6 +20,9 @@ jobs:
       - name: Pure canonical TEMP regression
         shell: pwsh
         run: node tools/unknown-grid-lease-temp-selftest.js
+      - name: Pure native phase and terminal guards
+        shell: pwsh
+        run: ./tools/unknown-grid-lease-native-guards-selftest.ps1
       - name: Native probe sample abort slice only
         shell: pwsh
         run: |

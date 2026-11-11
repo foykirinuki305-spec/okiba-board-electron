@@ -3,8 +3,19 @@
 function Unknown-CIOnly {
  if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:OKIBA_UNKNOWN_GRID_CI -ne '1'){throw 'unknown-grid-hosted-ci-only'}
 }
+# Exact stage expectation. Intent states are accepted only during abort-only adoption,
+# and only if the requested flag is already observed; the pre-change state is ambiguous.
+function Unknown-AssertFlags($r,$s){
+ $expected=[uint32]$r.originalFlags
+ if($r.flagState -ceq 'off'){$expected=$expected -band (-bnot 4)}
+ elseif($r.flagState -cne 'on'){throw 'unknown-flag-state-uncertain'}
+ if([uint32]$s.folderFlags -ne $expected){throw 'unknown-phase-flags-changed'}
+}
+function Unknown-TerminalHidden($r){
+ foreach($record in $r.records){$current=Lease-CheckRecord $record;if(-not $current.hidden -or [uint32]$current.attributes -ne [uint32]$record.attributes){throw 'unknown-terminal-hidden-changed'}}
+}
 function Unknown-Current($r){
- $s=Lease-Snapshot;$null=Lease-Guard $r $s
+ $s=Lease-Snapshot;Unknown-AssertFlags $r $s;$null=Lease-Guard $r $s
  if($r.version -ne 2 -or $r.kind -cne 'samepath-hidden-unknown-grid-ci'){throw 'unknown-invalid-recovery'}
  if(@($r.records).Count -lt 1 -or @($r.records).Count -gt 1000 -or ([uint32]$r.originalFlags -band 5) -ne 4){throw 'unknown-records-or-flags-invalid'}
  $desktop=Lease-Path ([Environment]::GetFolderPath('DesktopDirectory'))
@@ -30,7 +41,7 @@ function Unknown-Prepare($req){
  $area=$s.areas[$index];$patch=$q.plan.patch;$mx=$q.plan.maxSpacing.x;$my=$q.plan.maxSpacing.y
  if($mx -lt 8 -or $my -lt 8 -or $mx -gt 512 -or $my -gt 512 -or $patch.left -lt $area.left -or $patch.right -gt $area.right -or $patch.top -lt $area.top -or $patch.bottom -gt $area.bottom){throw 'unknown-patch-invalid'}
  foreach($i in $s.icons){if($i.x -ge $patch.left-$mx -and $i.x -le $patch.right+$mx -and $i.y -ge $patch.top-$my -and $i.y -le $patch.bottom+$my){throw 'unknown-patch-occupied'}}
- $r=@{version=2;kind=$q.kind;token=$req.token;snapshot=$s;originalFlags=[uint32]$s.folderFlags;records=$records;targets=@();targetAreaIndex=$index;plan=$q.plan;phase='unknown-prepared';owner=@{pid=$owner.pid;started=$owner.started}}
+ $r=@{version=2;kind=$q.kind;token=$req.token;snapshot=$s;originalFlags=[uint32]$s.folderFlags;records=$records;targets=@();targetAreaIndex=$index;plan=$q.plan;phase='unknown-prepared';flagState='on';owner=@{pid=$owner.pid;started=$owner.started}}
  $null=Unknown-Current $r;$selected=Lease-Guard $r $s;if($selected.Count -ne 0){throw 'unknown-initial-visible'};$script:SnapLease=$r
  return @{ok=$true;recovery=$r}
 }
@@ -42,11 +53,11 @@ function Unknown-ProbeVisible($r){
 function Unknown-Abort($r){
  $s=Unknown-Current $r
  foreach($record in $r.records){$null=Unknown-Current $r;Lease-SetHidden $record $true}
- $s=Lease-WaitVisibility $r $false;Lease-AllGrid $r.snapshot $s
- if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){Lease-SetSnap $r $s $true}
+ $s=Lease-WaitVisibility $r $false;Unknown-AssertFlags $r $s;Lease-AllGrid $r.snapshot $s
+ if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){Lease-SetSnap $r $s $true};$r.flagState='on'
  Start-Sleep -Milliseconds 250;$s=Unknown-Current $r;$selected=Lease-Guard $r $s
  if($selected.Count -ne 0 -or [uint32]$s.folderFlags -ne [uint32]$r.originalFlags){throw 'unknown-abort-unverified'}
- $r.phase='aborted';return @{ok=$true;snapRestored=$true;selectedHidden=$true;oldUnchanged=$true}
+ Unknown-TerminalHidden $r;$r.phase='aborted';return @{ok=$true;snapRestored=$true;selectedHidden=$true;oldUnchanged=$true}
 }
 function Invoke-UnknownLeaseCI($req){
  Unknown-CIOnly
@@ -54,19 +65,22 @@ function Invoke-UnknownLeaseCI($req){
  if($req.cmd -ceq 'leaseUnknownAdopt'){
   if($null -ne $script:SnapLease){throw 'lease-already-active'};$r=$req.recovery;$o=[OkibaLeaseOwner]::Read()
   if($o.state -eq 'unknown' -or $o.pid -ne $r.owner.pid -or $o.started -cne $r.owner.started){throw 'unknown-adopt-owner-mismatch'}
-  $current=Unknown-Current $r;Lease-AdoptRestoration $r $current $req.restorationState;$r.phase='abort-only';$script:SnapLease=$r;return @{ok=$true;abortOnly=$true}
+  # The durable intent cannot establish that a pre-change flag is still ours.
+  # Accept only its post-change value; other values fail closed without mutation.
+  switch -CaseSensitive ($r.flagState){'off-intent'{$r.flagState='off'}'on-intent'{$r.flagState='on'}'restore-on-intent'{$r.flagState='on'}}
+  $current=Unknown-Current $r;$r.phase='abort-only';$script:SnapLease=$r;return @{ok=$true;abortOnly=$true}
  }
  $r=Lease-Require $req.token
  if($req.cmd -ceq 'leaseUnknownAbort'){return Unknown-Abort $r}
  if($req.cmd -ceq 'leaseUnknownRelease'){
   if($r.phase -cne 'aborted'){throw 'unknown-release-before-abort'};$s=Unknown-Current $r
   if((Lease-Guard $r $s).Count -ne 0 -or $s.folderFlags -ne $r.originalFlags){throw 'unknown-release-unverified'}
-  $script:SnapLease=$null;return @{ok=$true;released=$true}
+  Unknown-TerminalHidden $r;$script:SnapLease=$null;return @{ok=$true;released=$true}
  }
  Unknown-Live $r;if($r.phase -ceq 'abort-only'){throw 'unknown-adopted-abort-only'}
  switch($req.cmd){
   'leaseUnknownRevealProbe' {
-   if($r.phase -cne 'unknown-prepared'){throw 'unknown-phase-invalid'};$s=Unknown-Current $r;Lease-SetSnap $r $s $false
+   if($r.phase -cne 'unknown-prepared'){throw 'unknown-phase-invalid'};$s=Unknown-Current $r;Lease-SetSnap $r $s $false;$r.flagState='off'
    $r.phase='probe-revealing';Lease-SetHidden $r.records[0] $false $true;$found=Unknown-ProbeVisible $r;$i=$found.probe
    $x=[int][Math]::Floor(($r.plan.patch.left+$r.plan.patch.right)/2);$y=[int][Math]::Floor(($r.plan.patch.top+$r.plan.patch.bottom)/2);Unknown-Patch $r @{x=$x;y=$y} $true
    [OkibaFolderView]::PositionLeaseItems([string[]]@($i.identity),[string[]]@($r.records[0].path),[int[]]@($i.x),[int[]]@($i.y),[int[]]@($x),[int[]]@($y),[uint32]$found.snapshot.folderFlags,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted)
@@ -77,9 +91,9 @@ function Invoke-UnknownLeaseCI($req){
    if($r.phase -cne 'probe-visible-off'){throw 'unknown-phase-invalid'};$found=Unknown-ProbeVisible $r;Unknown-Patch $r $found.probe $false
    Lease-AllGrid $r.snapshot $r.snapshot;$s=$found.snapshot
    [OkibaFolderView]::SetLeaseSnap([uint32]$s.folderFlags,$true,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted,[string[]]@($s.icons.identity),[int[]]@($s.icons.x),[int[]]@($s.icons.y))
-   $clock=[Diagnostics.Stopwatch]::StartNew();$probe=@{path=$r.records[0].path;name=[IO.Path]::GetFileName($r.records[0].path)}
+   $r.flagState='on';$clock=[Diagnostics.Stopwatch]::StartNew();$probe=@{path=$r.records[0].path;name=[IO.Path]::GetFileName($r.records[0].path)}
    $after=Wait-CalibrationSettled $r.snapshot $probe $r.plan.patch $clock;if(-not $after.ok){throw ('unknown-probe-snap-failed:'+ [string]$after.reason)}
-   $r.phase='calibrating';return @{ok=$true;recovery=$r;snapshot=$after.current;probe=$after.new[0]}
+   Unknown-AssertFlags $r $after.current;$r.phase='calibrating';return @{ok=$true;recovery=$r;snapshot=$after.current;probe=$after.new[0]}
   }
   'leaseUnknownCalibrationSample' {
    if($r.phase -cne 'calibrating'){throw 'unknown-phase-invalid'};Unknown-Patch $r $req.point $true;$found=Unknown-ProbeVisible $r;$i=$found.probe
@@ -88,7 +102,7 @@ function Invoke-UnknownLeaseCI($req){
    [OkibaFolderView]::PositionNewItem([int]$i.index,$r.records[0].path,[int]$i.x,[int]$i.y,[int]$req.point.x,[int]$req.point.y,[string]$i.identity)
    $clock=[Diagnostics.Stopwatch]::StartNew();$probe=@{path=$r.records[0].path;name=[IO.Path]::GetFileName($r.records[0].path)}
    $after=Wait-CalibrationSettled $r.snapshot $probe $r.plan.patch $clock;if(-not $after.ok){throw 'unknown-sample-not-settled'}
-   return @{ok=$true;snapshot=$after.current;probe=$after.new[0];elapsedMs=$clock.Elapsed.TotalMilliseconds}
+   Unknown-AssertFlags $r $after.current;return @{ok=$true;snapshot=$after.current;probe=$after.new[0];elapsedMs=$clock.Elapsed.TotalMilliseconds}
   }
   default {throw 'unknown-ci-command-unsupported'}
  }
