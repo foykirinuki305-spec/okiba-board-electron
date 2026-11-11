@@ -2,7 +2,7 @@
 const fs=require('fs'),path=require('path'),os=require('os'),crypto=require('crypto'),cp=require('child_process'),assert=require('assert/strict'),{promisify}=require('util');
 const policy=require('./packaged-preview-policy-ci');policy.hosted(process.env,process.platform);
 const {_electron:electron}=require('playwright'),{createShellHelperClient}=require('../lib/shellhelper'),{stableSnapshot}=require('./stable-snapshot-ci'),{sameSnapshot}=require('../lib/safe-desktop'),{createDesktopLeaseLock}=require('../lib/desktop-lease-global-lock');
-const root=path.resolve(__dirname,'..'),temp=fs.mkdtempSync(path.join(process.env.RUNNER_TEMP||os.tmpdir(),'okiba-packaged-preview-')),base=path.join(temp,'boards'),profile=path.join(temp,'profile'),old=path.join(temp,'old'),folder=path.join(base,'Preview');
+const root=path.resolve(__dirname,'..');let temp=null,base=null,profile=null,old=null,folder=null;
 const report={passed:false,cleanupVerified:false,scope:'packaged preview native IPC resident 3; single known 100%; no settings changes',temp},sleep=ms=>new Promise(r=>setTimeout(r,ms)),run=promisify(cp.execFile),tag='OkibaPreview-'+crypto.randomBytes(12).toString('hex');let app,observer,baseline,files=[],env,desktop,closed=false,terminal=false,ownedProcesses=[];
 async function support(action,extra={}){const r=await run('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(__dirname,'packaged-preview-support-ci.ps1'),'-Action',action],{windowsHide:true,env:{...process.env,...extra}});return JSON.parse(r.stdout);}
 async function request(cmd,payload={}){const r=await observer.request(cmd,payload);assert(r.ok&&r.result?.ok,JSON.stringify(r));return r.result;}
@@ -12,13 +12,16 @@ async function capture(){const all=await support('processes',{OKIBA_PREVIEW_ROOT
 async function stop(){if(!app)return;await capture();await app.close();app=null;const r=await run('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(__dirname,'wait-owned-processes-ci.ps1')],{windowsHide:true,timeout:120000,env:{...process.env,OKIBA_CHILDREN:JSON.stringify(ownedProcesses)}});report.processExit=JSON.parse(r.stdout);assert(report.processExit.ok);closed=true;}
 (async()=>{try{
  const host=await support('environment');desktop=host.desktop;
+ const tempParent=fs.realpathSync.native(path.join(host.localAppData,'Temp'));temp=fs.mkdtempSync(path.join(tempParent,'okiba-packaged-preview-'));temp=fs.realpathSync.native(temp);assert.equal(path.dirname(temp),tempParent);report.temp=temp;
+ base=path.join(temp,'boards');profile=path.join(temp,'profile');old=path.join(temp,'old');folder=path.join(base,'Preview');
  observer=createShellHelperClient({command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(root,'scripts/shell-helper.ps1')],env:policy.cleanEnv(process.env,base,old)});
  baseline=await snapshot();policy.known(baseline);report.baseline=baseline;
  const lock=createDesktopLeaseLock(host);assert(!lock.hasUnresolved(),'unresolved desktop reservation');
  for(const d of [folder,profile,old])fs.mkdirSync(d,{recursive:true});
  const positions={},rows=[3,5,6];for(let n=0;n<3;n++){const name=tag+'-'+(n+1)+'.txt',src=path.join(folder,name);fs.writeFileSync(src,'preview own content '+n,{flag:'wx'});positions[name]={col:2,row:rows[n]};files.push({src,path:path.join(desktop,name),name,bytes:fs.readFileSync(src).toString('base64')});assert(!fs.existsSync(files[n].path));}
  const meta={version:6,size_percent:100,positions,links:[],notes:[],future:{keep:['unchanged']}},metaPath=path.join(folder,'.okiba-board.json');fs.writeFileSync(metaPath,JSON.stringify(meta));fs.writeFileSync(path.join(base,'.home.json'),JSON.stringify({positions:{Preview:{col:2,row:4}},appVersion:require('../package.json').version}));
- for(const f of files){f.record=await request('readHiddenFile',{path:f.src});assert.equal(f.record.attributes,32,'resident Archive-only prerequisite');}
+ const desktopRecord=await request('readHiddenFile',{path:desktop});assert(desktopRecord.directory);report.nativeVolumes={desktop:policy.volume(desktopRecord.identity),sources:[]};
+ for(const f of files){f.record=await request('readHiddenFile',{path:f.src});assert.equal(f.record.attributes,32,'resident Archive-only prerequisite');const volume=policy.volume(f.record.identity);report.nativeVolumes.sources.push(volume);assert.equal(volume,report.nativeVolumes.desktop,'blocked: native source/Desktop volume mismatch');}
  env=policy.cleanEnv(process.env,base,old);app=await electron.launch({executablePath:path.join(root,'dist/win-unpacked/OkibaBoard.exe'),args:['--no-sandbox','--user-data-dir='+profile],env,timeout:60000});
  const runtime=await app.evaluate(({app})=>({packaged:app.isPackaged,profile:app.getPath('userData')}));assert(runtime.packaged);assert.equal(path.resolve(runtime.profile),profile);report.runtime=runtime;
  const page=await app.firstWindow();await page.waitForSelector('#boardGrid .board-card');await capture();
@@ -34,10 +37,15 @@ async function stop(){if(!app)return;await capture();await app.close();app=null;
  for(const f of files){const r=await request('readHiddenFile',{path:f.path});assert.equal(r.identity,f.record.identity);assert(r.hidden);assert.equal(path.dirname(f.path),desktop);assert(path.basename(f.path).startsWith(tag+'-'));fs.unlinkSync(f.path);}
  const final=await snapshot(true);assert.equal(final.icons.length,baseline.icons.length);report.cleanupVerified=true;report.passed=true;
  }catch(e){report.error=e.stack;throw e;}finally{
-  // Fail closed: never delete Desktop items or restore settings on an uncertain result.
+  // Evidence is read-only and unconditional, including pending/native prepare failure.
+  const out=path.join(root,'packaged-preview-evidence');fs.mkdirSync(out,{recursive:true});
+  function collectJournals(stage){const dir=profile&&path.join(profile,'desktop-lease-journals');const entries=[];if(dir&&fs.existsSync(dir)){const target=path.join(out,'journals-'+stage);fs.mkdirSync(target,{recursive:true});for(const name of fs.readdirSync(dir).filter(n=>n.endsWith('.json'))){try{const raw=fs.readFileSync(path.join(dir,name));fs.writeFileSync(path.join(target,name),raw);try{entries.push({name,data:JSON.parse(raw)});}catch(e){entries.push({name,parseError:e.message});}}catch(e){entries.push({name,error:e.message});}}}report['journals_'+stage]=entries;}
+  collectJournals('before-stop');report.finalFileObservations=[];
+  if(observer)for(const f of files)for(const location of ['src','path']){const item={location,path:f[location]};try{item.exists=fs.existsSync(item.path);if(item.exists)item.native=await observer.request('readHiddenFile',{path:item.path});}catch(e){item.error=e.message;}report.finalFileObservations.push(item);}
+  // Fail closed: never delete Desktop items or restore settings on uncertain results.
   if(app)try{await stop();}catch(e){report.stopError=e.stack;}
-  if(observer)report.observerStopped=await observer.stopAndWait(15000);
-  const out=path.join(root,'packaged-preview-evidence');fs.mkdirSync(out,{recursive:true});fs.writeFileSync(path.join(out,'result.json'),JSON.stringify(report,null,2));
-  for(const [src,name] of [[path.join(base,'okiba.log'),'okiba.log'],[path.join(folder,'.okiba-board.json'),'board.json']])if(fs.existsSync(src))fs.copyFileSync(src,path.join(out,name));
-  if(!report.observerStopped)process.exitCode=1;
+  collectJournals('after-stop');
+  if(observer)try{report.observerStopped=await observer.stopAndWait(15000);}catch(e){report.observerStopError=e.stack;}
+  for(const [src,name] of [[base&&path.join(base,'okiba.log'),'okiba.log'],[folder&&path.join(folder,'.okiba-board.json'),'board.json']])if(src&&fs.existsSync(src))fs.copyFileSync(src,path.join(out,name));
+  fs.writeFileSync(path.join(out,'result.json'),JSON.stringify(report,null,2));  if(!report.observerStopped)process.exitCode=1;
  }} )().catch(e=>{console.error(e);process.exitCode=1;});
