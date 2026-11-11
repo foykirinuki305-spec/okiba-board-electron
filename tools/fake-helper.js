@@ -48,6 +48,7 @@ function recordCalibration(req){if(!calibrationFake||!process.env.OKIBA_FAKE_COM
 // Opt-in lease protocol fake. It never calls Shell/attrib or changes real flags.
 const leaseFake=process.env.OKIBA_FAKE_LEASE==='1'&&process.env.OKIBA_TEST_HOOKS==='1';
 let fakeLease=null,fakeOwner=null,verifyCalls=0;
+const fakeHelperStarted=(621355968000000000n+BigInt(Date.now())*10000n).toString();
 const leasePath=require('path');
 function leaseOwned(p){const base=leasePath.resolve(process.env.OKIBA_FAKE_LEASE_ROOT||'');const q=leasePath.resolve(p);if(!process.env.OKIBA_FAKE_LEASE_ROOT||!q.toLowerCase().startsWith((base+leasePath.sep).toLowerCase()))throw Error('fake-scope-outside-temp');return q;}
 function leaseLog(command,extra={}){if(process.env.OKIBA_FAKE_LEASE_LOG)calibrationFs.appendFileSync(leaseOwned(process.env.OKIBA_FAKE_LEASE_LOG),JSON.stringify({cmd:command,pid:process.pid,...extra})+'\n');}
@@ -59,6 +60,7 @@ function fakeLeaseCommand(req){
  const identity=p=>{const st=calibrationFs.statSync(leaseOwned(p));return st.dev+':'+st.ino;};
  const alive=()=>{try{process.kill(fakeOwner.pid,0);return 'alive';}catch{return 'exited';}};
  switch(req.cmd){
+ case 'leaseHelperIdentity':return {ok:true,pid:process.pid,started:fakeHelperStarted};
  case 'leaseOwnerPin':fakeOwner={pid:req.pid,started:req.started||(req.pid===process.ppid?'2':'1')};return {ok:true,...fakeOwner,state:alive()};
  case 'leaseOwnerState':return {ok:true,...fakeOwner,state:alive()};
  case 'leaseReadFiles':return {ok:true,records:req.paths.map(p=>({path:p,identity:identity(p)}))};
