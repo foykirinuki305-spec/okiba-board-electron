@@ -19,7 +19,7 @@ try{
  $hook=@'
  # BEGIN owned Settings exposure
  . (Join-Path $PSScriptRoot 'packaged-settings-window-ci.ps1')
- $settingsState=Suspend-OwnedSettings $settings $combo
+ try{$settingsState=Suspend-OwnedSettings $settings $combo}catch{$report.settingsExposure=$script:OwnedSettingsEvidence;throw}
  $report.settingsExposure=@{pid=$settingsState.pid;started=$settingsState.birth;hwnd=$settingsState.hwnd;original=[int]$settingsState.original;ancestors=$settingsState.ancestors;minimized=$true}
  # END owned Settings exposure
  $native=New-Object Diagnostics.Process;$native.StartInfo.FileName='node.exe';$native.StartInfo.Arguments='"'+(Join-Path $PSScriptRoot 'packaged-unknown-reuse-ci.js')+'" "'+[Environment]::GetFolderPath('Desktop')+'"';$native.StartInfo.UseShellExecute=$false;$native.StartInfo.CreateNoWindow=$true;$native.StartInfo.WorkingDirectory=Split-Path $PSScriptRoot -Parent;$native.StartInfo.EnvironmentVariables['OKIBA_UNKNOWN_EXPECTED_SCALE']='150';$native.StartInfo.EnvironmentVariables['OKIBA_UNKNOWN_CASES']='success,no-fit'
