@@ -22,6 +22,11 @@ async function main(){
  async function stable(){let a=await snap();for(let n=0;n<30;n++){await sleep(200);const b=await snap();if(sameSnapshot(a,b))return b;a=b;}throw Error('desktop did not stabilize');}
  async function cold(name){const {stdout}=await run('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(ROOT,'scripts','position-desktop-icons.ps1'),'-GetPosition','0','0',name],{windowsHide:true,timeout:30000});return JSON.parse(stdout.split(/\r?\n/).filter(x=>/^\s*\{/.test(x)).pop());}
  try {
+  const collisionSource=path.join(temp,'no-replace-source.txt'),collisionDest=path.join(temp,'no-replace-dest.txt');
+  fs.writeFileSync(collisionSource,'original source');fs.writeFileSync(collisionDest,'existing destination');
+  const refused=await request('moveNoReplace',{source:collisionSource,destination:collisionDest});
+  assert(!refused.ok,'atomic move must reject an existing destination');assert.equal(fs.readFileSync(collisionSource,'utf8'),'original source');assert.equal(fs.readFileSync(collisionDest,'utf8'),'existing destination');
+  note('PASS native atomic move refuses destination collision without overwriting either file');
   const guardName=tag+'-existing.txt',guard=path.join(desktop,guardName);owned.push(guard);fs.writeFileSync(guard,'sentinel');
   let before;for(let n=0;n<50;n++){before=await snap();if(before.ok&&before.icons.some(i=>matches(i.label,guardName)))break;await sleep(200);}
   before=await stable();assert(before.ok&&!before.autoArrange&&before.snap,'need readable manual grid desktop');
@@ -34,7 +39,8 @@ async function main(){
   const metadata=path.join(temp,'.okiba-board.json'),history=path.join(temp,'.move-history.json');
   fs.writeFileSync(metadata,JSON.stringify({version:6,positions:{'A.txt':{col:3,row:7}},links:[]}));fs.writeFileSync(history,'[]');
   const metaBefore=fs.readFileSync(metadata),historyBefore=fs.readFileSync(history);let moved=0,committed=0;
-  const adapter={snapshot:snap,move:async item=>{moved++;fs.renameSync(item.path,item.dest);},position:async(s,p)=>request('positionDesktopPlan',{snapshot:s,targets:p.targets.map(t=>({...t,path:items.find(i=>i.name===t.name).dest})),buffer:p.buffer}),commit:async()=>{committed++;fs.writeFileSync(metadata,'committed');},rollback:async item=>{if(fs.existsSync(item.dest))fs.renameSync(item.dest,item.path);}};
+  const atomicMove=async(source,destination)=>{const result=await request('moveNoReplace',{source,destination});assert(result.ok,'atomic move failed '+JSON.stringify(result));};
+  const adapter={snapshot:snap,move:async item=>{moved++;await atomicMove(item.path,item.dest);},position:async(s,p)=>request('positionDesktopPlan',{snapshot:s,targets:p.targets.map(t=>({...t,path:items.find(i=>i.name===t.name).dest})),buffer:p.buffer}),commit:async()=>{committed++;fs.writeFileSync(metadata,'committed');},rollback:async item=>{if(fs.existsSync(item.dest))await atomicMove(item.dest,item.path);}};
   const invalid=planDesktop({snapshot:before,items,point:{x:sentinel.x+before.sx/2,y:sentinel.y+before.sy/2}});
   assert.equal(invalid.ok,false,'occupied drop must be blocked');
   const blocked=await executeDesktop({items,plan:invalid,snapshot:before,adapter});assert(blocked.blocked&&!blocked.ok);

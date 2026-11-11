@@ -635,7 +635,7 @@ function renderBoard() {
           { label: '名前を変更', action: () => renameItemFlow(key, fullPath, label) },
           { label: '場所を開く', action: () => api.showItem(fullPath) },
           { label: 'デスクトップへ移動', action: async () => {
-              const result=await api.safeTakeout({boardName:boardData.name,paths:[fullPath],linkedPaths:[],layout:[{path:fullPath,cell:cells.get(key)}]}); if(result?.error)toast(result.error,15000); refreshBoard();
+              const result=await api.safeTakeout({boardName:boardData.name,paths:[fullPath],linkedPaths:[],layout:[{path:fullPath,cell:cells.get(key)}]}); if(result?.error)toast(result.error,15000);else if(result?.warningText)toast(result.warningText,15000); refreshBoard();
             } },
           { label: 'ゴミ箱へ削除', danger: true, action: async () => {
               await api.trashItem(fullPath); refreshBoard();
@@ -716,7 +716,7 @@ async function moveLinkedToDesktopFlow(paths) {
   if (!paths.length) return;
   try {
     const r = await api.safeTakeout({boardName:boardData.name,paths:[],linkedPaths:paths,layout:paths.map(path=>({path,cell:cells.get('link:'+path)}))});
-    if (r && r.moved && r.moved.length) toast('デスクトップへ移動しました');
+    if (r && r.moved && r.moved.length) toast(r.warningText || 'デスクトップへ移動しました',15000);
     else toast(r?.error || '移動できませんでした',15000);
   } catch (e) { toast(String(e.message || e)); }
   refreshBoard();
@@ -741,7 +741,7 @@ async function takeOutSelection() {
   try {
     const result=await api.safeTakeout({boardName:boardData.name,paths:residentPaths,linkedPaths,groupId,
       layout:keys.map(key=>({path:pathOfKey(key),cell:cells.get(key)})).filter(i=>i.path)});
-    if(result?.error)toast(result.error+(result.recovery?.length?' '+result.recovery.map(i=>i.path).join(' / '):''),15000);
+    if(result?.error)toast(result.error,15000);else if(result?.warningText)toast(result.warningText,15000);
   } catch(e){toast(String(e.message||e));}
   refreshBoard();
 }
@@ -961,7 +961,7 @@ function itemPointer(e, el, key, fullPath) {
       // desktop icon positioning finishes in the background, and
       // if it fails in a reportable way main pushes the note
       // through the status channel (onStatus above) instead.
-      toast(isDesktop ? 'デスクトップへ移動しました' : 'フォルダへ移動しました');
+      toast(res.warningText || (isDesktop ? 'デスクトップへ移動しました' : 'フォルダへ移動しました'),15000);
       refreshBoard();
     } else {
       // Invalid plans do not mutate; unexpected move errors are rolled back.

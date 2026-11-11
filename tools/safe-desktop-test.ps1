@@ -7,26 +7,20 @@ $source=Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\scripts\shell-help
 foreach($block in [regex]::Matches($source,"(?s)Add-Type -TypeDefinition @'\r?\n(.*?)\r?\n'@")) {
   Add-Type -TypeDefinition $block.Groups[1].Value
 }
-Add-Type -TypeDefinition @'
-using System;using System.Runtime.InteropServices;
-public static class OkibaSafeTestStyle {
- [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hwnd,int index,int value);
-}
-'@
-$lv=[IntPtr]::Zero;$count=-1
-foreach($v in [OkibaDesk]::FindDesktopListViews()) { $c=[OkibaDesk]::GetItemCount($v);if($c -gt $count){$lv=$v;$count=$c} }
-if($lv -eq [IntPtr]::Zero){throw 'CI Explorer desktop unavailable: cannot prove safe placement.'}
-$style=[OkibaDesk]::GetWindowLong($lv,-16)
-$extended=[OkibaDesk]::SendMessage($lv,0x1037,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32()
+$original=[OkibaFolderView]::ReadState()
+if($null -eq $original -or $original.Length -lt 2){throw 'Cannot read authoritative Shell FolderView state.'}
 $exitCode=1
 try {
-  [void][OkibaSafeTestStyle]::SetWindowLong($lv,-16,($style -band (-bnot 0x0100)))
-  [void][OkibaDesk]::SendMessage($lv,0x1036,[IntPtr]0x80000,[IntPtr]0x80000)
+  [OkibaFolderView]::SetFlagsForCI([uint32]5,[uint32]4)
   Start-Sleep -Milliseconds 300
+  $actual=[OkibaFolderView]::ReadState()
+  if($actual.Length -lt 2 -or ($actual[0] -band 5) -ne 4 -or $actual[1] -ne 0){throw 'Shell FolderView did not enter manual arrangement with snap-to-grid; raw ListView bits are insufficient.'}
+  Write-Host ('Authoritative Shell state verified: flags='+$actual[0]+' autoArrange='+$actual[1])
   & node (Join-Path $PSScriptRoot 'safe-desktop-test.js') ([Environment]::GetFolderPath('Desktop'))
   $exitCode=$LASTEXITCODE
 } finally {
-  [void][OkibaDesk]::SendMessage($lv,0x1036,[IntPtr]0x80000,[IntPtr]($extended -band 0x80000))
-  [void][OkibaSafeTestStyle]::SetWindowLong($lv,-16,$style)
+  [OkibaFolderView]::SetFlagsForCI([uint32]5,[uint32]($original[0] -band 5))
+  $restored=[OkibaFolderView]::ReadState()
+  if(($restored[0] -band 5) -ne ($original[0] -band 5) -or $restored[1] -ne $original[1]){throw 'Original Shell FolderView state could not be restored.'}
 }
 exit $exitCode

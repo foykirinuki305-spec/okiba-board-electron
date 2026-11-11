@@ -59,6 +59,9 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/safe-desktop-test.ps1
 
+      - name: Cross-volume copy verification and rollback (CI only)
+        run: node tools/cross-volume-realtest.js
+
       - name: GUI end-to-end test (Playwright Electron, real UI operations)
         run: node tests/gui.e2e.js
         env:

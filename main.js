@@ -670,6 +670,7 @@ function registerIpc() {
   // Desktop returns are planned as a complete group before any mutation.
   // No legacy cold positioner is used by this strict path.
   const safeDesk = require('./lib/safe-desktop');
+  const {createCrossVolumeMove}=require('./lib/cross-volume-move');
   function desktopReturnDir(){
     if(process.env.OKIBA_TEST_HOOKS==='1')return process.env.OKIBA_TEST_DESKTOP_DIR||process.env.OKIBA_SHORTCUT_DESKTOP||null;
     return shellDesktopDir()||bf.desktopDir();
@@ -697,6 +698,27 @@ function registerIpc() {
     const r=await shellHelper.request('desktopSnapshot',{}, {timeoutMs:3000});
     return r.ok && r.result ? r.result : {ok:false};
   }
+  async function atomicDesktopMove(source,destination) {
+    if(process.env.OKIBA_TEST_HOOKS==='1'&&process.env.OKIBA_TEST_POSITIONER==='stub') {
+      if(fs.existsSync(destination)){const e=Error('destination-occupied');e.win32Code=183;throw e;}
+      fs.renameSync(source,destination);return;
+    }
+    if(!shellHelper)throw Error('helper-unavailable');
+    const r=await shellHelper.request('moveNoReplace',{source,destination},{timeoutMs:15000});
+    if(!r.ok){const stopped=await shellHelper.stopAndWait();if(!stopped)desktopUnsafe=true;const e=Error('move-outcome-unknown');e.unsafe=!stopped;throw e;}
+    if(!r.result?.ok){const e=Error(r.result?.reason||'move-failed');e.win32Code=r.result?.errorCode;throw e;}
+  }
+
+  function crossVolumeOptions(source,destination,desktop) {
+    const within=(candidate,root)=>{const r=path.relative(path.resolve(root),path.resolve(candidate));return r===''||(!r.startsWith('..'+path.sep)&&r!=='..'&&!path.isAbsolute(r));};
+    const stagingParents=[];
+    for(let candidate=path.dirname(source);;candidate=path.dirname(candidate)) {
+      if(![BASE,desktop,source,destination].filter(Boolean).some(root=>within(candidate,root)))stagingParents.push(candidate);
+      if(path.dirname(candidate)===candidate)break;
+    }
+    return {moveNoReplace:atomicDesktopMove,stagingParents,stagingExcludedRoots:[BASE,desktop].filter(Boolean)};
+  }
+
   async function safeDesktopMove(payload,target) {
     if(desktopUnsafe)return desktopBlocked('helper-not-stopped');
     if(desktopBusy) return desktopBlocked('busy');
@@ -705,6 +727,7 @@ function registerIpc() {
     try {
       if(!payload?.boardName || !target?.path) return desktopBlocked('unknown-board');
       const folder=guardBoard(payload.boardName), data=bf.loadBoard(folder);
+      const targetStat=fs.statSync(target.path);if(!targetStat.isDirectory())return desktopBlocked('invalid-destination');
       const meta=path.join(folder,'.okiba-board.json');
       const readMeta=()=>{try{return fs.readFileSync(meta,'utf8');}catch(e){if(e.code==='ENOENT')return null;throw e;}};
       const before=readMeta();
@@ -720,14 +743,13 @@ function registerIpc() {
         if(isLink ? !link : !ln.samePath(path.dirname(src),folder))return desktopBlocked('invalid-source');
         const st=fs.statSync(src);
         if(!st.isFile()&&!st.isDirectory())return desktopBlocked('invalid-source');
-        // Cross-volume copy/delete cannot offer this reversible move guarantee.
-        if(path.parse(path.resolve(src)).root.toLowerCase()!==path.parse(path.resolve(target.path)).root.toLowerCase())return desktopBlocked('cross-volume');
+        const crossVolume=st.dev!==targetStat.dev;
         let cell=layout.get(path.resolve(src).toLowerCase()) || (isLink ? [link.col,link.row] : data.positions[path.basename(src)]);
         if(!Array.isArray(cell)||cell.length!==2||!cell.every(Number.isInteger))return desktopBlocked('unknown-layout');
         let dest=ln.samePath(path.dirname(src),target.path)?src:bf.uniqueDestination(target.path,path.basename(src));
         if(reserved.has(dest.toLowerCase()))return desktopBlocked('duplicate-destination');reserved.add(dest.toLowerCase());
         const attr=await attrib.readHidden(src);if(!attr?.ok)return desktopBlocked('unknown-attributes');
-        planned.push({path:src,dest,name:path.basename(dest),cell,isLink,hidden:attr.hidden,identity:{dev:st.dev,ino:st.ino},renamed:false,visibilityChanged:false});
+        planned.push({path:src,dest,name:path.basename(dest),cell,isLink,hidden:attr.hidden,identity:{dev:st.dev,ino:st.ino},crossVolume,crossTx:null,recoveryPath:src,renamed:false,visibilityChanged:false});
       }
       const anchor=Array.isArray(payload.anchorCell)?payload.anchorCell:[Math.min(...planned.map(i=>i.cell[0])),Math.min(...planned.map(i=>i.cell[1]))];
       if(anchor.length!==2||!anchor.every(Number.isInteger))return desktopBlocked('unknown-anchor');
@@ -743,7 +765,22 @@ function registerIpc() {
           const st=fs.statSync(item.path);if(st.dev!==item.identity.dev||st.ino!==item.identity.ino)throw Error('source-changed');
           if(!ln.samePath(item.path,item.dest)) {
             if(fs.existsSync(item.dest))throw Error('destination-changed');
-            fs.renameSync(item.path,item.dest);item.renamed=true;
+            if(item.crossVolume){item.crossTx=createCrossVolumeMove(item.path,item.dest,crossVolumeOptions(item.path,item.dest,target.path));item.recoveryPath=item.dest;await item.crossTx.prepare();}
+            else {
+              try {await atomicDesktopMove(item.path,item.dest);item.renamed=true;item.recoveryPath=item.dest;}
+              catch(e) {
+                if(e.unsafe){item.recoveryPath=item.path+' / '+item.dest;throw e;}
+                if(e.win32Code===17||e.code==='EXDEV') {
+                  item.crossTx=createCrossVolumeMove(item.path,item.dest,crossVolumeOptions(item.path,item.dest,target.path));
+                  item.recoveryPath=item.dest;await item.crossTx.prepare();
+                } else {
+                  if(!fs.existsSync(item.path)&&fs.existsSync(item.dest)){
+                    const d=fs.statSync(item.dest);if(d.dev===item.identity.dev&&d.ino===item.identity.ino){item.renamed=true;item.recoveryPath=item.dest;}
+                  }
+                  throw e;
+                }
+              }
+            }
           }
           if(item.hidden){item.visibilityChanged=true;const a=await attrib.setHidden(item.dest,false);if(!a?.ok)throw Error('unhide-failed');}
         },
@@ -757,29 +794,35 @@ function registerIpc() {
           return r.result||{ok:false,reason:'position-unavailable'};
         },
         async commit() {
+          for(const item of planned)if(item.crossTx){try{await item.crossTx.stageSource();}finally{item.recoveryPath=item.crossTx.recoveryPaths.join(" / ");}}
           if(readMeta()!==before)throw Error('board-changed');
           if(planned.some(i=>i.isLink)) {
             const json=before===null?{version:6,positions:{},links:[],notes:[],size_percent:100}:JSON.parse(before);
             json.links=(json.links||[]).filter(l=>!planned.some(i=>i.isLink&&ln.samePath(i.path,l.path)));
             const tmp=meta+'.safe-'+process.pid+'-'+Date.now()+'.tmp';
             try {fs.writeFileSync(tmp,JSON.stringify(json,null,2),'utf8');fs.renameSync(tmp,meta);}
-            finally {if(fs.existsSync(tmp))fs.unlinkSync(tmp);}
+            finally {try{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}catch(_){}}
           }
         },
         async rollback(item) {
+          if(item.crossTx){try{await item.crossTx.rollback();}catch(e){item.recoveryPath=item.crossTx.recoveryPaths.join(" / ");throw e;}item.recoveryPath=item.path;if(item.visibilityChanged){const a=await attrib.setHidden(item.path,item.hidden);if(!a?.ok)throw Error('attributes-restore-failed');}return;}
           const current=item.renamed?item.dest:item.path;
           if(item.renamed) {
             const st=fs.statSync(current);if(st.dev!==item.identity.dev||st.ino!==item.identity.ino)throw Error('destination-changed');
             if(fs.existsSync(item.path))throw Error('original-path-occupied');
-            fs.renameSync(current,item.path);item.renamed=false;
+            await atomicDesktopMove(current,item.path);item.renamed=false;item.recoveryPath=item.path;
           }
           if(item.visibilityChanged){const a=await attrib.setHidden(item.path,item.hidden);if(!a?.ok)throw Error('attributes-restore-failed');}
         }
       }});
       if(!tx.ok){try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop '+JSON.stringify(tx)+'\n');}catch(_){}return desktopBlocked(tx.reason,tx.recovery);}
-      recordHistory(payload.boardName,{folder,positions:data.positions,links:data.links},planned.map(i=>({kind:i.isLink?'linked':'resident',destPath:i.dest,fileName:i.name,col:i.cell[0],row:i.cell[1]})),payload.groupId);
+      const warnings=[];
+      for(const item of planned)if(item.crossTx){try{const cleaned=await item.crossTx.cleanup();if(!cleaned.ok)warnings.push(cleaned);}catch(e){warnings.push({warning:String(e.message||e),recovery:item.crossTx.recoveryPaths});}}
+      for(const item of planned)if(item.crossTx){try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop cross-volume '+JSON.stringify(item.crossTx.timings)+'\n');}catch(_){}}
+      if(warnings.length){try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop cleanup '+JSON.stringify(warnings)+'\n');}catch(_){}}
+      try{recordHistory(payload.boardName,{folder,positions:data.positions,links:data.links},planned.map(i=>({kind:i.isLink?'linked':'resident',destPath:i.dest,fileName:i.name,col:i.cell[0],row:i.cell[1]})),payload.groupId);}catch(e){warnings.push({warning:"history-save-failed",recovery:planned.map(i=>i.dest)});}
       if(win&&!win.isDestroyed())win.webContents.send('fs-changed');
-      return {moved:planned.map(i=>i.path),destinations:planned.map(i=>i.dest),skipped:[],failed:[],error:null,position:{status:'ok',positioned:planned.length}};
+      return {moved:planned.map(i=>i.path),destinations:planned.map(i=>i.dest),skipped:[],failed:[],error:null,warnings,warningText:warnings.length?'元データの予備コピーが残っています: '+warnings.map(w=>w.backupPath||(w.recovery||[]).join(' / ')).join(' / '):'',position:{status:'ok',positioned:planned.length}};
     } catch(e){return desktopBlocked(String(e.message||e));}
     finally {desktopBusy=false;try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop ms plan='+planMs+' position='+positionMs+' total='+(Date.now()-started)+'\n');}catch(_){}}
   }

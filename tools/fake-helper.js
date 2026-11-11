@@ -76,6 +76,15 @@ rl.on('line', (line) => {
     });
     return;
   }
+  if (req.cmd === 'moveNoReplace') {
+    const fs=require('fs');
+    let result;
+    try {
+      if(fs.existsSync(req.destination))result={ok:false,errorCode:183,reason:'destination-exists'};
+      else {fs.renameSync(req.source,req.destination);result={ok:true,errorCode:0,reason:''};}
+    } catch(e) {result={ok:false,errorCode:e.code==='EXDEV'?17:1,reason:String(e.message)};}
+    send({id:req.id,result});return;
+  }
   if (req.cmd === 'desktopSnapshot') {
     let result = {ok:true,autoArrange:false,snap:true,sx:100,sy:100,gx:0,gy:0,
       origin:{x:0,y:0},areas:[{left:-5000,top:-5000,right:10000,bottom:10000}],icons:[]};

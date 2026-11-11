@@ -200,6 +200,14 @@ public static class OkibaDesk {
     }
   }
 
+  [DllImport("kernel32.dll", EntryPoint = "MoveFileExW", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern bool MoveFileEx(string source, string destination, uint flags);
+  public static int MoveNoReplace(string source, string destination) {
+    // Flags zero: never replace an existing path and never emulate a
+    // cross-volume move with copy/delete. MoveFileW permits that emulation.
+    return MoveFileEx(source, destination, 0) ? 0 : Marshal.GetLastWin32Error();
+  }
+
   public static bool IsSnapToGrid(IntPtr hwnd) {
     // LVM_GETEXTENDEDLISTVIEWSTYLE, LVS_EX_SNAPTOGRID (not GWL_EXSTYLE).
     return (((long)SendMessage(hwnd, LVM_FIRST + 55, IntPtr.Zero, IntPtr.Zero)) & 0x00080000L) != 0;
@@ -326,6 +334,98 @@ public static class OkibaDesk {
     SendMessage(lv, LVM_SETITEMPOSITION, (IntPtr)index, (IntPtr)lp);
   }
 }
+'@
+
+# Official Shell FolderView API. Vtable order verified against Microsoft
+# win32metadata ShObjIdl_core.h IFolderView/IFolderView2/IShellBrowser.
+Add-Type -TypeDefinition @'
+using System;
+using System.Reflection;
+using System.Runtime.InteropServices;
+public static class OkibaFolderView {
+ [ComImport,Guid("6d5140c1-7436-11ce-8034-00aa006009fa"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+ interface IServiceProvider { [PreserveSig] int QueryService(ref Guid service,ref Guid iid,out IntPtr result); }
+ [ComImport,Guid("000214e2-0000-0000-c000-000000000046"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+ interface IShellBrowser {
+  [PreserveSig] int GetWindow(out IntPtr hwnd);
+  [PreserveSig] int ContextSensitiveHelp(int enter);
+  [PreserveSig] int InsertMenusSB(IntPtr menu,IntPtr widths);
+  [PreserveSig] int SetMenuSB(IntPtr menu,IntPtr resource,IntPtr active);
+  [PreserveSig] int RemoveMenusSB(IntPtr menu);
+  [PreserveSig] int SetStatusTextSB(IntPtr text);
+  [PreserveSig] int EnableModelessSB(int enable);
+  [PreserveSig] int TranslateAcceleratorSB(IntPtr message,ushort id);
+  [PreserveSig] int BrowseObject(IntPtr pidl,uint flags);
+  [PreserveSig] int GetViewStateStream(uint mode,out IntPtr stream);
+  [PreserveSig] int GetControlWindow(uint id,out IntPtr hwnd);
+  [PreserveSig] int SendControlMsg(uint id,uint message,IntPtr wp,IntPtr lp,out IntPtr result);
+  [PreserveSig] int QueryActiveShellView(out IntPtr view);
+ }
+ [ComImport,Guid("1af3a467-214f-4298-908e-06b03e0b39f9"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+ interface IFolderView2 {
+  [PreserveSig] int GetCurrentViewMode(out uint mode);
+  [PreserveSig] int SetCurrentViewMode(uint mode);
+  [PreserveSig] int GetFolder(ref Guid iid,out IntPtr folder);
+  [PreserveSig] int Item(int index,out IntPtr pidl);
+  [PreserveSig] int ItemCount(uint flags,out int count);
+  [PreserveSig] int Items(uint flags,ref Guid iid,out IntPtr items);
+  [PreserveSig] int GetSelectionMarkedItem(out int index);
+  [PreserveSig] int GetFocusedItem(out int index);
+  [PreserveSig] int GetItemPosition(IntPtr pidl,IntPtr point);
+  [PreserveSig] int GetSpacing(IntPtr point);
+  [PreserveSig] int GetDefaultSpacing(IntPtr point);
+  [PreserveSig] int GetAutoArrange();
+  [PreserveSig] int SelectItem(int index,uint flags);
+  [PreserveSig] int SelectAndPositionItems(uint count,IntPtr pidls,IntPtr points,uint flags);
+  [PreserveSig] int SetGroupBy(IntPtr key,int ascending);
+  [PreserveSig] int GetGroupBy(IntPtr key,IntPtr ascending);
+  [PreserveSig] int SetViewProperty(IntPtr pidl,IntPtr key,IntPtr value);
+  [PreserveSig] int GetViewProperty(IntPtr pidl,IntPtr key,IntPtr value);
+  [PreserveSig] int SetTileViewProperties(IntPtr pidl,IntPtr properties);
+  [PreserveSig] int SetExtendedTileViewProperties(IntPtr pidl,IntPtr properties);
+  [PreserveSig] int SetText(int type,IntPtr text);
+  [PreserveSig] int SetCurrentFolderFlags(uint mask,uint flags);
+  [PreserveSig] int GetCurrentFolderFlags(out uint flags);
+ }
+ sealed class Session:IDisposable {
+  object windows,dispatch,browser,view;
+  public IFolderView2 Folder {get{return (IFolderView2)view;}}
+  public Session(){try{
+   windows=Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("9ba05972-f6a8-11cf-a442-00a0c90a8f39")));
+   object[] args=new object[]{0,0,8,0,1};
+   var mod=new ParameterModifier(5);mod[0]=true;mod[1]=true;mod[3]=true;
+   dispatch=windows.GetType().InvokeMember("FindWindowSW",BindingFlags.InvokeMethod,null,windows,args,new ParameterModifier[]{mod},null,null);
+   if(dispatch==null)throw new InvalidOperationException("desktop-shell-unavailable");
+   Guid service=new Guid("4c96be40-915c-11cf-99d3-00aa004ae837"),iid=typeof(IShellBrowser).GUID;
+   IntPtr ptr;
+   Marshal.ThrowExceptionForHR(((IServiceProvider)dispatch).QueryService(ref service,ref iid,out ptr));
+   try{browser=Marshal.GetObjectForIUnknown(ptr);}finally{Marshal.Release(ptr);}
+   Marshal.ThrowExceptionForHR(((IShellBrowser)browser).QueryActiveShellView(out ptr));
+   try{view=Marshal.GetObjectForIUnknown(ptr);}finally{Marshal.Release(ptr);}
+   IFolderView2 verified=Folder;
+  }catch{Dispose();throw;}}
+  public void Dispose(){
+   if(view!=null&&Marshal.IsComObject(view))Marshal.ReleaseComObject(view);
+   if(browser!=null&&Marshal.IsComObject(browser))Marshal.ReleaseComObject(browser);
+   if(dispatch!=null&&Marshal.IsComObject(dispatch))Marshal.ReleaseComObject(dispatch);
+   if(windows!=null&&Marshal.IsComObject(windows))Marshal.ReleaseComObject(windows);
+   view=browser=dispatch=windows=null;
+  }
+ }
+ // [0] FOLDERFLAGS, [1] GetAutoArrange (0=OFF,1=ON).
+ public static long[] ReadState(){using(var s=new Session()){
+  uint flags;Marshal.ThrowExceptionForHR(s.Folder.GetCurrentFolderFlags(out flags));
+  int hr=s.Folder.GetAutoArrange();
+  if(hr!=0&&hr!=1){Marshal.ThrowExceptionForHR(hr);throw new InvalidOperationException("unknown-autoarrange-state");}
+  return new long[]{flags,hr==0?1:0};
+ }}
+ // Never exposed through the normal helper protocol. Hosted CI only.
+ public static void SetFlagsForCI(uint mask,uint flags){
+  if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true"||Environment.GetEnvironmentVariable("RUNNER_OS")!="Windows"||Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT")!="github-hosted")throw new InvalidOperationException("folder-flags-setter-is-CI-only");
+  using(var s=new Session())Marshal.ThrowExceptionForHR(s.Folder.SetCurrentFolderFlags(mask,flags));
+ }
+}
+
 '@
 
 # ---- Shared listview helpers (ported from the cold script) --------
@@ -611,12 +711,15 @@ function Get-RawStrictDesktopSnapshot {
   if ($lv -eq [IntPtr]::Zero) { return @{ok=$false; reason='no-listview'} }
   $reader = New-Object OkibaDesk+Reader -ArgumentList $lv
   try {
+    try { $shellState=[OkibaFolderView]::ReadState() } catch { return @{ok=$false;reason='shell-folder-state-unavailable'} }
     $sx = [OkibaDesk]::GetSpacingX($lv); $sy = [OkibaDesk]::GetSpacingY($lv)
     if ($sx -le 0 -or $sy -le 0) { return @{ok=$false;reason='unknown-spacing'} }
     $count = [OkibaDesk]::GetItemCount($lv)
     $icons = New-Object 'System.Collections.Generic.List[object]'
     for ($i=0; $i -lt $count; $i++) {
       $label = $reader.GetText($i); $pos = $reader.GetPosition($i)
+      $labelAfter = $reader.GetText($i)
+      if ($label -cne $labelAfter) { return @{ok=$false;reason='desktop-changing';detail='index-label-changed'} }
       if ([string]::IsNullOrEmpty($label) -or $null -eq $pos) { return @{ok=$false;reason='unreadable-icon'} }
       $icons.Add(@{label=$label;x=[int]$pos[0];y=[int]$pos[1];index=$i})
     }
@@ -629,8 +732,8 @@ function Get-RawStrictDesktopSnapshot {
       @{left=[int]$tl[0];top=[int]$tl[1];right=[int]$br[0];bottom=[int]$br[1]}
     })
     if ($areas.Count -eq 0) { return @{ok=$false;reason='unknown-monitors'} }
-    return @{ok=$true;autoArrange=(([OkibaDesk]::GetWindowLong($lv,-16) -band 0x0100) -ne 0);
-      snap=[OkibaDesk]::IsSnapToGrid($lv);sx=$sx;sy=$sy;gx=$grid[0];gy=$grid[1];
+    return @{ok=$true;autoArrange=($shellState[1] -ne 0 -or ($shellState[0] -band 1) -ne 0 -or ([OkibaDesk]::GetWindowLong($lv,-16) -band 0x0100) -ne 0);
+      snap=(($shellState[0] -band 4) -ne 0);folderFlags=$shellState[0];shellAutoArrange=($shellState[1] -ne 0);sx=$sx;sy=$sy;gx=$grid[0];gy=$grid[1];
       origin=@{x=$origin[0];y=$origin[1]};areas=$areas;icons=@($icons.ToArray())}
   } finally { $reader.Dispose() }
 }
@@ -674,7 +777,11 @@ function Get-StrictTransactionState($baseline,$current,$targets) {
     $k=Strict-IconKey $i
     if($old.ContainsKey($k) -and $old[$k] -gt 0){$old[$k]--}else{$extra.Add($i)}
   }
-  foreach($v in $old.Values){if($v -ne 0){return @{ok=$false;reason='existing-icon-changed'}}}
+  foreach($key in $old.Keys){if($old[$key] -ne 0){
+    $missing=$key | ConvertFrom-Json
+    $actual=@($current.icons | Where-Object {$_.label -ceq [string]$missing[0]} | ForEach-Object {@{x=$_.x;y=$_.y}})
+    return @{ok=$false;reason='existing-icon-changed';changed=@{label=$missing[0];before=@{x=$missing[1];y=$missing[2]};after=$actual}}
+  }}
   $new=@{}
   foreach($i in $extra) {
     $matches=@()
@@ -688,6 +795,7 @@ function Get-StrictTransactionState($baseline,$current,$targets) {
   return @{ok=$true;new=$new;current=$current}
 }
 function Position-DesktopPlan($baseline,$targets,$buffer) {
+  $operation=[System.Diagnostics.Stopwatch]::StartNew()
   $targets=@($targets)
   if(-not $baseline.ok -or $baseline.autoArrange -or -not $baseline.snap -or $targets.Count -eq 0 -or -not (Strict-PointValid $buffer)) {return @{ok=$false;reason='invalid-plan'}}
   $all=@($targets)+@($buffer)
@@ -720,7 +828,7 @@ function Position-DesktopPlan($baseline,$targets,$buffer) {
         continue
       }
       $state=Get-StrictTransactionState $baseline $current $targets
-      if(-not $state.ok){return $state}
+      if(-not $state.ok){$state.phase='arrival';return $state}
       if($state.new.Count -eq $targets.Count){break}
       Start-Sleep -Milliseconds 50
     } while([DateTime]::UtcNow -lt $deadline)
@@ -728,11 +836,13 @@ function Position-DesktopPlan($baseline,$targets,$buffer) {
     if($null -eq $state -or -not $state.ok){return @{ok=$false;reason='desktop-changing'}}
     $maxSteps=$targets.Count*3+3
     for($step=0;$step -lt $maxSteps;$step++) {
+      if($operation.ElapsedMilliseconds -ge 50000){return @{ok=$false;reason='position-deadline'}}
       $unfinished=@(0..($targets.Count-1) | Where-Object {-not (Strict-Near $state.new[$_] $targets[$_])})
       if($unfinished.Count -eq 0) {
         Start-Sleep -Milliseconds 180
         $last=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) $targets
-        if(-not $last.ok -or $last.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed'}}
+        if(-not $last.ok){$last.phase='final';return $last}
+        if($last.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed';phase='final'}}
         foreach($n in 0..($targets.Count-1)){if(-not (Strict-Near $last.new[$n] $targets[$n])){return @{ok=$false;reason='late-position-change'}}}
         return @{ok=$true;positioned=$targets.Count;reason=''}
       }
@@ -749,7 +859,8 @@ function Position-DesktopPlan($baseline,$targets,$buffer) {
       # Revalidate immediately before each write, including every new icon's
       # exact current location. A user move aborts, it is never overwritten.
       $fresh=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) $targets
-      if(-not $fresh.ok -or $fresh.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed'}}
+      if(-not $fresh.ok){$fresh.phase='before-set';return $fresh}
+      if($fresh.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed';phase='before-set'}}
       foreach($k in $state.new.Keys){if(-not (Strict-Near $fresh.new[$k] $state.new[$k])){return @{ok=$false;reason='new-icon-changed'}}}
       $lv=Find-BestListView
       if($lv -eq [IntPtr]::Zero){return @{ok=$false;reason='no-listview'}}
@@ -758,11 +869,13 @@ function Position-DesktopPlan($baseline,$targets,$buffer) {
         $index=[int]$fresh.new[$chosen].index
         $label=$guard.GetText($index);$pos=$guard.GetPosition($index)
         if([OkibaDesk]::GetItemCount($lv) -ne @($fresh.current.icons).Count -or $label -cne $fresh.new[$chosen].label -or $null -eq $pos -or $pos[0] -ne $fresh.new[$chosen].x -or $pos[1] -ne $fresh.new[$chosen].y) {return @{ok=$false;reason='desktop-changed-before-write'}}
+        if($operation.ElapsedMilliseconds -ge 50000){return @{ok=$false;reason='position-deadline'}}
         [OkibaDesk]::SetItemPosition($lv,$index,[int]$destination.x,[int]$destination.y)
       } finally {$guard.Dispose()}
       Start-Sleep -Milliseconds 180
       $after=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) $targets
-      if(-not $after.ok -or $after.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed'}}
+      if(-not $after.ok){$after.phase='after-set';$after.movedName=$targets[$chosen].name;return $after}
+      if($after.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed';phase='after-set'}}
       if(-not (Strict-Near $after.new[$chosen] $destination)){return @{ok=$false;reason='position-unverified'}}
       foreach($k in $fresh.new.Keys){if($k -ne $chosen -and -not (Strict-Near $fresh.new[$k] $after.new[$k])){return @{ok=$false;reason='other-new-icon-changed'}}}
       $state=$after
@@ -796,6 +909,10 @@ while ($true) {
       'getDesktopPositions' { $result = Get-DesktopPositions ([string[]]@($req.names)) }
       'cursorState'         { $result = Get-CursorState }
       'desktopSnapshot'     { $result = Get-StrictDesktopSnapshot }
+      'moveNoReplace'        {
+        $code=[OkibaDesk]::MoveNoReplace([string]$req.source,[string]$req.destination)
+        $result=@{ok=($code -eq 0);errorCode=$code;reason=$(if($code -eq 0){''}else{'move-no-replace-failed'})}
+      }
       'positionDesktopPlan' { $result = Position-DesktopPlan $req.snapshot @($req.targets) $req.buffer }
       default               { throw "unknown-cmd: $($req.cmd)" }
     }
