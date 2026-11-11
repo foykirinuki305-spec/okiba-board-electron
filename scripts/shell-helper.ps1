@@ -1163,7 +1163,33 @@ function Strict-AreaGrid($area,$s) {
   if(($area -is [System.Collections.IDictionary] -and $area.Contains('grid')) -or $null -ne $area.PSObject.Properties['grid']) {return $area.grid}
   return @{gx=$s.gx;gy=$s.gy;sx=$s.sx;sy=$s.sy}
 }
-function Strict-IconsKey($s) { return (@($s.icons | ForEach-Object { Strict-IconKey $_ } | Sort-Object) | ConvertTo-Json -Compress) }
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Globalization;
+public static class OkibaSnapshotKey {
+ public static string Key(string[] ids,int[] xs,int[] ys){
+  if(ids==null||xs==null||ys==null||ids.Length!=xs.Length||ids.Length!=ys.Length)throw new ArgumentException("invalid-icon-arrays");
+  var seen=new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+  var rows=new string[ids.Length];
+  for(int i=0;i<ids.Length;i++){
+   if(String.IsNullOrEmpty(ids[i]))throw new ArgumentException("missing-icon-identity");
+   if(!seen.Add(ids[i]))throw new ArgumentException("duplicate-shell-identity");
+   rows[i]=ids[i].Length.ToString(CultureInfo.InvariantCulture)+":"+ids[i]+":"+xs[i].ToString(CultureInfo.InvariantCulture)+":"+ys[i].ToString(CultureInfo.InvariantCulture);
+  }
+  Array.Sort(rows,StringComparer.Ordinal);
+  var b=new StringBuilder();b.Append(rows.Length.ToString(CultureInfo.InvariantCulture)).Append(';');
+  foreach(var row in rows)b.Append(row.Length.ToString(CultureInfo.InvariantCulture)).Append(':').Append(row);
+  return b.ToString();
+ }
+}
+'@
+function Strict-IconsKey($s) {
+  # Pure canonical equality only. All raw reads and stability guards remain intact.
+  $ids=New-Object 'System.Collections.Generic.List[string]';$xs=New-Object 'System.Collections.Generic.List[int]';$ys=New-Object 'System.Collections.Generic.List[int]'
+  foreach($i in $s.icons){$ids.Add([string]$i.identity);$xs.Add([int]$i.x);$ys.Add([int]$i.y)}
+  return [OkibaSnapshotKey]::Key($ids.ToArray(),$xs.ToArray(),$ys.ToArray())
+}
 function Get-StrictDesktopSnapshotCore {
   try {
     $a=Get-RawStrictDesktopSnapshot

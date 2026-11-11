@@ -1,5 +1,8 @@
 ﻿$ErrorActionPreference='Stop'
 $source=Get-Content (Join-Path $PSScriptRoot '../scripts/shell-helper.ps1') -Raw
+$keyType=[regex]::Match($source,"(?s)Add-Type -TypeDefinition @'\r?\n(using System;\r?\nusing System.Text;.*?public static class OkibaSnapshotKey.*?)(?:\r?\n)'@")
+if(-not $keyType.Success){throw 'production-key-class-not-found'}
+Add-Type -TypeDefinition $keyType.Groups[1].Value
 $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)
 $names=@('Get-ShellSnapshotFailure','Strict-IconKey','Strict-GeometryKey','Strict-IconsKey','Get-StrictTransactionState')
 foreach($name in $names){$f=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true);Invoke-Expression $f.Extent.Text}

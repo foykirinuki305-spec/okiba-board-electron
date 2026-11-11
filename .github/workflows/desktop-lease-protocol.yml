@@ -39,6 +39,9 @@ jobs:
       - name: Truthful attribute notification contract without Shell events
         shell: pwsh
         run: powershell -NoProfile -File ./tools/hidden-notify-stub-selftest.ps1
+      - name: Canonical identity equality pure regression
+        shell: pwsh
+        run: powershell -NoProfile -File ./tools/icon-key-candidate-selftest.ps1
       - name: Batch attribute safety pure checks
         shell: pwsh
         run: powershell -NoProfile -File ./tools/lease-attribute-batch-selftest.ps1
