@@ -1,0 +1,17 @@
+'use strict';
+const fs=require('fs'),os=require('os'),path=require('path'),assert=require('assert');const {createFolderReturn,transform}=require('../lib/folder-return');
+let count=0;const check=(v,m)=>{assert(v,m);count++;};
+async function test(mode){const root=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-folder-return-unit-'));try{
+ const base=path.join(root,'base'),folder=path.join(base,'board'),dest=path.join(root,'out');fs.mkdirSync(folder,{recursive:true});fs.mkdirSync(dest);const a=path.join(folder,'a.mp4'),b=path.join(root,'b.mp4');fs.writeFileSync(a,'aaa');fs.writeFileSync(b,'bbb');
+ const data={version:6,unknown:{keep:12},positions:{'a.mp4':{col:2,row:3},other:{col:9,row:8}},links:[{path:b,col:4,row:5,wasHidden:false,unknown:7}],theme:'same'};const meta=path.join(folder,'.okiba-board.json'),raw=JSON.stringify(data);fs.writeFileSync(meta,raw);let calls=[];
+ const native=async r=>{calls.push(r.action);if(r.action==='prepare')return {ok:true,items:r.sources.map(src=>({src,dest:path.join(dest,path.basename(src)),identity:src,attributes:32})),failed:[]};
+ if(r.action==='probe')return {ok:true,results:r.items.map(i=>({...i,state:fs.existsSync(i.src)?'source':'destination',visible:true}))};
+ const results=[];for(const i of r.items){if(mode==='skip'&&i.src===b){results.push({...i,moved:false,visible:false,skipped:true});continue;}if(mode==='failed'&&i.src===b){results.push({...i,moved:false,visible:false,skipped:false,reason:'locked'});continue;}fs.renameSync(i.src,i.dest);results.push({...i,moved:true,visible:mode!=='invisible',skipped:false});if(mode==='crash')throw Error('lost-response');}return {ok:true,results};};
+ const run=createFolderReturn({base,guardBoard:n=>{if(n!=='board')throw Error('bad board');return folder;},destination:dest,callNative:native});const payload={boardName:'board',paths:[a],linkedPaths:[b]};
+ const r=await run(payload);check(r.metadataCommitted===true,'authoritative');check(JSON.parse(fs.readFileSync(meta)).unknown.keep===12,'unknown preserved');check(JSON.parse(fs.readFileSync(meta)).positions.other.col===9,'other cell preserved');
+ if(mode==='ok'){check(r.moved.length===2);check(!fs.existsSync(a)&&!fs.existsSync(b));const d=JSON.parse(fs.readFileSync(meta));check(!d.positions['a.mp4']&&d.links.length===0);check(!fs.existsSync(path.join(base,'.folder-return-pending.json')));}
+ if(mode==='skip'||mode==='failed'){check(r.moved.length===1);check(fs.existsSync(b));check(JSON.parse(fs.readFileSync(meta)).links[0].unknown===7);check((mode==='skip'?r.skipped:r.failed).includes(b));}
+ if(mode==='crash'){check(r.pendingVerification===true);check(fs.existsSync(path.join(dest,'a.mp4')));check(fs.readFileSync(meta,'utf8')===raw);await run({...payload,paths:[],linkedPaths:[]});const d=JSON.parse(fs.readFileSync(meta));check(!d.positions['a.mp4']&&d.links.length===1,'recovery only moved');check(!fs.existsSync(path.join(base,'.folder-return-pending.json')));}
+ if(mode==='invisible'){check(r.pendingVerification===true);check(fs.readFileSync(meta,'utf8')===raw);}
+ }finally{if(!path.basename(root).startsWith('okiba-folder-return-unit-'))throw Error('bad cleanup');fs.rmSync(root,{recursive:true,force:true});}}
+(async()=>{for(const m of ['ok','skip','failed','crash','invisible'])await test(m);const x={positions:{a:{col:1}},links:[],custom:42};check(JSON.parse(transform(JSON.stringify(x),[])).custom===42);console.log('folder-return selftest '+count+' PASS');})().catch(e=>{console.error(e);process.exitCode=1;});

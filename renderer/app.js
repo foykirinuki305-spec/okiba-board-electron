@@ -624,7 +624,7 @@ function renderBoard() {
             { label: '名前を変更', action: () => renameLinkedFlow(key, link) },
             { label: '場所を開く', action: () => api.showItem(fullPath) },
             { label: '原本を残してコピー…', action: () => copySelectionOut() },
-            { label: 'デスクトップへ移動', action: () => moveLinkedToDesktopFlow([fullPath]) },
+            { label: '戻し先フォルダへ移動', action: () => moveLinkedToDesktopFlow([fullPath]) },
             { label: 'ボードから外す', action: () => unlinkFlow([fullPath]) },
             { label: 'ファイルをゴミ箱へ削除', danger: true, action: async () => {
                 await api.trashLinked(boardData.name, fullPath); refreshBoard();
@@ -637,7 +637,7 @@ function renderBoard() {
           { label: '名前を変更', action: () => renameItemFlow(key, fullPath, label) },
           { label: '場所を開く', action: () => api.showItem(fullPath) },
             { label: '原本を残してコピー…', action: () => copySelectionOut() },
-          { label: 'デスクトップへ移動', action: async () => {
+          { label: '戻し先フォルダへ移動', action: async () => {
               const result=await api.safeTakeout({boardName:boardData.name,paths:[fullPath],linkedPaths:[],layout:[{path:fullPath,cell:cells.get(key)}]}); if(result?.error)toast(result.error,15000);else if(result?.warningText)toast(result.warningText,15000); refreshBoard();
             } },
           { label: 'ゴミ箱へ削除', danger: true, action: async () => {

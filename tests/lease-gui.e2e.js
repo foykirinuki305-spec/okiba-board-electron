@@ -1,3 +1,4 @@
+// Legacy Desktop-placement regression; normal folder-return is tested separately.
 'use strict';
 if(process.platform!=='win32'||process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Windows'||process.env.RUNNER_ENVIRONMENT!=='github-hosted')throw Error('GUI lease test is hosted Windows CI only; no real user Desktop');
 const fs=require('fs'),os=require('os'),path=require('path'),assert=require('assert/strict');
@@ -25,7 +26,7 @@ async function scenario(mode){
  const log=path.join(temp,'lease.jsonl');const records=()=>fs.existsSync(log)?fs.readFileSync(log,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse):[];
  const snapshot={ok:true,identityVersion:1,autoArrange:false,snap:true,sx:100,sy:100,gx:0,gy:0,origin:{x:0,y:0},areas:[{left:0,top:0,right:3000,bottom:2000,grid:{gx:0,gy:0,sx:100,sy:100}}],icons:[{identity:'old-sentinel',label:'sentinel.txt',path:sentinel,x:2000,y:1000}]};
  if(mode==='drag-occupied')snapshot.icons.push({identity:'occupied-second-cell',label:'guard.txt',path:path.join(desktop,'guard.txt'),x:500,y:600});
- const env={...process.env,OKIBA_BASE:base,OKIBA_OLD_BASE:old,OKIBA_SHORTCUT_DESKTOP:desktop,OKIBA_CLEANUP_DESKTOP:desktop,OKIBA_CLEANUP_DOWNLOADS:desktop,OKIBA_TEST_DESKTOP_DIR:desktop,OKIBA_TEST_HOOKS:'1',OKIBA_TEST_ATTRIB:'stub',OKIBA_TEST_HELPER:'fake',OKIBA_TEST_SNAP_LEASE:'1',OKIBA_TEST_POSITIONER:'',OKIBA_TEST_RESOLVER_DIR:'',OKIBA_FAKE_LANDING:desktop,OKIBA_FAKE_TYPE:'desktop',OKIBA_TEST_DESKTOP_SNAPSHOT:JSON.stringify(snapshot),OKIBA_FAKE_LEASE:'1',OKIBA_FAKE_LEASE_ROOT:temp,OKIBA_FAKE_LEASE_LOG:log,OKIBA_FAKE_LEASE_MODE:isDrag?'success':mode,ELECTRON_DISABLE_SECURITY_WARNINGS:'1'};
+ const env={...process.env,OKIBA_BASE:base,OKIBA_OLD_BASE:old,OKIBA_SHORTCUT_DESKTOP:desktop,OKIBA_CLEANUP_DESKTOP:desktop,OKIBA_CLEANUP_DOWNLOADS:desktop,OKIBA_TEST_DESKTOP_DIR:desktop,OKIBA_TEST_HOOKS:'1',OKIBA_TEST_RETURN_MODE:'legacy',OKIBA_TEST_ATTRIB:'stub',OKIBA_TEST_HELPER:'fake',OKIBA_TEST_SNAP_LEASE:'1',OKIBA_TEST_POSITIONER:'',OKIBA_TEST_RESOLVER_DIR:'',OKIBA_FAKE_LANDING:desktop,OKIBA_FAKE_TYPE:'desktop',OKIBA_TEST_DESKTOP_SNAPSHOT:JSON.stringify(snapshot),OKIBA_FAKE_LEASE:'1',OKIBA_FAKE_LEASE_ROOT:temp,OKIBA_FAKE_LEASE_LOG:log,OKIBA_FAKE_LEASE_MODE:isDrag?'success':mode,ELECTRON_DISABLE_SECURITY_WARNINGS:'1'};
  if(isResident)env.OKIBA_TEST_RESIDENT_LEASE='1';
  if(mode==='legacy-abort')env.OKIBA_FAKE_PLAN_FAIL='1';
  if(mode==='legacy-concurrent')env.OKIBA_FAKE_POSITION_DELAY_MS='2500';

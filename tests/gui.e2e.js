@@ -183,6 +183,8 @@ async function main() {
     OKIBA_TEST_RESOLVER_DIR: landing,
     OKIBA_TEST_POSITIONER: 'stub',
     OKIBA_TEST_HOOKS: '1',
+    // Explicit legacy Desktop-placement regression; normal route is packaged-folder-return.e2e.js.
+    OKIBA_TEST_RETURN_MODE: 'legacy',
     ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
   };
   const launch = (extraEnv) => electron.launch({

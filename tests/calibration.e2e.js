@@ -1,3 +1,4 @@
+// Legacy Desktop-placement regression; normal folder-return is tested separately.
 'use strict';
 const fs=require('fs'),os=require('os'),path=require('path');
 const {_electron:electron}=require('playwright');const ROOT=path.join(__dirname,'..');
@@ -11,7 +12,7 @@ async function scenario(mode){
  fs.writeFileSync(path.join(base,'.home.json'),JSON.stringify({appVersion:'2.2.6',positions:{Calibration:{col:0,row:0}},theme:'light'}));
  const before=fs.readFileSync(meta,'utf8'),log=path.join(tmp,'commands.jsonl');
  const snapshot={ok:true,autoArrange:false,snap:true,sx:100,sy:100,gx:0,gy:0,viewDpi:96,origin:{x:0,y:0},areas:[{left:0,top:0,right:1800,bottom:1500,scale:100,grid:{sx:100,sy:100,gx:0,gy:0}},{left:2000,top:0,right:4000,bottom:1600,scale:100,grid:null}],icons:[{label:'sentinel.txt',x:100,y:100}]};
- const env={...process.env,OKIBA_BASE:base,OKIBA_OLD_BASE:old,OKIBA_SHORTCUT_DESKTOP:desktop,OKIBA_CLEANUP_DESKTOP:desktop,OKIBA_CLEANUP_DOWNLOADS:desktop,OKIBA_TEST_DESKTOP_DIR:desktop,OKIBA_TEST_HOOKS:'1',OKIBA_TEST_ATTRIB:'stub',OKIBA_TEST_HELPER:'fake',OKIBA_TEST_POSITIONER:'',OKIBA_TEST_RESOLVER_DIR:'',OKIBA_FAKE_LANDING:desktop,OKIBA_FAKE_TYPE:'desktop',OKIBA_TEST_DESKTOP_SNAPSHOT:JSON.stringify(snapshot),OKIBA_FAKE_CALIBRATION:'1',OKIBA_FAKE_COMMAND_LOG:log,OKIBA_FAKE_CALIBRATION_FAIL:mode==='calibration-fail'?'1':'0',OKIBA_FAKE_CALIBRATION_BAD_SAMPLE:mode==='bad-sample'?'1':'0',OKIBA_FAKE_PLAN_FAIL:mode==='position-fail'?'1':'0',ELECTRON_DISABLE_SECURITY_WARNINGS:'1'};
+ const env={...process.env,OKIBA_BASE:base,OKIBA_OLD_BASE:old,OKIBA_SHORTCUT_DESKTOP:desktop,OKIBA_CLEANUP_DESKTOP:desktop,OKIBA_CLEANUP_DOWNLOADS:desktop,OKIBA_TEST_DESKTOP_DIR:desktop,OKIBA_TEST_HOOKS:'1',OKIBA_TEST_RETURN_MODE:'legacy',OKIBA_TEST_ATTRIB:'stub',OKIBA_TEST_HELPER:'fake',OKIBA_TEST_POSITIONER:'',OKIBA_TEST_RESOLVER_DIR:'',OKIBA_FAKE_LANDING:desktop,OKIBA_FAKE_TYPE:'desktop',OKIBA_TEST_DESKTOP_SNAPSHOT:JSON.stringify(snapshot),OKIBA_FAKE_CALIBRATION:'1',OKIBA_FAKE_COMMAND_LOG:log,OKIBA_FAKE_CALIBRATION_FAIL:mode==='calibration-fail'?'1':'0',OKIBA_FAKE_CALIBRATION_BAD_SAMPLE:mode==='bad-sample'?'1':'0',OKIBA_FAKE_PLAN_FAIL:mode==='position-fail'?'1':'0',ELECTRON_DISABLE_SECURITY_WARNINGS:'1'};
  let app;const launch=()=>electron.launch({args:[ROOT,'--no-sandbox','--user-data-dir='+path.join(tmp,'profile')],env,timeout:60000});
  const records=()=>fs.existsSync(log)?fs.readFileSync(log,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse):[];
  try {

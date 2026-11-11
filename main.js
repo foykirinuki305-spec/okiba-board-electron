@@ -15,6 +15,7 @@ const pr = require('./lib/preresolve');
 const dragCoords = require('./lib/dragcoords');
 const desktopPreviewPolicy = require('./lib/desktop-preview-policy');
 function leasePreview(){return desktopPreviewPolicy.enabled({isPackaged:app.isPackaged,platform:process.platform,env:process.env});}
+function legacyDesktopTest(){return process.env.OKIBA_TEST_HOOKS==='1'&&process.env.OKIBA_TEST_RETURN_MODE==='legacy';}
 function unknownLeasePreview(){return desktopPreviewPolicy.unknownEnabled({isPackaged:app.isPackaged,platform:process.platform,env:process.env});}
 
 // Hidden-attribute runner for linked items (v2.0). Real attrib.exe
@@ -335,6 +336,33 @@ function guardBoard(name) {
 }
 
 function registerIpc() {
+  // Desktop drops go to a user-selected normal folder; no copies or icon placement.
+  let folderReturnBusy=false;
+  async function returnToFolder(payload){
+    const empty={moved:[],destinations:[],failed:[],skipped:[],metadataCommitted:true};
+    if(folderReturnBusy)return {...empty,error:'移動処理中です。完了まで待ってください。'};
+    folderReturnBusy=true;
+    try{
+      const config=path.join(BASE,'.folder-return.json');let dir=null;
+      if(process.env.OKIBA_TEST_HOOKS==='1'&&process.env.OKIBA_TEST_RETURN_FOLDER)dir=path.resolve(process.env.OKIBA_TEST_RETURN_FOLDER);
+      else {try{dir=JSON.parse(fs.readFileSync(config,'utf8')).destination;}catch(_){}
+        if(dir&&!fs.existsSync(path.join(BASE,'.folder-return-pending.json'))){try{if(!fs.statSync(dir).isDirectory())dir=null;}catch(_){dir=null;}}
+        if(!dir){const selected=await dialog.showOpenDialog(win,{title:'コピーせず移動する戻し先フォルダを選択',buttonLabel:'このフォルダに移動',defaultPath:app.getPath('documents'),properties:['openDirectory']});
+          if(selected.canceled||!selected.filePaths?.length)return {...empty,canceled:true};dir=selected.filePaths[0];
+          if(!path.isAbsolute(dir))throw Error('invalid-return-folder');
+          // Save only after the destination has been validated below.
+        }
+      }
+      const canonical=fs.realpathSync.native(dir), forbidden=[app.getPath('desktop'),path.join(process.env.PUBLIC||'C:\\Users\\Public','Desktop'),BASE];
+      if(forbidden.some(p=>path.resolve(p).toLowerCase()===canonical.toLowerCase())||canonical.toLowerCase().startsWith(path.resolve(BASE).toLowerCase()+path.sep))throw Error('デスクトップ直下やボード以外の通常フォルダを選んでください');
+      if(process.env.OKIBA_TEST_HOOKS!=='1')require('./lib/folder-return').atomic(config,JSON.stringify({destination:canonical},null,2));
+      const run=require('./lib/folder-return').createFolderReturn({base:BASE,guardBoard,destination:canonical,forbidden,
+        scriptPath:path.join(app.isPackaged?process.resourcesPath:__dirname,'scripts','folder-return.ps1'),
+        onDone:async target=>{if(win&&!win.isDestroyed())win.webContents.send('fs-changed');if(process.env.OKIBA_TEST_HOOKS!=='1')await shell.openPath(target);},
+      });
+      return await run(payload);
+    }catch(e){return {...empty,error:'移動先を確認できません。'+String(e.message||e)};}finally{folderReturnBusy=false;}
+  }
   ipcMain.handle('get-home', async () => boardsState());
   ipcMain.handle('get-board', (_e, name) => {
     guardBoard(name);
@@ -1035,9 +1063,9 @@ function registerIpc() {
     } catch(e){if(legacyReserveRequested&&!legacySettled)return pendingLeaseResult('legacy-reservation-unconfirmed: '+String(e.message||e));return desktopBlocked(String(e.message||e));}
     finally {if(legacyReserveRequested&&!legacySettled)desktopLeasePending=true;legacyHelperState=null;desktopBusy=false;try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop ms plan='+planMs+' position='+positionMs+' total='+(Date.now()-started)+'\n');}catch(_){}}
   }
-  ipcMain.handle('safe-takeout',(_e,payload)=>safeDesktopMove({...payload,automatic:true},{type:'desktop',path:desktopReturnDir()}));
+  ipcMain.handle('safe-takeout',(_e,payload)=>(leasePreview()||legacyDesktopTest())?safeDesktopMove({...payload,automatic:true},{type:'desktop',path:desktopReturnDir()}):returnToFolder(payload));
 
-  ipcMain.handle('move-linked-to-desktop', (_e, boardName, paths, groupId) => safeDesktopMove({boardName,linkedPaths:paths,paths:[],groupId,automatic:true},{type:'desktop',path:desktopReturnDir()}));
+  ipcMain.handle('move-linked-to-desktop', (_e, boardName, paths, groupId) => (leasePreview()||legacyDesktopTest())?safeDesktopMove({boardName,linkedPaths:paths,paths:[],groupId,automatic:true},{type:'desktop',path:desktopReturnDir()}):returnToFolder({boardName,linkedPaths:paths,paths:[],groupId}));
   ipcMain.handle('trash-linked', async (_e, boardName, targetPath) => {
     const folder = guardBoard(boardName);
     // Explicit REAL-file delete (distinct from ボードから外す）:
@@ -1525,7 +1553,7 @@ function registerIpc() {
       if (target?.error) result.error = target.error;
       dropLog.push({ kind: 'resolve', x, y, target, pre: resolveStage === 'pre' });
       if(target?.type==='desktop' && target.path) {
-        const tm=Date.now();const strict=await safeDesktopMove({...payload,automatic:false},target);moveMs=Date.now()-tm;
+        const tm=Date.now();const strict=(leasePreview()||legacyDesktopTest())?await safeDesktopMove({...payload,automatic:false},target):await returnToFolder(payload);moveMs=Date.now()-tm;
         dropLog.push({kind:'safe-desktop',ok:!strict.error,reason:strict.reason||null});
         writeTiming();return {...result,...strict,resolved:target};
       }
