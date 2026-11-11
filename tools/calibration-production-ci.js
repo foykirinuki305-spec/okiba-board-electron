@@ -24,7 +24,10 @@ async function main(){
   const known=baseline.areas[0].grid;assert(known,'runner reference grid must be known');
   const name=tag+'-probe.txt',dest=path.join(desktop,name);owned.push(dest);
   const unknown=clone(baseline);unknown.areas[0].grid=null;
-  const plan=planCalibration({snapshot:unknown,areaIndex:0,probeId:dest,maxSpacing:{x:96,y:112},step:8});assert(plan.ok,'No guarded empty patch '+JSON.stringify(plan));
+  const ratio=Math.max(1,unknown.areas[0].scale*96/(unknown.viewDpi*100));
+  const maxSpacing={x:Math.ceil(unknown.sx*ratio*1.25),y:Math.ceil(unknown.sy*ratio*1.25)};
+  const plan=planCalibration({snapshot:unknown,areaIndex:0,probeId:dest,maxSpacing});assert(plan.ok,'No guarded empty patch '+JSON.stringify(plan));
+  note('production-plan',{maxSpacing,step:plan.step,requestCount:plan.requests.length,patch:plan.patch});
   fs.writeFileSync(dest,'probe content');
   const start=Date.now(),result=await req(c,'calibrateDesktopGrid',{snapshot:unknown,probe:{path:dest,name},plan});
   assert(result.ok,'Production calibration failed '+JSON.stringify(result));
