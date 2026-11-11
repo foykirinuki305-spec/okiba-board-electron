@@ -6,6 +6,10 @@ on:
       - 'tools/formal-unknown-*'
       - 'lib/desktop-unknown-*'
       - 'scripts/unknown-grid-*'
+      - 'scripts/snap-lease.ps1'
+      - 'scripts/shell-helper.ps1'
+      - 'lib/desktop-lease-*'
+      - 'package.json'
       - '.github/workflows/formal-unknown-dpi-empty.yml'
 jobs:
   isolated:

@@ -77,14 +77,54 @@ function Resident-RevealPlace($r){
  Measure-LeaseStep 'settle' {Start-Sleep -Milliseconds 180};$s=Measure-LeaseStep 'afterguard' {Lease-Snapshot};Measure-LeaseStep 'exactGuard' {$null=Lease-Guard $r $s $true};$null=Resident-All $r 'moved';if([uint32]$s.folderFlags -ne $off){throw 'resident-flags-changed'}
  return @{ok=$true;oldUnchanged=$true;targetsExact=$true;snapRestored=$false}
 }
+# Only post-rollback disappearance observation may tolerate this exact Shell read failure.
+# Never used during movement, restoration, release, or ordinary active placement.
+function Resident-IsDisappearanceReadFailure($errorRecord){
+ $e=$errorRecord.Exception
+ while($null -ne $e){
+  $f=$e.Data['snapshotFailure']
+  if($null -ne $f){return ($f.reason -ceq 'shell-snapshot-error' -and $f.hresult -ceq '0x80004005' -and $f.errorType -ceq 'System.Runtime.InteropServices.COMException' -and [string]$f.detail -cmatch 'ReadShellBatch')}
+  $e=$e.InnerException
+ }
+ return $false
+}
+function Resident-AssertRestoredSources($r){
+ # Locate verifies both parent chains, volume, file ID, size/mtime and destination absence.
+ foreach($i in $r.residentRecords){$n=Resident-Locate $i;if($n.state -cne 'unmoved' -or [uint32]$n.record.attributes -ne [uint32]$i.originalAttributes){throw 'resident-source-not-restored'}}
+}
+function Resident-WaitRestoredInvisible($r,[uint32]$expectedFlags){
+ $until=[DateTime]::UtcNow.AddSeconds(15);$stable=0;$failures=0
+ for($attempt=0;$attempt -lt 100 -and [DateTime]::UtcNow -lt $until;$attempt++){
+  Resident-AssertRestoredSources $r
+  # Fast native check also rejects Explorer replacement and external flag changes.
+  Lease-AssertFastOff $r $expectedFlags
+  try{$s=Lease-Snapshot}catch{
+   if(-not (Resident-IsDisappearanceReadFailure $_)){throw}
+   $stable=0;$failures++
+   if($null -eq $r.disappearanceReadFailures){$r.disappearanceReadFailures=@()}
+   $r.disappearanceReadFailures+=,@{phase='post-restored-disappearance';attempt=$attempt;detail=$_.Exception.Message;failure=$_.Exception.Data['snapshotFailure']}
+   if($failures -gt 3){throw}
+   # This is read-only recovery. No rename, hidden setter, or flag restoration here.
+   Resident-AssertRestoredSources $r;Lease-AssertFastOff $r $expectedFlags
+   Start-Sleep -Milliseconds 100;continue
+  }
+  $selected=Lease-Guard $r $s
+  if([uint32]$s.folderFlags -ne $expectedFlags){throw 'resident-disappearance-flags-changed'}
+  Resident-AssertRestoredSources $r
+  if($selected.Count -eq 0){$stable++}else{$stable=0}
+  if($stable -ge 2){return $s}
+  Start-Sleep -Milliseconds 100
+ }
+ throw 'resident-disappearance-timeout'
+}
 function Resident-Rollback($r){
- Resident-Validate $r (Lease-Snapshot)
+ $initial=Lease-Snapshot;Resident-Validate $r $initial;$expectedFlags=[uint32]$initial.folderFlags
  foreach($i in $r.residentRecords){
   $null=Lease-Guard $r (Lease-Snapshot);$n=Resident-Locate $i
   if($n.state -ceq 'moved'){$null=[OkibaResidentFiles]::RestoreMoved($i.destination,$i.source,$i.identity,$i.size,$i.mtime,[uint32]$i.originalAttributes,$i.sourceParentID,$i.destParentID)}
   else{$null=[OkibaResidentFiles]::RestoreUnmoved($i.source,$i.identity,$i.size,$i.mtime,[uint32]$i.originalAttributes,$i.sourceParentID)}
  }
- $null=Resident-All $r 'unmoved';$s=Lease-WaitVisibility $r $false;Lease-AllGrid $r.snapshot $s
+ $null=Resident-All $r 'unmoved';$s=Resident-WaitRestoredInvisible $r $expectedFlags;Lease-AllGrid $r.snapshot $s
  if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){Lease-SetSnap $r $s $true}
  Start-Sleep -Milliseconds 250;$s=Lease-Snapshot;$null=Lease-Guard $r $s;if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){throw 'resident-rollback-flags-unverified'}
  foreach($i in $r.residentRecords){$n=Resident-Locate $i;if($n.state -cne 'unmoved' -or [uint32]$n.record.attributes -ne [uint32]$i.originalAttributes){throw 'resident-source-not-restored'}}
