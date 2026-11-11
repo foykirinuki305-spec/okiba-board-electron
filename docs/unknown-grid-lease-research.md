@@ -150,3 +150,11 @@ New research-only files: `tools/unknown-grid-lease-flow-ci.js`, `tools/unknown-g
 Pure mocks cover journal-before-mutation ordering, invalid phase, owner exit refusing further samples, lost reply preserving recovery intent, payload token override prevention, and refusal to release the global lock if native release is unverified. Generated-copy JavaScript and PowerShell parse successfully; native extension has not been executed locally or validated in hosted CI yet.
 
 Prepare is strictly read-only with respect to Desktop/files: identity and snapshot checks plus helper-local state creation only. A transport-uncertain prepare can release reservation only under that guarantee and after the native adapter's confirmed-stop/restart handling; no reveal, flags or position mutation is allowed in prepare. Later uncertain mutations retain their durable intent and are recovered by abort. Abort marks restoration attempted before native recovery; fresh-helper abort-only adoption applies the existing conservative restoration-state check rather than blindly toggling snap after a lost restore reply.
+
+### CI fixture recovery follow-up (9815690)
+
+The first hosted run failed in the copy destination guard before creating the observer or executing any of the four native cases (empty events array). Canonical TEMP had a long path while the destination retained a Windows 8.3 alias. Both existing paths are now canonicalized, all owned components must have the dedicated prefix, the canonical parent must match, and junction/symlink and nonempty-copy checks remain. Cleanup uses the same guard. Pure alias/escape regressions are wired into the workflow.
+
+Owner-death cases now pin the watchdog birth before terminating the owned owner process, then require watchdog and all reported helper PID/birth pairs to exit after the terminal journal and before checking or cleaning owned files. Unconfirmed termination sets unsafe and withholds cleanup.
+
+Conservative abort limitation: restoreAttempted is persisted before the abort RPC. If that RPC fails before even its read-only validation, an adopted OFF state can be blocked because the persisted state cannot distinguish an unexecuted read from an attempted restoration. This is an explicit fail-closed limitation, not a successful recovery. Calibration ON itself does not set restoreAttempted or restored.

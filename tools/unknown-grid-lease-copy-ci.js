@@ -1,10 +1,25 @@
 // Builds a disposable copy; never edits the source runtime. Does not execute it.
 'use strict';const fs=require('fs'),path=require('path'),os=require('os'),assert=require('assert/strict');
 function replaceOnce(s,from,to){assert.equal(s.split(from).length-1,1,'unique patch anchor required: '+from.slice(0,80));return s.replace(from,to);}
+// Canonicalize both sides: Windows TEMP may use an 8.3 alias. Every owned
+// component must remain below canonical TEMP; junctions/symlinks are rejected.
+function ownedTempDirectory(destination,{empty=false,io=fs,paths=path,temp=os.tmpdir()}={}){
+ const canonicalTemp=io.realpathSync.native(temp),canonical=io.realpathSync.native(destination);
+ const relative=paths.relative(canonicalTemp,canonical);
+ assert(relative&&!paths.isAbsolute(relative)&&relative.split(paths.sep).every(n=>n.startsWith('okiba-unknown-ci-')),'owned temp destination only');
+ let current=canonicalTemp;
+ for(const component of relative.split(paths.sep)){
+  current=paths.join(current,component);const st=io.lstatSync(current);
+  assert(st.isDirectory()&&!st.isSymbolicLink(),'owned real directory only');
+ }
+ const original=io.lstatSync(destination);assert(original.isDirectory()&&!original.isSymbolicLink(),'owned real directory only');
+ const parent=io.realpathSync.native(paths.dirname(destination));
+ assert.equal(paths.relative(parent,canonical),paths.basename(canonical),'canonical parent mismatch');
+ if(empty)assert.equal(io.readdirSync(canonical).length,0,'empty owned temp only');
+ return canonical;
+}
 function build(root,destination){
- root=path.resolve(root);destination=path.resolve(destination);const temp=fs.realpathSync.native(os.tmpdir());
- assert(destination.startsWith(temp+path.sep)&&path.basename(destination).startsWith('okiba-unknown-ci-'),'owned temp destination only');
- assert(fs.existsSync(destination)&&fs.readdirSync(destination).length===0,'empty owned temp only');
+ root=path.resolve(root);destination=ownedTempDirectory(destination,{empty:true});
  for(const name of ['lib','scripts'])fs.cpSync(path.join(root,name),path.join(destination,name),{recursive:true});
  fs.copyFileSync(path.join(root,'tools/unknown-grid-lease-flow-ci.js'),path.join(destination,'lib/unknown-grid-lease-flow-ci.js'));
  fs.copyFileSync(path.join(root,'tools/unknown-grid-lease-native-ci.ps1'),path.join(destination,'scripts/unknown-grid-lease-ci.ps1'));
@@ -31,4 +46,4 @@ async function dispatch(method,args=[]){`);
  fs.writeFileSync(path.join(destination,'lib/desktop-lease-watchdog.js'),watchdog);
  return {root:destination,helper:path.join(destination,'scripts/shell-helper.ps1'),client:path.join(destination,'lib/desktop-lease-client.js'),scope:'probe/sample/abort prototype only; no unknown success commit support'};
 }
-module.exports={build};
+module.exports={build,ownedTempDirectory};

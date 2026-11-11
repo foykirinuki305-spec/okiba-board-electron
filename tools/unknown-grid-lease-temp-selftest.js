@@ -1,0 +1,15 @@
+'use strict';
+const assert=require('assert/strict'),paths=require('path').win32;
+const {ownedTempDirectory}=require('./unknown-grid-lease-copy-ci');
+const temp='C:\\Users\\RunnerAdmin\\AppData\\Local\\Temp',alias='C:\\Users\\RUNNER~1\\AppData\\Local\\Temp';
+let contents=[],symlink=false;
+const io={realpathSync:{native:p=>paths.normalize(p).replace(/C:\\Users\\RUNNER~1/i,'C:\\Users\\RunnerAdmin')},lstatSync:()=>({isDirectory:()=>true,isSymbolicLink:()=>symlink}),readdirSync:()=>contents};
+const check=(p,empty=false)=>ownedTempDirectory(p,{paths,io,temp,empty});
+const leaf='okiba-unknown-ci-abc',nested=leaf+'\\okiba-unknown-ci-copy';
+assert.equal(check(alias+'\\'+nested,true),temp+'\\'+nested);
+assert.equal(check(temp+'\\'+leaf),temp+'\\'+leaf);
+assert.equal(ownedTempDirectory(temp+'\\'+leaf,{paths,io,temp:alias}),temp+'\\'+leaf);
+for(const bad of [temp,temp+'-evil\\'+leaf,'D:\\'+leaf,temp+'\\other\\'+leaf,temp+'\\'+leaf+'\\..\\other'])assert.throws(()=>check(bad));
+contents=['file'];assert.throws(()=>check(alias+'\\'+nested,true));assert.equal(check(alias+'\\'+nested),temp+'\\'+nested);
+contents=[];symlink=true;assert.throws(()=>check(alias+'\\'+nested));
+console.log('PASS canonical TEMP aliases, nested owned copy, cleanup nonempty, escape and symlink rejection');
