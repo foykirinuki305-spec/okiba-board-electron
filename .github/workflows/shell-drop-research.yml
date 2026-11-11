@@ -1,0 +1,36 @@
+name: shell-drop-native-research
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/shell-drag-loop-ci.cs'
+      - 'tools/shell-drag-loop-ci.ps1'
+      - 'tools/shell-drop-native-ci.js'
+      - 'tools/shell-drop-native-selftest.js'
+      - '.github/workflows/shell-drop-research.yml'
+jobs:
+  isolated:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [resident, hidden, cancel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: node tools/shell-drop-native-selftest.js
+      - name: Compile only
+        shell: powershell
+        run: Add-Type -Path tools/shell-drag-loop-ci.cs -ReferencedAssemblies System.Windows.Forms,System.Drawing
+      - name: Disposable real Shell drag; no file cleanup or old-icon restoration
+        env:
+          OKIBA_SHELL_DROP_CASE: ${{ matrix.kind }}
+        run: node tools/shell-drop-native-ci.js
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shell-drop-${{ matrix.kind }}-evidence
+          path: shell-drop-evidence/**
