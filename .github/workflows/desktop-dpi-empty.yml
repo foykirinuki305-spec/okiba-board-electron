@@ -1,0 +1,30 @@
+name: desktop-dpi-empty-native
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/desktop-dpi-empty-*'
+      - '.github/workflows/desktop-dpi-empty.yml'
+jobs:
+  isolated:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Pure fixture allowlist
+        run: node tools/desktop-dpi-empty-selftest.js
+      - name: Single actual 150 empty fixture only
+        shell: powershell
+        run: ./tools/desktop-dpi-empty-ci.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-dpi-empty-evidence
+          path: |
+            dpi-empty-*.json
+            desktop-dpi-ui-ci.json
+            unknown-grid-success-ci.json
+            unknown-grid-success-journals/**
