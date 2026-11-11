@@ -1,5 +1,6 @@
 'use strict';
 if(process.platform!=='win32'||process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Windows'||process.env.RUNNER_ENVIRONMENT!=='github-hosted')throw Error('Hosted Windows CI only');
+const {stableSnapshot}=require('./stable-snapshot-ci');
 const fs=require('fs'),os=require('os'),path=require('path'),assert=require('assert/strict'),crypto=require('crypto'),{execFile,fork}=require('child_process'),{promisify}=require('util');
 const {createDesktopLeaseClient}=require('../lib/desktop-lease-client'),{createShellHelperClient}=require('../lib/shellhelper'),{runLease}=require('../lib/desktop-snap-lease-controller'),{planDesktop,sameSnapshot}=require('../lib/safe-desktop');
 const root=path.resolve(__dirname,'..'),desktop=path.resolve(process.argv[2]),run=promisify(execFile),report={passed:false,cleanupVerified:false,cases:[],scope:'Hosted native resident new kind; main default unchanged'};
@@ -7,18 +8,21 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms)),hash=b=>crypto.createHash('sha2
 async function main(){
  const temp=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'okiba-resident-ci-'))),tag='OkibaResident-'+crypto.randomBytes(8).toString('hex'),owned=[],hosts=[];
  const observer=createShellHelperClient({command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(root,'scripts/shell-helper.ps1')],timeoutMs:20000});
- let client=null,unsafe=false,baseline;
- async function snapshot(){const r=await observer.request('desktopSnapshot');assert(r.ok&&r.result?.ok,JSON.stringify(r));return r.result;}
+ let client=null,unsafe=false,baseline,policy=null;
  function oldGuard(s){if(baseline){for(const i of baseline.icons)assert(s.icons.some(n=>n.identity===i.identity&&n.x===i.x&&n.y===i.y),'existing icon changed');assert.equal(s.folderFlags,baseline.folderFlags);}}
- async function stable(){let previous;for(let i=0;i<100;i++){const s=await snapshot();oldGuard(s);if(previous&&sameSnapshot(previous,s))return s;previous=s;await sleep(100);}throw Error('unstable snapshot');}
+ async function stable(){return stableSnapshot({read:()=>observer.request('desktopSnapshot'),guard:oldGuard,same:sameSnapshot,sleep});}
  async function attributes(paths,desired){const code="$ErrorActionPreference='Stop';$paths=ConvertFrom-Json $env:OKIBA_OWN_PATHS;foreach($p in $paths){if($env:OKIBA_OWN_ATTR -ne ''){[IO.File]::SetAttributes($p,[IO.FileAttributes][int]$env:OKIBA_OWN_ATTR)}};@($paths|ForEach-Object{[int][IO.File]::GetAttributes($_)})|ConvertTo-Json -Compress";const r=await run('powershell.exe',['-NoProfile','-NonInteractive','-Command',code],{windowsHide:true,env:{...process.env,OKIBA_OWN_PATHS:JSON.stringify(paths),OKIBA_OWN_ATTR:desired===undefined?'':String(desired)}});return JSON.parse(r.stdout);}
+ async function showPolicy(action,expected,value){const out=await run('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(root,'tools/show-hidden-command-ci.ps1')],{windowsHide:true,env:{...process.env,OKIBA_SHOW_ACTION:action,OKIBA_SHOW_EXPECTED:String(expected),OKIBA_SHOW_VALUE:String(value)}});return JSON.parse(out.stdout);}
+ async function sentinelVisible(file,expected){for(let n=0;n<100;n++){const s=await stable(),visible=s.icons.some(i=>i.path&&path.resolve(i.path).toLowerCase()===file.toLowerCase());assert.equal([].concat(await attributes([file]))[0],34);if(visible===expected)return {visible,hidden:true,oldUnchanged:true};await sleep(100);}throw Error('Hidden sentinel actual visibility not confirmed');}
  async function returnedToBaseline(){for(let i=0;i<100;i++){const s=await stable();if(s.icons.length===baseline.icons.length)return;await sleep(100);}throw Error('owned Desktop items remain');}
  try{
   baseline=await stable();assert(baseline.snap&&!baseline.autoArrange&&baseline.identityVersion===1);
-  for(const [index,name] of ['success32','success34','abort-placed','abort-after-restore','fault-after-hide','fault-first-move','hang-first-move','owner-death','source-occupied','cached-destination'].entries()){
+  for(const [index,name] of ['success32','success34','abort-placed','abort-after-restore','fault-after-hide','fault-first-move','hang-first-move','owner-death','source-occupied','cached-destination','show-hidden-already-on','show-hidden-mid-stage'].entries()){
    const dir=path.join(temp,name);fs.mkdirSync(dir);const attrs=name==='success34'?34:32;
    const items=Array.from({length:3},(_,n)=>{const base=tag+'-'+index+'-'+n+'.txt',source=path.join(dir,base),dest=path.join(desktop,base);fs.writeFileSync(source,'resident fixture '+index+' '+n);owned.push(dest);return {name:base,path:source,dest,offset:[0,n]};});
    await attributes(items.map(i=>i.path),attrs);const contents=items.map(i=>fs.readFileSync(i.path));
+   const showCase=name.startsWith('show-hidden-');
+   if(showCase){await stable();const read=await showPolicy('read');assert.equal(read.value,false,'Hosted ShowHidden must start OFF for this transition proof');policy={name,original:false,restored:false};report.showHidden=report.showHidden||[];report.showHidden.push(policy);if(name==='show-hidden-already-on')policy.enable=await showPolicy('set',false,true);await stable();}
    let before=await stable(),plan=planDesktop({snapshot:before,items,automatic:true});assert(plan.ok,JSON.stringify(plan));
    let helperPath=path.join(root,'scripts/shell-helper.ps1');
    if(name.startsWith('fault-')||name==='hang-first-move'){
@@ -28,6 +32,28 @@ async function main(){
     }else{
      const f=path.join(hd,'resident-file-native.cs');let s=fs.readFileSync(f,'utf8');const marker='Hidden(h,from,id,size,mtime,original,true);Expect';assert.equal(s.split(marker).length-1,1);s=s.replace(marker,'Hidden(h,from,id,size,mtime,original,true);if(!restore){if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true"||Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT")!="github-hosted")throw new InvalidOperationException("CI only");throw new InvalidOperationException("CI after hide before rename");}Expect');fs.writeFileSync(f,s);
     }
+   }
+   if(showCase){
+    const hd=path.join(dir,'show-helper');fs.mkdirSync(hd);for(const f of ['shell-helper.ps1','snap-lease.ps1','resident-lease.ps1','resident-file-native.cs'])fs.copyFileSync(path.join(root,'scripts',f),path.join(hd,f));fs.copyFileSync(path.join(root,'tools/show-hidden-fixture-ci.cs'),path.join(hd,'show-hidden-fixture-ci.cs'));helperPath=path.join(hd,'shell-helper.ps1');
+    const f=path.join(hd,'resident-lease.ps1');let code=fs.readFileSync(f,'utf8');const anchor='  $null=[OkibaResidentFiles]::Stage($i.source,$i.destination,$i.identity,$i.size,$i.mtime,[uint32]$i.originalAttributes,$i.sourceParentID,$i.destParentID)';assert.equal(code.split(anchor).length-1,1);
+    const toggle=name==='show-hidden-mid-stage'?"$proof.setting=[OkibaShowHiddenFixture]::SetForCI($false,$true)":"if(-not [OkibaShowHiddenFixture]::Read()){throw 'Expected ShowHidden ON'}";
+    const injected=`
+  if(-not $script:ShowHiddenProbed){
+   $script:ShowHiddenProbed=$true
+   if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'CI only'}
+   Add-Type -Path (Join-Path $PSScriptRoot 'show-hidden-fixture-ci.cs')
+   $proof=@{phase='first-stage-hidden';path=$i.destination;visible=$false};${toggle}
+   for($attempt=0;$attempt -lt 60;$attempt++){
+    $ss=Lease-Snapshot;$selected=Lease-Guard $r $ss
+    if($ss.snap){throw 'Expected snap OFF during hidden stage'}
+    if([OkibaResidentFiles]::Read($i.destination).attributes -ne 34){throw 'Sentinel no longer Hidden'}
+    if($selected.ContainsKey((Lease-Path $i.destination))){$proof.visible=$true;$proof.hidden=$true;$proof.oldUnchanged=$true;break}
+    Start-Sleep -Milliseconds 100
+   }
+   $proof|ConvertTo-Json -Depth 8|Set-Content (Join-Path $PSScriptRoot 'show-proof.json') -Encoding UTF8
+   if(-not $proof.visible){throw 'Hidden staged sentinel never visible'}
+  }`;
+    fs.writeFileSync(f,code.replace(anchor,anchor+injected));policy.proofPath=path.join(hd,'show-proof.json');
    }
    const journalDir=path.join(dir,'journal');client=createDesktopLeaseClient({journalDir,helperTimeoutMs:name==='hang-first-move'?4000:15000,helper:{command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',helperPath]}});assert((await client.ready()).ok);
    let targets=plan.targets.map(t=>({...t,path:items.find(i=>i.name===t.name).dest}));let area=before.areas.findIndex(a=>targets.every(t=>t.x>=a.left&&t.x<a.right&&t.y>=a.top&&t.y<a.bottom));
@@ -47,7 +73,7 @@ async function main(){
     scope=await client.prepareScope({...scope,snapshot:before,targetAreaIndex:area,targets});report.cachedSeed={seededCell,guard:cachedGuard,finalTargets:targets};
    }
    let result;
-   if(name.startsWith('success')||name.startsWith('fault-')||name==='hang-first-move'||name==='cached-destination')result=await runLease({scope,receipts,adapter});
+   if(name.startsWith('success')||name.startsWith('fault-')||name==='hang-first-move'||name==='cached-destination'||showCase)result=await runLease({scope,receipts,adapter});
    else if(name==='owner-death'){
     unsafe=true;
     const host=fork(path.join(root,'tools/desktop-lease-protocol-host-ci.js'),[],{windowsHide:true,stdio:['ignore','ignore','ignore','ipc']});hosts.push(host);
@@ -70,14 +96,16 @@ async function main(){
     result=await adapter.abort(p.token);
    }
    const status=await client.status();if(name==='hang-first-move'){assert(status.helper.cumulativeRestartCount>=1);const h=status.helper.history;assert(h.length>=2&&h.at(-2).stoppedConfirmed);assert(h.at(-2).pid!==h.at(-1).pid||h.at(-2).started!==h.at(-1).started);}report.cases.push({name,result,status});console.log('resident-case '+JSON.stringify(report.cases.at(-1)));
-   if(name.startsWith('success')||name==='cached-destination'){assert(result.ok,JSON.stringify(result));assert.equal(fs.readFileSync(metadata,'utf8'),afterText);for(const [n,i] of items.entries()){assert(!fs.existsSync(i.path));assert(fs.readFileSync(i.dest).equals(contents[n]));}assert.deepEqual(await attributes(items.map(i=>i.dest)),[32,32,32]);}
+   if(name.startsWith('success')||name==='cached-destination'||showCase){assert(result.ok,JSON.stringify(result));assert.equal(fs.readFileSync(metadata,'utf8'),afterText);for(const [n,i] of items.entries()){assert(!fs.existsSync(i.path));assert(fs.readFileSync(i.dest).equals(contents[n]));}assert.deepEqual(await attributes(items.map(i=>i.dest)),[32,32,32]);}
    else{if(name.startsWith('fault-')||name==='hang-first-move')assert(!result.ok&&result.resolution?.state==='aborted',JSON.stringify(result));else assert(result.ok&&result.state==='aborted',JSON.stringify(result));assert.equal(fs.readFileSync(metadata,'utf8'),beforeText);for(const [n,i] of items.entries()){assert(!fs.existsSync(i.dest));assert(fs.readFileSync(i.path).equals(contents[n]));}assert.deepEqual(await attributes(items.map(i=>i.path)),[attrs,attrs,attrs]);}
    if(cachedGuard){const now=await stable();assert(now.icons.some(i=>i.identity===cachedGuard.identity&&i.x===cachedGuard.x&&i.y===cachedGuard.y),'cached guard displaced');assert.equal(status.helper.generation,1);report.cachedGuardUnchanged=true;}
-   assert((await client.close()).ok);client=null;if(cachedGuard){assert.equal(fs.readFileSync(cachedGuard.dest,'utf8'),'owned cached-cell guard');fs.unlinkSync(cachedGuard.dest);}for(const i of items){if(fs.existsSync(i.dest)){assert.equal(path.dirname(i.dest),desktop);assert(path.basename(i.dest).startsWith(tag));fs.unlinkSync(i.dest);}}
+   assert((await client.close()).ok);client=null;
+   if(showCase){policy.stage=JSON.parse(fs.readFileSync(policy.proofPath,'utf8').replace(/^\uFEFF/,''));assert(policy.stage.visible&&policy.stage.hidden&&policy.stage.oldUnchanged);await stable();await attributes([items[0].dest],34);policy.beforeRestore=await sentinelVisible(items[0].dest,true);policy.restore=await showPolicy('set',true,false);policy.afterRestore=await sentinelVisible(items[0].dest,false);assert.equal((await showPolicy('read')).value,false);policy.restored=true;await attributes([items[0].dest],32);assert(fs.readFileSync(items[0].dest).equals(contents[0]));}
+   if(cachedGuard){assert.equal(fs.readFileSync(cachedGuard.dest,'utf8'),'owned cached-cell guard');fs.unlinkSync(cachedGuard.dest);}for(const i of items){if(fs.existsSync(i.dest)){assert.equal(path.dirname(i.dest),desktop);assert(path.basename(i.dest).startsWith(tag));fs.unlinkSync(i.dest);}}
    await returnedToBaseline();
   }
   report.passed=true;
- }catch(e){report.error=String(e.stack||e);if(client){const s=await client.status();report.failedStatus=s;if(!s.ok||s.unsafe||!['idle','released','aborted'].includes(s.phase))unsafe=true;else{const c=await client.close();unsafe=unsafe||!c.ok;client=null;}}throw e;
+ }catch(e){if(policy&&!policy.restored)unsafe=true;report.error=String(e.stack||e);if(client){const s=await client.status();report.failedStatus=s;if(!s.ok||s.unsafe||!['idle','released','aborted'].includes(s.phase))unsafe=true;else{const c=await client.close();unsafe=unsafe||!c.ok;client=null;}}throw e;
  }finally{
   for(const h of hosts){if(h.exitCode===null&&h.signalCode===null){const exited=new Promise(r=>h.once('exit',r));h.kill();await Promise.race([exited,sleep(5000)]);if(h.exitCode===null&&h.signalCode===null)unsafe=true;}}
   if(!unsafe){for(const file of owned){assert.equal(path.dirname(file),desktop);assert(path.basename(file).startsWith(tag));if(fs.existsSync(file))fs.unlinkSync(file);}if(baseline){await returnedToBaseline();report.cleanupVerified=true;}}

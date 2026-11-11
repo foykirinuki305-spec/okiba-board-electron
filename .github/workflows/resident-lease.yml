@@ -6,6 +6,10 @@ on:
       - 'scripts/snap-lease.ps1'
       - 'scripts/shell-helper.ps1'
       - 'lib/desktop-lease-*'
+      - 'lib/durable-rename.js'
+      - 'tools/stable-snapshot-ci*'
+      - 'tools/show-hidden-*'
+      - 'tools/desktop-lease-protocol-host-ci.js'
       - 'lib/desktop-snap-lease-controller.js'
       - 'tools/resident-*'
       - '.github/workflows/resident-lease.yml'
@@ -24,6 +28,8 @@ jobs:
         run: |
           node tools/resident-scope-selftest.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/stable-snapshot-ci-selftest.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/snap-lease-controller-selftest.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Native canonical file-record matching
@@ -38,6 +44,9 @@ jobs:
       - name: Partial stage locator in owned TEMP only
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/resident-lease-locator-selftest.ps1
+      - name: ShowHidden fixture structure and permission gate
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/show-hidden-fixture-selftest.ps1
       - name: Hosted native Desktop lease (main remains disabled)
         shell: pwsh
         run: |

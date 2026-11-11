@@ -12,7 +12,7 @@ if(process.argv[2]==='worker'){
  async function stop(c){if(c.exitCode!==null||c.signalCode!==null)return;const exit=new Promise(r=>c.once('exit',r));c.kill();await exit;}
  try{
   const a=child(),b=child();const record={token,journalPath:path.join(root,'baseA','journal.json'),phase:'prepared'};
-  const first=await ask(a,{cmd:'begin',scope,record});assert(first.ok);checks++;
+  const first=await ask(a,{cmd:'begin',scope,record});assert(first.ok,JSON.stringify(first));checks++;
   let second=await ask(b,{cmd:'begin',scope,record:{...record,token:'b'.repeat(32),journalPath:path.join(root,'baseB','journal.json')}});assert(!second.ok&&second.reason.startsWith('desktop-lease-busy'));checks++;
   const helper=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:true,stdio:'ignore'});children.push(helper);await stop(helper);
   second=await ask(b,{cmd:'begin',scope,record:{...record,token:'b'.repeat(32)}});assert(!second.ok&&second.reason.startsWith('desktop-lease-busy'));checks++;

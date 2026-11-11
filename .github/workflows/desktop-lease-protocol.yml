@@ -7,6 +7,8 @@ on:
       - 'tools/desktop-legacy-*'
       - 'lib/desktop-legacy-*'
       - 'lib/desktop-lease-*'
+      - 'lib/durable-rename.js'
+      - 'tools/durable-rename-*'
       - 'scripts/snap-lease.ps1'
       - 'scripts/shell-helper.ps1'
       - 'lib/safe-desktop.js'
@@ -21,6 +23,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - name: Durable journal rename regression
+        shell: pwsh
+        run: |
+          node tools/durable-rename-selftest.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/durable-rename-native-selftest.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Independent global Desktop exclusion
         shell: pwsh
         run: node ./tools/desktop-lease-global-lock-selftest.js
