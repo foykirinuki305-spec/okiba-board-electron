@@ -12,7 +12,8 @@ if(@($q.paths).Count -ne 3){throw 'exact group required'}
 foreach($f in $q.paths){if([IO.Path]::GetDirectoryName($f) -ine [Environment]::GetFolderPath('DesktopDirectory') -or -not [IO.Path]::GetFileName($f).StartsWith($q.tag+'-') -or @($m.links|Where-Object {$_.path -ceq $f}).Count -ne 1){throw 'owned selected links only'}}
 $p=[Diagnostics.Process]::GetProcessById([int]$q.pid);$null=$p.Handle
 $exe=Join-Path (Split-Path $PSScriptRoot -Parent) 'dist\win-unpacked\OkibaBoard.exe'
-if($p.StartTime.ToUniversalTime().Ticks.ToString() -cne $q.started -or $p.MainModule.FileName -ine $exe){throw 'packaged process identity'}
+$identity=@{expectedPID=[int]$q.pid;actualPID=$p.Id;expectedBirth=$q.started;actualBirth=$p.StartTime.ToUniversalTime().Ticks.ToString();expectedExe=$exe;actualExe=$p.MainModule.FileName}
+if($identity.actualBirth -cne $identity.expectedBirth -or $identity.actualExe -ine $identity.expectedExe){throw ('packaged process identity: '+($identity|ConvertTo-Json -Compress))}
 Add-Type -Path (Join-Path $PSScriptRoot 'packaged-unknown-drag-input-ci.cs')
 foreach($old in $q.old){if([Math]::Abs([int]$q.target.x-[int]$old.x) -lt [int]$q.guardX -and [Math]::Abs([int]$q.target.y-[int]$old.y) -lt [int]$q.guardY){throw 'drop may hit existing icon'}}
 [OkibaDragInputCI]::Drag($q.pid,$q.start.x,$q.start.y,$q.target.x,$q.target.y,$q.area.left,$q.area.top,$q.area.right,$q.area.bottom)
