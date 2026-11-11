@@ -53,6 +53,9 @@ jobs:
       - name: Native canonical file-record matching
         shell: pwsh
         run: node tools/resident-read-path-selftest.js
+      - name: Restricted pre-rename disappearance read observations (pure)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/mixed-removal-read-selftest.ps1
       - name: Whole-group Hidden barrier before physical restore (pure)
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/mixed-prehide-selftest.ps1

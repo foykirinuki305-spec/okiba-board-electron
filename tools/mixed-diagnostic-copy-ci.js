@@ -11,11 +11,9 @@ function instrumentMixed(s){
   try{$entry=@{time=[DateTime]::UtcNow.ToString('o');phase=$phase;detail=$detail}|ConvertTo-Json -Depth 10 -Compress;[IO.File]::AppendAllText($p,$entry+[Environment]::NewLine,(New-Object Text.UTF8Encoding($false)))}catch{}
  }`);
  s=once(s,'$stable=0;$poll=0;$previousSelected=$null','$stable=0;$poll=0;$previousSelected=$null;$lastFull=$null');
- s=once(s,' do{\n  $s=Lease-Snapshot;$selected=Lease-Guard $r $s',` do{\n  try{$s=Lease-Snapshot}catch{
-   Mixed-Trace 'visibility-snapshot-failed' @{leasePhase=$script:LeasePhase;poll=$poll;lastFull=$lastFull;error=$_.Exception.Message;type=$_.Exception.GetType().FullName;hresult=$_.Exception.HResult}
-   throw
-  }
-  try{$selected=Lease-Guard $r $s}catch{
+ s=once(s,'  try{$s=Lease-Snapshot}catch{',`  try{$s=Lease-Snapshot}catch{
+   Mixed-Trace 'visibility-snapshot-failed' @{leasePhase=$script:LeasePhase;poll=$poll;lastFull=$lastFull;error=$_.Exception.Message;type=$_.Exception.GetType().FullName;hresult=$_.Exception.HResult}`);
+ s=once(s,'  $selected=Lease-Guard $r $s',`  try{$selected=Lease-Guard $r $s}catch{
    Mixed-Trace 'visibility-guard-failed' @{leasePhase=$script:LeasePhase;poll=$poll;lastFull=$lastFull;flags=$s.folderFlags;error=$_.Exception.Message}
    throw
   }

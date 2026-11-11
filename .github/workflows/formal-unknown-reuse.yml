@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - 'tools/formal-unknown-reuse*'
+      - 'tools/formal-unknown-dpi-*'
+      - 'tools/desktop-dpi-empty-*'
       - 'lib/desktop-unknown-*'
       - 'lib/desktop-lease-*'
       - 'scripts/unknown-grid-*'

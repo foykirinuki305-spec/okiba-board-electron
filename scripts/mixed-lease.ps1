@@ -1,10 +1,32 @@
 # Explicit opt-in mixed lease. Not selected by main or preview.
 function Mixed-Enabled {if($env:OKIBA_MIXED_LEASE -cne '1'){throw 'mixed-lease-disabled'}}
 function Mixed-Trace([string]$phase,$detail=$null){} # No persistent research trace in production.
-function Mixed-WaitVisibility($r,[bool]$visible){
- $until=[DateTime]::UtcNow.AddSeconds(15);$stable=0;$poll=0;$previousSelected=$null
+function Mixed-IsRemovalReadFailure($errorRecord){
+ $f=$errorRecord.Exception.Data['snapshotFailure']
+ return ($null -ne $f -and $f.reason -ceq 'shell-snapshot-error' -and $f.errorType -ceq 'System.Runtime.InteropServices.COMException' -and $f.hresult -ceq '0x80070490' -and [string]$f.detail -cmatch 'ReadShellBatch')
+}
+function Mixed-AssertHiddenBeforeRename($r,[uint32]$flags){
+ [OkibaFolderView]::AssertLeaseExactSessionFlags($flags,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted)
+ foreach($link in $r.linkRecords){$n=Lease-CheckRecord $link;if(-not $n.hidden -or [uint32]$n.attributes -ne ([uint32]$link.attributes -bor 2)){throw 'mixed-retry-link-not-hidden'}}
+ foreach($i in $r.residentRecords){$n=Resident-Locate $i;if($n.state -cne 'moved' -or -not (Resident-Same $n.record $i) -or -not $n.record.hidden -or [uint32]$n.record.attributes -ne ([uint32]$i.originalAttributes -bor 2)){throw 'mixed-retry-resident-not-hidden'}}
+ [OkibaFolderView]::AssertLeaseExactSessionFlags($flags,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted)
+}
+function Mixed-WaitVisibility($r,[bool]$visible,[bool]$allowPreRenameReadRetry=$false){
+ $until=[DateTime]::UtcNow.AddSeconds(15);$stable=0;$poll=0;$previousSelected=$null;$lastGuarded=$null;$readFailures=0;$immutableFlags=$null
  do{
-  $s=Lease-Snapshot;$selected=Lease-Guard $r $s
+  try{$s=Lease-Snapshot}catch{
+   if(-not $allowPreRenameReadRetry -or $visible -or $script:LeasePhase -cne 'mixed-rollback-pre-rename-visibility' -or $null -eq $lastGuarded -or -not (Mixed-IsRemovalReadFailure $_)){throw}
+   $stable=0;$previousSelected=$null;$readFailures++
+   if($readFailures -gt 3 -or [DateTime]::UtcNow -ge $until){throw}
+   Mixed-AssertHiddenBeforeRename $r ([uint32]$immutableFlags)
+   Mixed-Trace 'pre-rename-read-reobserve' @{attempt=$readFailures;flags=$lastGuarded.folderFlags}
+   $lastGuarded=$null;Start-Sleep -Milliseconds 100;continue
+  }
+  $selected=Lease-Guard $r $s
+  if($allowPreRenameReadRetry -and -not $visible -and $script:LeasePhase -ceq 'mixed-rollback-pre-rename-visibility'){
+   if($null -eq $immutableFlags){$immutableFlags=[uint32]$s.folderFlags}elseif([uint32]$s.folderFlags -ne [uint32]$immutableFlags){throw 'mixed-pre-rename-flags-changed'}
+  }
+  $lastGuarded=$s
   $indices=@();for($j=0;$j -lt @($r.records).Count;$j++){if($selected.ContainsKey((Lease-Path $r.records[$j].path))){$indices+=,$j}}
   if(($visible -and $selected.Count -eq @($r.records).Count) -or (-not $visible -and $selected.Count -eq 0)){$stable++}else{$stable=0}
   $owned=@($selected.Values|ForEach-Object{@{identity=$_.identity;path=$_.path;x=$_.x;y=$_.y}})
@@ -159,7 +181,7 @@ function Mixed-HideBeforeRestore($r){
   $index++
  }
  $script:LeasePhase='mixed-rollback-pre-rename-visibility';Mixed-Trace 'pre-rename-visibility-before'
- $s=Mixed-WaitVisibility $r $false;$selected=Lease-Guard $r $s
+ $s=Mixed-WaitVisibility $r $false $true;$selected=Lease-Guard $r $s
  if($selected.Count -ne 0){throw 'mixed-pre-rename-visible'}
  foreach($link in $r.linkRecords){if(-not (Lease-CheckRecord $link).hidden){throw 'mixed-pre-rename-link-visible'}}
  foreach($i in $r.residentRecords){$n=Resident-Locate $i;if($n.state -ceq 'moved' -and -not $n.record.hidden){throw 'mixed-pre-rename-resident-visible'}}

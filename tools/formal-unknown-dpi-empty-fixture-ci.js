@@ -5,7 +5,21 @@ function allowed(file,common){return typeof file==='string'&&path.win32.dirname(
 async function waitForEmpty(read,check,{attempts=20,sleep=ms=>new Promise(r=>setTimeout(r,ms)),observe=()=>{}}={}){
  for(let n=0;n<attempts;n++){await check();const value=await read();observe(value);if(!value?.ok){if(value?.reason!=='desktop-changing')throw Error('empty-snapshot-unavailable:'+JSON.stringify(value));}else if(value.icons.length===0)return value;await sleep(250);}throw Error('empty-snapshot-timeout');
 }
-module.exports={allowed,waitForEmpty};
+async function waitForRestored(read,check,before,{attempts=20,sleep=ms=>new Promise(r=>setTimeout(r,ms)),observe=()=>{}}={}){
+ const expected=new Map(before.icons.map(i=>[i.identity,i]));assert.equal(expected.size,before.icons.length,'duplicate baseline identity');
+ for(let n=0;n<attempts;n++){
+  await check();const value=await read();await observe(value);
+  if(!value?.ok){if(value?.reason!=='desktop-changing')throw Error('restore-snapshot-unavailable:'+JSON.stringify(value));}
+  else{
+   assert(Array.isArray(value.icons),'restore snapshot icons unavailable');const seen=new Set();
+   for(const icon of value.icons){assert(!seen.has(icon.identity),'restore duplicate identity');seen.add(icon.identity);const old=expected.get(icon.identity);assert(old,'restore unexpected identity');assert(icon.x===old.x&&icon.y===old.y,'fixture positions changed; not concealed');}
+   if(seen.size===expected.size)return value;
+  }
+  await sleep(250);
+ }
+ throw Error('restore-snapshot-timeout');
+}
+module.exports={allowed,waitForEmpty,waitForRestored};
 if(require.main===module){(async()=>{
  assert(process.platform==='win32'&&process.env.GITHUB_ACTIONS==='true'&&process.env.RUNNER_OS==='Windows'&&process.env.RUNNER_ENVIRONMENT==='github-hosted','hosted only');
  const root=path.resolve(__dirname,'..'),journal=path.join(root,'formal-unknown-dpi-empty-fixture.json'),common=path.join(process.env.PUBLIC,'Desktop'),action=process.argv[2];
@@ -29,14 +43,9 @@ if(require.main===module){(async()=>{
   m.phase='attributes-restored';save(m);
  }else if(action==='verify'){
   m=JSON.parse(fs.readFileSync(journal,'utf8'));m.restoreObservations=[];
-  for(let attempt=0;attempt<20;attempt++){
+  m.after=await waitForRestored(async()=>{const v=await h.request('desktopSnapshot',{});assert(v.ok,JSON.stringify(v));return v.result;},async()=>{
    for(const r of m.records){const n=await call('readHiddenFile',{path:r.path});assert(n.identity===r.identity&&n.attributes===r.attributes&&hash(r.path)===r.hash,'restored file changed');}
-   m.after=await call('desktopSnapshot');m.restoreObservations.push(m.after);save(m);
-   const moved=m.before.icons.filter(i=>m.after.icons.some(j=>j.identity===i.identity&&(j.x!==i.x||j.y!==i.y)));
-   if(moved.length)break;
-   if(m.before.icons.every(i=>m.after.icons.some(j=>j.identity===i.identity&&j.x===i.x&&j.y===i.y)))break;
-   await new Promise(r=>setTimeout(r,250));
-  }
+  },m.before,{observe:v=>{m.after=v;m.restoreObservations.push(v);save(m);}});
   m.oldIconDifferences=m.before.icons.filter(i=>!m.after.icons.some(j=>i.identity===j.identity&&i.x===j.x&&i.y===j.y));m.phase=m.oldIconDifferences.length?'fixture-restoration-unverified':'fixture-restored';save(m);assert.equal(m.oldIconDifferences.length,0,'fixture positions changed; not concealed');
  }else throw Error('unknown action');
  }catch(e){if(m){m.error=e.stack;save(m);}throw e;}finally{assert(await h.stopAndWait(10000),'helper stop unconfirmed');}
