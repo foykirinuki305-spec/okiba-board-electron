@@ -22,8 +22,15 @@ if($Action -eq 'processes'){
 }
 # Explicit own-record cleanup only, after caller has proved terminal + all children stopped.
 if($env:OKIBA_PREVIEW_TERMINAL -cne 'confirmed'){throw 'terminal proof required'}
-$records=@(ConvertFrom-Json $env:OKIBA_PREVIEW_RECORDS)
-if($records.Count -ne 3){throw 'three owned records required'}
+# BEGIN tested-preview-record-parser
+function Read-PreviewRecords([string]$json){
+ $parsed=ConvertFrom-Json $json
+ if($parsed -isnot [array] -or $parsed.Count -ne 3){throw 'three owned records required'}
+ foreach($record in $parsed){if($record -isnot [pscustomobject] -or $record.path -isnot [string]){throw 'invalid owned record'}}
+ return $parsed
+}
+# END tested-preview-record-parser
+$records=Read-PreviewRecords $env:OKIBA_PREVIEW_RECORDS
 $desktop=[IO.Path]::GetFullPath([Environment]::GetFolderPath('DesktopDirectory'))
 $source=Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\scripts\shell-helper.ps1') -Raw
 foreach($block in [regex]::Matches($source,"(?s)Add-Type -TypeDefinition @'\r?\n(.*?)\r?\n'@")){Add-Type -TypeDefinition $block.Groups[1].Value}
