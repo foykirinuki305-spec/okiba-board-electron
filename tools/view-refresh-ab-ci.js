@@ -12,7 +12,15 @@ async function main(){
  const notifier=createShellHelperClient({command:'powershell.exe',args:args(path.join(__dirname,'view-refresh-host-ci.ps1')),env:{...process.env,OKIBA_RENAME_SOURCE_ROOT:temp},timeoutMs:10000});
  let unsafe=false,original;
  async function req(client,cmd,args={}){const r=await client.request(cmd,args,{timeoutMs:100000});if(!r.ok){unsafe=!await client.stopAndWait(10000);throw Error('transport '+JSON.stringify(r));}return r.result;}
- function guard(before,after){assert(after.ok);assert.equal(after.identityVersion,1);if(before){assert.equal(after.folderFlags,before.folderFlags,'Shell flags changed');assert.equal(after.autoArrange,before.autoArrange);assert.equal(after.snap,before.snap);}const ids=new Set();for(const i of after.icons){assert(i.identity&&!ids.has(i.identity));ids.add(i.identity)}for(const old of before?.icons||[]){const now=after.icons.find(i=>i.identity===old.identity);assert(now&&now.x===old.x&&now.y===old.y,'old identity/xy changed '+JSON.stringify(old));}}
+ function guard(before,after){
+  assert(after.ok);assert.equal(after.identityVersion,1);
+  if(before){assert.equal(after.folderFlags,before.folderFlags,'Shell flags changed');assert.equal(after.autoArrange,before.autoArrange);assert.equal(after.snap,before.snap);}
+  const ids=new Set();for(const i of after.icons){assert(i.identity&&!ids.has(i.identity));ids.add(i.identity);if(i.path){let fd;try{fd=fs.openSync(i.path,'r');const st=fs.fstatSync(fd,{bigint:true});i.fileIdentity={dev:String(st.dev),ino:String(st.ino),size:String(st.size)};}catch(e){i.fileIdentityError=String(e.code||e.message)}finally{if(fd!==undefined)fs.closeSync(fd)}}}
+  const failures=[];
+  for(const old of before?.icons||[]){const now=after.icons.find(i=>i.identity===old.identity);if(!now||now.x!==old.x||now.y!==old.y){const samePath=old.path?after.icons.filter(i=>i.path&&path.resolve(i.path).toLowerCase()===path.resolve(old.path).toLowerCase()):[];failures.push({kind:now?'same-shell-identity-coordinates-changed':'shell-identity-missing',old,byIdentity:now||null,samePathCandidates:samePath,fileIdentityEqual:!!now?.fileIdentity&&!!old.fileIdentity&&now.fileIdentity.dev===old.fileIdentity.dev&&now.fileIdentity.ino===old.fileIdentity.ino});}}
+  if(failures.length){note('OLD_ICON_GUARD_FAILURE',{before,after,failures});throw Error('old identity/xy changed '+JSON.stringify(failures));}
+ }
+
  const matches=(icon,item)=>typeof icon.path==='string'&&path.resolve(icon.path).toLowerCase()===item.dest.toLowerCase();
  async function snapshot(before){const deadline=performance.now()+10000;let transient=0;for(;;){const s=await req(c,'desktopSnapshot');if(s.ok){guard(before,s);if(transient)note('snapshot-recovered',{transient});return s;}note('snapshot-nonok',{result:s,transient});if(s.reason!=='desktop-changing')throw Error('fatal snapshot '+JSON.stringify(s));transient++;if(performance.now()>=deadline)throw Error('desktop-changing exceeded 10s '+JSON.stringify(s));await sleep(50);}}
  async function stable(before){let last;for(let i=0;i<80;i++){const s=await snapshot(before);if(last&&sameSnapshot(last,s))return s;last=s;await sleep(50)}throw Error('not stable')}

@@ -1,0 +1,39 @@
+name: snap-commit-research
+on:
+  push:
+    paths:
+      - 'tools/snap-lease-*'
+      - 'tools/snap-commit-*'
+      - 'scripts/shell-helper.ps1'
+      - 'lib/safe-desktop.js'
+      - '.github/workflows/snap-commit.yml'
+  workflow_dispatch:
+jobs:
+  commit-receipts:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Canonical lease geometry pure checks
+        shell: pwsh
+        run: pwsh -NoProfile -File ./tools/snap-lease-geometry-selftest.ps1
+      - name: Atomic journal replacement pure checks
+        shell: pwsh
+        run: powershell -NoProfile -File ./tools/snap-lease-json-selftest.ps1
+      - name: Isolated commit permission and receipts, never production
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -File ./tools/snap-commit-ci.ps1 2>&1 | Tee-Object -FilePath snap-commit-ci.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain journal and fault evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snap-commit-research-evidence
+          path: |
+            snap-commit-ci.json
+            snap-commit-ci.log
+            snap-commit-journals/**
