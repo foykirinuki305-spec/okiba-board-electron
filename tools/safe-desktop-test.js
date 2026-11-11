@@ -7,6 +7,7 @@ const assert=require('assert/strict'),fs=require('fs'),path=require('path'),os=r
 const {execFile}=require('child_process'),{promisify}=require('util');
 const {createShellHelperClient}=require('../lib/shellhelper');
 const {planDesktop,sameSnapshot,executeDesktop}=require('../lib/safe-desktop');
+const {createAttribRunner}=require('../lib/links');
 const run=promisify(execFile),desktop=path.resolve(process.argv[2]),ROOT=path.resolve(__dirname,'..');
 const log=[];function note(s){log.push(s);console.log(s)}
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -77,6 +78,60 @@ async function main(){
   assert.deepEqual(batchAfter.icons.filter(i=>!batch.some(t=>matches(i.label,t.name))).map(i=>JSON.stringify([i.label,i.x,i.y])).sort(),signature(batchBefore),'10-file transaction moved an existing icon');
   for(const t of batchPlan.targets){const icon=batchAfter.icons.find(i=>matches(i.label,t.name));assert(icon&&Math.abs(icon.x-t.x)<=1&&Math.abs(icon.y-t.y)<=1,'10-file target not exact');}
   note('PASS 10-file group: every old icon unchanged and every target exact');
+  // The primary product path: linked Desktop files stay at the same path,
+  // hidden while on the board, then reappear via attrib -H (not a rename).
+  const attrs=createAttribRunner();
+  const linkedNames=[tag+'-linked-\u65e5\u672c\u8a9e.txt',tag+'-linked-second.txt'];
+  const mixNames=[...linkedNames,tag+'-resident.txt'];
+  const seedBefore=await stable();
+  const seed=linkedNames.map((name,i)=>({name,path:path.join(temp,name),dest:path.join(desktop,name),offset:[0,i]}));
+  for(const item of seed){fs.writeFileSync(item.path,item.name);owned.push(item.dest);}
+  const seedPlan=planDesktop({snapshot:seedBefore,items:seed,automatic:true});assert(seedPlan.ok);
+  const mixedPosition=async(s,p,its)=>{
+    const result=await request('positionDesktopPlan',{snapshot:s,targets:p.targets.map(t=>({...t,path:its.find(i=>i.name===t.name).dest})),buffer:p.buffer});
+    if(!result.ok&&!result.unsafe){const current=await snap();note('hidden-path failure '+JSON.stringify({result,before:s,current,plan:p,diff:existingDiff(s,current)}));}
+    if(result.ok){const current=await stable();assert.deepEqual(current.icons.filter(i=>!its.some(t=>matches(i.label,t.name))).map(i=>JSON.stringify([i.label,i.x,i.y])).sort(),signature(s),'existing icons changed while hidden items were visible');for(const t of p.targets){const found=current.icons.find(i=>matches(i.label,t.name));assert(found&&Math.abs(found.x-t.x)<=1&&Math.abs(found.y-t.y)<=1,'mixed position not exact before commit');}}
+    return result;
+  };
+  const seeded=await executeDesktop({items:seed,plan:seedPlan,snapshot:seedBefore,adapter:{...adapter,position:(s,p)=>mixedPosition(s,p,seed)}});assert(seeded.ok,'hidden seed positioning failed '+JSON.stringify(seeded));
+  const mix=seed.map(i=>({...i,path:i.dest,hidden:true}));
+  const resident={name:mixNames[2],path:path.join(temp,mixNames[2]),dest:path.join(desktop,mixNames[2]),offset:[1,1],hidden:false};
+  fs.writeFileSync(resident.path,resident.name);owned.push(resident.dest);mix.push(resident);
+  const waitVisibility=async(visible)=>{for(let n=0;n<60;n++){const s=await stable();if(linkedNames.every(name=>s.icons.some(i=>matches(i.label,name))===visible))return s;await sleep(100);}throw Error('linked visibility not reflected in Explorer');};
+  const hideLinked=async()=>{for(const item of mix.filter(i=>i.hidden)){assert((await attrs.setHidden(item.path,true)).ok);assert((await attrs.readHidden(item.path)).hidden);}};
+  await hideLinked();await waitVisibility(false);
+  // Occupy a hidden item's previous Shell-cached cell before unhiding it.
+  // This is the real collision path that a brand-new rename never exercises.
+  const collisionGuardName=tag+'-hidden-old-cell-guard.txt';
+  const collisionGuard={name:collisionGuardName,path:path.join(temp,collisionGuardName),dest:path.join(desktop,collisionGuardName),offset:[0,0]};
+  fs.writeFileSync(collisionGuard.path,'old-cell sentinel');owned.push(collisionGuard.dest);
+  const collisionBefore=await stable(),oldCell=seedPlan.targets[0];
+  const collisionPlan=planDesktop({snapshot:collisionBefore,items:[collisionGuard],point:{x:oldCell.x+collisionBefore.sx/2,y:oldCell.y+collisionBefore.sy/2}});
+  assert(collisionPlan.ok,'hidden previous cell must be available for collision guard');
+  assert.equal(collisionPlan.targets[0].x,oldCell.x);assert.equal(collisionPlan.targets[0].y,oldCell.y);
+  const collisionResult=await executeDesktop({items:[collisionGuard],plan:collisionPlan,snapshot:collisionBefore,adapter:{...adapter,position:(s,p)=>mixedPosition(s,p,[collisionGuard])}});
+  assert(collisionResult.ok,'cannot seed guard at hidden previous cell');
+  note('Hidden-path collision fixture: prior cell occupied by '+collisionGuardName+' at '+JSON.stringify({x:oldCell.x,y:oldCell.y}));
+  const mixedAdapter={snapshot:snap,move:async item=>{if(item.hidden){assert((await attrs.setHidden(item.path,false)).ok);}else await atomicMove(item.path,item.dest);},position:(s,p)=>mixedPosition(s,p,mix),commit:async()=>{fs.writeFileSync(metadata,'mixed committed');},rollback:async item=>{if(item.hidden)assert((await attrs.setHidden(item.path,true)).ok);else if(fs.existsSync(item.dest))await atomicMove(item.dest,item.path);}};
+  for(let cycle=0;cycle<3;cycle++){
+    const hiddenBefore=await stable();fs.writeFileSync(metadata,'hidden board metadata');fs.writeFileSync(history,'hidden board history');
+    const blockedPlan=planDesktop({snapshot:hiddenBefore,items:mix,point:{x:sentinel.x+hiddenBefore.sx/2,y:sentinel.y+hiddenBefore.sy/2}});
+    assert(!blockedPlan.ok);const blockedMix=await executeDesktop({items:mix,plan:blockedPlan,snapshot:hiddenBefore,adapter:mixedAdapter});assert(blockedMix.blocked);
+    assert.equal(fs.readFileSync(metadata,'utf8'),'hidden board metadata');assert.equal(fs.readFileSync(history,'utf8'),'hidden board history');
+    for(const item of mix.filter(i=>i.hidden))assert((await attrs.readHidden(item.path)).hidden);
+    let mixedPlan;
+    for(let x=hiddenBefore.areas[0].right-2*hiddenBefore.sx;x>=hiddenBefore.areas[0].left;x-=hiddenBefore.sx){const candidate=planDesktop({snapshot:hiddenBefore,items:mix,point:{x,y:hiddenBefore.sy*2}});if(candidate.ok){mixedPlan=candidate;break;}}
+    assert(mixedPlan,'no alternate valid mixed-group location');
+    const startedMix=Date.now();const injected=cycle===1;
+    const result=await executeDesktop({items:mix,plan:mixedPlan,snapshot:hiddenBefore,adapter:injected?{...mixedAdapter,commit:async()=>{throw Error('injected metadata failure');}}:mixedAdapter});
+    note('hidden mixed cycle='+cycle+' injectedFailure='+injected+' elapsed_ms='+(Date.now()-startedMix)+' result='+JSON.stringify(result));
+    if(injected){assert(!result.ok&&result.recovery.length===0);assert.equal(fs.readFileSync(metadata,'utf8'),'hidden board metadata');assert.equal(fs.readFileSync(history,'utf8'),'hidden board history');assert(fs.existsSync(resident.path)&&!fs.existsSync(resident.dest));await waitVisibility(false);}
+    else {assert(result.ok,'hidden mixed placement failed '+JSON.stringify(result));const shown=await waitVisibility(true);for(const t of mixedPlan.targets){const icon=shown.icons.find(i=>matches(i.label,t.name));assert(icon&&Math.abs(icon.x-t.x)<=1&&Math.abs(icon.y-t.y)<=1,'hidden mixed target not exact');}await hideLinked();await atomicMove(resident.dest,resident.path);await waitVisibility(false);}
+    const recovered=await stable();assert.deepEqual(signature(recovered),signature(hiddenBefore),'hidden cycle changed an existing icon');
+    for(const item of mix.filter(i=>i.hidden)){assert((await attrs.readHidden(item.path)).hidden);assert.equal(fs.readFileSync(item.path,'utf8'),item.name);}
+    assert.equal(fs.readFileSync(resident.path,'utf8'),resident.name);
+  }
+  note('PASS hidden Desktop links + resident mixed group: Japanese names, exact alternate cells, repeated hide/show, failure rehide, original icons and data unchanged');
   note('SAFE DESKTOP CI PASS');
  } finally {
   const stopped=await client.stopAndWait(10000);
