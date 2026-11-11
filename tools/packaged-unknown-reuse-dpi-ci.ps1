@@ -18,23 +18,14 @@ try{
  $source=$source.Replace('desktop-dpi-ui-ci.json','formal-unknown-dpi-ui-ci.json')
  $hook=@'
  # BEGIN owned Settings exposure
- $settings.Refresh();$null=$settings.Handle
- if($settings.MainModule.FileName -ine (Join-Path $env:SystemRoot 'ImmersiveControlPanel\SystemSettings.exe')){throw 'settings-process-identity'}
- $settingsWindow=$combo
- while($settingsWindow -and $settingsWindow.Current.ControlType -ne [Windows.Automation.ControlType]::Window){$settingsWindow=[Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($settingsWindow)}
- if(-not $settingsWindow){throw 'owned-settings-window-unavailable'}
- $settingsPattern=$settingsWindow.GetCurrentPattern([Windows.Automation.WindowPattern]::Pattern)
- $settingsVisual=$settingsPattern.Current.WindowVisualState
- $settingsPattern.SetWindowVisualState([Windows.Automation.WindowVisualState]::Minimized)
- if($settingsPattern.Current.WindowVisualState -ne [Windows.Automation.WindowVisualState]::Minimized){throw 'owned-settings-minimize-unverified'}
- $report.settingsExposure=@{pid=$settings.Id;started=$settings.StartTime.ToUniversalTime().Ticks.ToString();original=[int]$settingsVisual;minimized=$true}
+ . (Join-Path $PSScriptRoot 'packaged-settings-window-ci.ps1')
+ $settingsState=Suspend-OwnedSettings $settings $combo
+ $report.settingsExposure=@{pid=$settingsState.pid;started=$settingsState.birth;hwnd=$settingsState.hwnd;original=[int]$settingsState.original;ancestors=$settingsState.ancestors;minimized=$true}
  # END owned Settings exposure
  $native=New-Object Diagnostics.Process;$native.StartInfo.FileName='node.exe';$native.StartInfo.Arguments='"'+(Join-Path $PSScriptRoot 'packaged-unknown-reuse-ci.js')+'" "'+[Environment]::GetFolderPath('Desktop')+'"';$native.StartInfo.UseShellExecute=$false;$native.StartInfo.CreateNoWindow=$true;$native.StartInfo.WorkingDirectory=Split-Path $PSScriptRoot -Parent;$native.StartInfo.EnvironmentVariables['OKIBA_UNKNOWN_EXPECTED_SCALE']='150';$native.StartInfo.EnvironmentVariables['OKIBA_UNKNOWN_CASES']='success,no-fit'
  try{$null=$native.Start();$nativeStarted=$true;if(-not $native.WaitForExit(600000)){throw 'native-timeout-unresolved'};$native.WaitForExit();$native.Refresh();$report.nativeHasExited=$native.HasExited;$report.nativeExitCode=$native.ExitCode;$n=Get-Content (Join-Path $native.StartInfo.WorkingDirectory 'packaged-unknown-drag-evidence/result.json') -Raw|ConvertFrom-Json;$report.nativeEvidence=$n;$exitKnown=($native.HasExited -and $null -ne $report.nativeExitCode);$nativeVerified=($exitKnown -and $n.cleanupVerified -eq $true -and -not $n.cleanupError -and ($n.passed -eq $true -or $n.failureRecoveryVerified -eq $true) -and $n.actualScale -eq 150 -and $n.noFitVerified -eq $true);if(-not $nativeVerified){throw 'native-cleanup-unverified'};if($report.nativeExitCode -ne 0 -or -not $n.passed){$report.status='native-failed-recovery-verified';throw 'native-test-failed-but-recovery-verified'};$report.status='single-150-empty-native-verified'}finally{$native.Dispose()
  # BEGIN owned Settings restoration
- $settingsPattern.SetWindowVisualState($settingsVisual)
- if($settingsPattern.Current.WindowVisualState -ne $settingsVisual){throw 'owned-settings-window-restore-unverified'}
- $report.settingsExposure.restored=$true
+ try{Resume-OwnedSettings $settingsState;$report.settingsExposure.restored=$settingsState.restored}finally{$settingsState.owner.Dispose()}
  # END owned Settings restoration
  }
 '@

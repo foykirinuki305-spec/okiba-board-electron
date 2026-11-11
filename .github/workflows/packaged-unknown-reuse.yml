@@ -19,6 +19,9 @@ jobs:
           node-version: '20'
       - run: npm ci
       - run: node tools/packaged-unknown-reuse-selftest.js
+      - name: Fast owned Settings window exposure probe (before build)
+        shell: powershell
+        run: ./tools/packaged-settings-window-ci.ps1 -Probe
       - run: npm run build
       - name: Packaged actual pointer drag with exact 150 fixture restoration
         shell: powershell
@@ -30,3 +33,4 @@ jobs:
           path: |
             packaged-unknown-drag-evidence/**
             formal-unknown-dpi-*.json
+            packaged-settings-probe.json
