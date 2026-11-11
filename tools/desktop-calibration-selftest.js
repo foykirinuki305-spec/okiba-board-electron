@@ -36,17 +36,19 @@ console.log('202-icon evidence bytes: '+bytes);
 
 let accepted=0,rejected=0,bad=0;
 for(const maxSpacing of [{x:180,y:180},{x:190,y:140},{x:156,y:196}]){
- const p=planCalibration({...args,maxSpacing});ok(p.ok&&p.requests.length>=70&&p.requests.length<=100,'coarser default stays within stable-snapshot time budget');
+ const p=planCalibration({...args,maxSpacing});ok(p.ok&&p.requests.length>=50&&p.requests.length<=64,'coarser default stays within stable-snapshot time budget');
  for(let sx=20;sx<=maxSpacing.x;sx+=7)for(let sy=20;sy<=maxSpacing.y;sy+=7)for(const origin of [0,7,19]){
   const z=inferCalibration({plan:p,samples:observations(p,sx,sy,origin,origin)});
   if(z.ok){accepted++;if(z.grid.sx!==sx||z.grid.sy!==sy)bad++;}else rejected++;
  }
 }
-ok(accepted>3000&&rejected>0&&bad===0,'4497 varied pitch/origin cases have no false accepted grid');
+ok(accepted===3018&&rejected===1479&&bad===0,'4497 varied pitch/origin cases have no false accepted grid');
 ok(!inferCalibration({plan,samples:observations(plan,10,10)}).ok,'undersampled tiny pitch fails closed');
 for(const pitches of [[78,98],[101,67],[151,100],[156,196]]){
- const p=planCalibration({...args,maxSpacing:{x:180,y:200}}),z=inferCalibration({plan:p,samples:observations(p,...pitches)});
- ok(z.ok&&z.grid.sx===pitches[0]&&z.grid.sy===pitches[1],'normal scale grid correctly recovered '+pitches.join('x'));
+ for(const origin of [0,7,19,41,66]){
+  const p=planCalibration({...args,maxSpacing:{x:180,y:200}}),z=inferCalibration({plan:p,samples:observations(p,...pitches,origin,origin)});
+  ok(z.ok&&z.grid.sx===pitches[0]&&z.grid.sy===pitches[1],'normal scale grid correctly recovered '+pitches.join('x')+' origin '+origin);
+ }
 }
 console.log('coarse sampling sweep: '+JSON.stringify({accepted,rejected,bad}));
 console.log('desktop calibration: '+n+' checks passed (pure model, NOT mixed-DPI Shell proof)');
