@@ -1,7 +1,7 @@
 'use strict';
 const fs=require('fs'),os=require('os'),path=require('path'),assert=require('assert'),{spawnSync}=require('child_process');
 const {nativeCall,stopNative}=require('../lib/folder-return');
-const pathKey=p=>path.win32.normalize(path.win32.resolve(p)).toLowerCase();
+const pathKey=p=>path.win32.normalize(fs.realpathSync.native(p)).toLowerCase();
 (async()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-inspect-test-')),script=path.resolve(__dirname,'../scripts/folder-return.ps1');
  try{
