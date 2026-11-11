@@ -7,8 +7,9 @@ function Unknown-BindingDigest([string]$canonical){
 }
 function Unknown-SuccessInit($r,$scope){
  if($null -eq $scope.success){return}
+ $anchorMode=if($null -eq $scope.success.anchorMode){'top-left'}else{$scope.success.anchorMode};if($anchorMode -cnotin @('top-left','cursor-center')){throw 'unknown-anchor-mode-invalid'}
  if(@($r.records).Count -gt 32){throw 'unknown-success-item-limit'}
- $r.success=@{bindingFormat='sha256-utf8-v1';baseline=($r.snapshot|ConvertTo-Json -Depth 15 -Compress|ConvertFrom-Json);items=@($scope.success.items);anchorPath=$scope.success.anchorPath;requestedAnchor=$scope.success.requestedAnchor;binding=@{token=$r.token;probeId=$r.records[0].path;geometryKey=(Unknown-BindingDigest (Strict-GeometryKey $r.snapshot));iconsKey=(Unknown-BindingDigest (Strict-IconsKey $r.snapshot))};samples=@()}
+ $r.success=@{bindingFormat='sha256-utf8-v1';baseline=($r.snapshot|ConvertTo-Json -Depth 15 -Compress|ConvertFrom-Json);items=@($scope.success.items);anchorPath=$scope.success.anchorPath;requestedAnchor=$scope.success.requestedAnchor;anchorMode=$anchorMode;binding=@{token=$r.token;probeId=$r.records[0].path;geometryKey=(Unknown-BindingDigest (Strict-GeometryKey $r.snapshot));iconsKey=(Unknown-BindingDigest (Strict-IconsKey $r.snapshot))};samples=@()}
  if(@($r.success.items).Count -ne @($r.records).Count){throw 'unknown-shape-count'}
  $seen=@{};foreach($item in $r.success.items){$p=Lease-Path $item.path;if($seen.ContainsKey($p) -or @($r.records|Where-Object{(Lease-Path $_.path) -ieq $p}).Count -ne 1 -or @($item.cell).Count -ne 2){throw 'unknown-shape-path'};$seen[$p]=$true;foreach($n in $item.cell){if($null -eq $n -or [double]$n -ne [int]$n){throw 'unknown-shape-cell'}}}
  if(-not $seen.ContainsKey((Lease-Path $r.success.anchorPath)) -or -not(Strict-PointValid $r.success.requestedAnchor)){throw 'unknown-shape-anchor'}
@@ -36,7 +37,7 @@ function Unknown-ValidateSuccess($r){
  Unknown-AssertProofBinding $r
  $s=Unknown-Current $r;$area=$r.snapshot.areas[$r.targetAreaIndex];$old=@()
  foreach($i in $r.snapshot.icons){$areas=@($r.snapshot.areas|Where-Object{$i.x -ge $_.left -and $i.x -lt $_.right -and $i.y -ge $_.top -and $i.y -lt $_.bottom});if($areas.Count -ne 1 -or $null -eq $areas[0].grid){throw 'unknown-old-grid'};$old+=@{x=$i.x;y=$i.y;w=$areas[0].grid.sx;h=$areas[0].grid.sy}}
- $patch=$r.plan.patch;$input=@{proof=@{binding=$r.success.binding;samples=@($r.success.samples);maxSpacing=$r.plan.maxSpacing;center=@{x=[int][Math]::Floor(($patch.left+$patch.right)/2);y=[int][Math]::Floor(($patch.top+$patch.bottom)/2)};patch=$patch};items=@($r.success.items);anchorPath=$r.success.anchorPath;requestedAnchor=$r.success.requestedAnchor;area=$area;old=$old}|ConvertTo-Json -Depth 15 -Compress
+ $patch=$r.plan.patch;$input=@{proof=@{binding=$r.success.binding;samples=@($r.success.samples);maxSpacing=$r.plan.maxSpacing;center=@{x=[int][Math]::Floor(($patch.left+$patch.right)/2);y=[int][Math]::Floor(($patch.top+$patch.bottom)/2)};patch=$patch};items=@($r.success.items);anchorPath=$r.success.anchorPath;requestedAnchor=$r.success.requestedAnchor;anchorMode=$r.success.anchorMode;area=$area;old=$old}|ConvertTo-Json -Depth 15 -Compress
  $input=[regex]::Replace($input,'[^\x00-\x7F]',{param($m) '\u'+([int][char]$m.Value).ToString('x4')})
  if([Text.Encoding]::UTF8.GetByteCount($input) -gt 1048576){throw 'unknown-validator-input-limit'}
  $trusted=Unknown-ValidatorConfig

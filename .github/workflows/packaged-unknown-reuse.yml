@@ -1,0 +1,32 @@
+name: packaged-unknown-real-drag-reuse
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/packaged-unknown-*'
+      - 'main.js'
+      - 'lib/desktop-unknown-*'
+      - 'scripts/unknown-grid-*'
+      - '.github/workflows/packaged-unknown-reuse.yml'
+jobs:
+  isolated:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: node tools/packaged-unknown-reuse-selftest.js
+      - run: npm run build
+      - name: Packaged actual pointer drag with exact 150 fixture restoration
+        shell: powershell
+        run: ./tools/packaged-unknown-reuse-dpi-ci.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: packaged-unknown-real-drag-evidence
+          path: |
+            packaged-unknown-drag-evidence/**
+            formal-unknown-dpi-*.json

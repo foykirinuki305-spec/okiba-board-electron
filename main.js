@@ -15,6 +15,7 @@ const pr = require('./lib/preresolve');
 const dragCoords = require('./lib/dragcoords');
 const desktopPreviewPolicy = require('./lib/desktop-preview-policy');
 function leasePreview(){return desktopPreviewPolicy.enabled({isPackaged:app.isPackaged,platform:process.platform,env:process.env});}
+function unknownLeasePreview(){return desktopPreviewPolicy.unknownEnabled({isPackaged:app.isPackaged,platform:process.platform,env:process.env});}
 
 // Hidden-attribute runner for linked items (v2.0). Real attrib.exe
 // in production; OKIBA_TEST_ATTRIB=stub swaps in the counting stub.
@@ -608,6 +609,7 @@ function registerIpc() {
   // No legacy cold positioner is used by this strict path.
   const safeDesk = require('./lib/safe-desktop');
   const leaseController=require('./lib/desktop-snap-lease-controller');
+  const unknownLeaseController=require('./lib/desktop-unknown-controller');
   const leaseReceipt=require('./lib/desktop-commit-receipt');
   const residentSelection=require('./lib/desktop-resident-selection');
   let desktopLeaseClient=null,desktopLeasePending=false,desktopLeaseVerification=null;
@@ -664,7 +666,7 @@ function registerIpc() {
     const hosted=process.env.GITHUB_ACTIONS==='true'&&process.env.RUNNER_OS==='Windows'&&process.env.RUNNER_ENVIRONMENT==='github-hosted';
     if(!leaseOptIn()||(!leasePreview()&&!fake&&!hosted))throw Error('lease-test-environment-required');
     const helper=fake?{command:process.execPath,args:[path.join(__dirname,'tools','fake-helper.js')],env:{...process.env,ELECTRON_RUN_AS_NODE:'1'}}:{command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',bundledScriptPath('shell-helper.ps1')],...(leasePreview()?{env:desktopPreviewPolicy.nativeEnv(process.env)}:{})};
-    desktopLeaseClient=require('./lib/desktop-lease-client').createDesktopLeaseClient({journalDir:path.join(app.getPath('userData'),'desktop-lease-journals'),helper,allowMixed:leasePreview(),owner:{pid:process.pid}});
+    desktopLeaseClient=require('./lib/desktop-lease-client').createDesktopLeaseClient({journalDir:path.join(app.getPath('userData'),'desktop-lease-journals'),helper,allowMixed:leasePreview(),allowUnknownGrid:unknownLeasePreview(),owner:{pid:process.pid}});
     app.once('will-quit',()=>desktopLeaseClient?.disconnect());
     return desktopLeaseClient;
   }
@@ -673,6 +675,7 @@ function registerIpc() {
   const calibrationCacheFile=path.join(app.getPath('userData'),'desktop-calibration-cache.json');
   let calibrationImportGeneration=-1,calibrationImportPromise=null;
   async function ensureCalibrationImported(){
+    if(unknownLeasePreview())return;
     if(!shellHelper)return;
     shellHelper.start();
     const generation=shellHelper.stats().spawns;
@@ -713,6 +716,10 @@ function registerIpc() {
     return {moved:[],skipped:[],failed:[],blocked:true,reason,recovery,error:message};
   }
   async function desktopSnapshot() {
+    if(unknownLeasePreview()){
+      const client=leaseClient();const ready=await client.ready();if(!ready?.ok)return {ok:false,reason:ready?.reason||'unknown-preview-not-ready'};
+      const response=await client.unknown('sessionSnapshot');return response?.ok&&response.snapshot?.ok?response.snapshot:{ok:false,reason:response?.reason||'unknown-preview-snapshot-unavailable'};
+    }
     if(!leasePreview()&&process.env.OKIBA_TEST_HOOKS==='1' && process.env.OKIBA_TEST_POSITIONER==='stub') {
       if(process.env.OKIBA_TEST_DESKTOP_SNAPSHOT) return JSON.parse(process.env.OKIBA_TEST_DESKTOP_SNAPSHOT);
       return {ok:true,autoArrange:false,snap:true,sx:100,sy:100,gx:0,gy:0,origin:{x:0,y:0},
@@ -858,6 +865,8 @@ function registerIpc() {
       const point=payload.automatic?null:{x:Number(payload.screenX)+Number(snap.origin?.x),y:Number(payload.screenY)+Number(snap.origin?.y)};
       let plan=safeDesk.planDesktop({snapshot:snap,items:planned,point,automatic:!!payload.automatic});
       let calibrationPlan=null,calibrationEvidence=null;
+      const unknownCandidate=!plan.ok&&(plan.reason==='unknown-desktop'||plan.reason==='no-space')?desktopPreviewPolicy.unknownCandidate({enabled:unknownLeasePreview(),snapshot:snap,items:planned,payload,point,desktop:target.path,metadataPath:meta,calibration:desktopCalibration,samePath:ln.samePath}):null;
+      if(unknownCandidate)plan={ok:true,unknownCalibrationPending:true};
       if(!leasePreview()&&!plan.ok&&(plan.reason==='unknown-desktop'||(payload.automatic&&plan.reason==='no-space'))) {
         const candidateAreas=(snap.areas||[]).map((area,index)=>({area,index})).filter(({area})=>Object.hasOwn(area,'grid')&&area.grid===null&&(payload.automatic||(point&&point.x>=area.left&&point.x<area.right&&point.y>=area.top&&point.y<area.bottom)));
         if(payload.automatic||candidateAreas.length===1)for(const {area,index} of candidateAreas) {
@@ -875,10 +884,10 @@ function registerIpc() {
       if(leaseOptIn()) {
         const first=plan.targets?.[0];
         const targetAreaIndex=(snap.areas||[]).findIndex(a=>first&&first.x>=a.left&&first.x<a.right&&first.y>=a.top&&first.y<a.bottom);
-        const residentCandidate=(leasePreview()||process.env.OKIBA_TEST_RESIDENT_LEASE==='1')&&!calibrationPlan&&planned.every(i=>!i.isLink&&!i.crossVolume&&!ln.samePath(i.path,i.dest));
-        const mixedCandidate=leasePreview()&&!calibrationPlan&&planned.some(i=>i.isLink)&&planned.some(i=>!i.isLink)&&planned.every(i=>i.crossVolume===false&&(i.isLink?(i.hidden&&ln.samePath(i.path,i.dest)):!ln.samePath(i.path,i.dest)));
-        const candidate={kind:mixedCandidate?'mixed-hidden-resident':residentCandidate?'resident-archive-samevolume':'samepath-hidden',desktop:target.path,items:planned.map(i=>({path:i.path,destination:i.dest,hidden:i.hidden,...(mixedCandidate?{mode:i.isLink?'hidden-link':'resident-file'}:{}),fileIdentity:String(i.identity.dev)+':'+String(i.identity.ino)})),snapshot:snap,targetAreaIndex,metadataPaths:[meta],targets:(plan.targets||[]).map(t=>({...t,path:planned.find(i=>i.path===t.path)?.dest})),buffer:plan.buffer};
-        const eligible=!calibrationPlan&&(mixedCandidate||residentCandidate||planned.every(i=>i.isLink&&i.hidden&&ln.samePath(i.path,i.dest)))&&leaseController.validateScope(candidate,{allowMixed:leasePreview()});
+        const residentCandidate=!unknownCandidate&&(leasePreview()||process.env.OKIBA_TEST_RESIDENT_LEASE==='1')&&!calibrationPlan&&planned.every(i=>!i.isLink&&!i.crossVolume&&!ln.samePath(i.path,i.dest));
+        const mixedCandidate=!unknownCandidate&&leasePreview()&&!calibrationPlan&&planned.some(i=>i.isLink)&&planned.some(i=>!i.isLink)&&planned.every(i=>i.crossVolume===false&&(i.isLink?(i.hidden&&ln.samePath(i.path,i.dest)):!ln.samePath(i.path,i.dest)));
+        const candidate=unknownCandidate||{kind:mixedCandidate?'mixed-hidden-resident':residentCandidate?'resident-archive-samevolume':'samepath-hidden',desktop:target.path,items:planned.map(i=>({path:i.path,destination:i.dest,hidden:i.hidden,...(mixedCandidate?{mode:i.isLink?'hidden-link':'resident-file'}:{}),fileIdentity:String(i.identity.dev)+':'+String(i.identity.ino)})),snapshot:snap,targetAreaIndex,metadataPaths:[meta],targets:(plan.targets||[]).map(t=>({...t,path:planned.find(i=>i.path===t.path)?.dest})),buffer:plan.buffer};
+        const eligible=unknownCandidate?true:!calibrationPlan&&(mixedCandidate||residentCandidate||planned.every(i=>i.isLink&&i.hidden&&ln.samePath(i.path,i.dest)))&&leaseController.validateScope(candidate,{allowMixed:leasePreview()});
         if(eligible){
           let after=mixedCandidate?null:residentCandidate?residentSelection.prepareResidentMetadata(before,planned.map(i=>i.path),folder):prepareLeaseMetadata(before,planned.map(i=>i.path),ln.samePath);
           const identity=()=>{const st=fs.statSync(meta);return String(st.dev)+':'+String(st.ino);};
@@ -906,8 +915,8 @@ function registerIpc() {
             replace:tmp=>fs.renameSync(tmp,meta),
             removeTemporary:tmp=>{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}
           }});
-          const leaseAdapter=client.adapter(commitFn);
-          leaseTransaction=await leaseController.runLease({scope,receipts,adapter:leaseAdapter,allowMixed:leasePreview()});
+          const leaseAdapter=unknownCandidate?unknownLeaseController.createUnknownAdapter(client,commitFn):client.adapter(commitFn);
+          leaseTransaction=unknownCandidate?await unknownLeaseController.runUnknownLease({scope,receipts,adapter:leaseAdapter}):await leaseController.runLease({scope,receipts,adapter:leaseAdapter,allowMixed:leasePreview()});
           diagnostic('lease-transaction',{result:leaseTransaction});
           if(leaseTransaction.pendingVerification||(!leaseTransaction.ok&&leaseTransaction.resolution?.state!=='aborted')){
             beginLeaseVerification({result:leaseTransaction,adapter:leaseAdapter,diagnostic,onCommitted:()=>recordHistory(payload.boardName,{folder,positions:data.positions,links:data.links},planned.map(i=>({kind:i.isLink?'linked':'resident',destPath:i.dest,fileName:i.name,col:i.cell[0],row:i.cell[1]})),payload.groupId)});
@@ -1505,7 +1514,7 @@ function registerIpc() {
       if (target?.error) result.error = target.error;
       dropLog.push({ kind: 'resolve', x, y, target, pre: resolveStage === 'pre' });
       if(target?.type==='desktop' && target.path) {
-        const tm=Date.now();const strict=await safeDesktopMove(payload,target);moveMs=Date.now()-tm;
+        const tm=Date.now();const strict=await safeDesktopMove({...payload,automatic:false},target);moveMs=Date.now()-tm;
         dropLog.push({kind:'safe-desktop',ok:!strict.error,reason:strict.reason||null});
         writeTiming();return {...result,...strict,resolved:target};
       }
