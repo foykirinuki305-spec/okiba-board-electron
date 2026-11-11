@@ -955,13 +955,15 @@ function Calibrate-DesktopGrid($baseline,$probe,$plan) {
         Start-Sleep -Milliseconds 50
       }while([DateTime]::UtcNow -lt $until)
       if($fresh.new.Count -ne 1){return @{ok=$false;reason='calibration-probe-not-ready'}}
-      if($null -ne $state -and -not (Strict-Near $state.new[0] $fresh.new[0])){return @{ok=$false;reason='calibration-probe-changed'}}
+      if($null -ne $state -and -not (Strict-Near $state.new[0] $fresh.new[0])){
+        return @{ok=$false;reason='calibration-probe-changed';phase='before-next-sample';sampleId=$q.id;axis=$q.axis;pass=$q.pass;elapsedMs=$clock.ElapsedMilliseconds;sampleCount=$samples.Count;previous=@{x=$state.new[0].x;y=$state.new[0].y;index=$state.new[0].index};current=@{x=$fresh.new[0].x;y=$fresh.new[0].y;index=$fresh.new[0].index};lastSample=$(if($samples.Count){$samples[$samples.Count-1]}else{$null});request=@{x=$q.x;y=$q.y}}
+      }
       $i=$fresh.new[0]
       if($clock.ElapsedMilliseconds -ge 90000){return @{ok=$false;reason='calibration-deadline'}}
       [OkibaFolderView]::PositionNewItem([int]$i.index,$dest,[int]$i.x,[int]$i.y,[int]$q.x,[int]$q.y)
       Start-Sleep -Milliseconds 180
       $after=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) @($probe)
-      if(-not $after.ok){$after.phase='calibration-after';return $after}
+      if(-not $after.ok){$after.phase='calibration-after';$after.sampleId=$q.id;$after.axis=$q.axis;$after.pass=$q.pass;$after.elapsedMs=$clock.ElapsedMilliseconds;return $after}
       if($after.new.Count -ne 1){return @{ok=$false;reason='calibration-probe-disappeared'}}
       $i=$after.new[0]
       if($i.x -lt $patch.left -or $i.y -lt $patch.top -or $i.x -gt $patch.right -or $i.y -gt $patch.bottom){return @{ok=$false;reason='calibration-left-patch'}}
