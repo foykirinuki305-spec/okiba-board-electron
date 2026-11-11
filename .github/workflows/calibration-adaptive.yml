@@ -1,0 +1,28 @@
+name: calibration-adaptive
+on:
+  push:
+    paths:
+      - 'tools/calibration-adaptive-*'
+      - '.github/workflows/calibration-adaptive.yml'
+  workflow_dispatch:
+jobs:
+  prototype:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Known 100 percent native Shell calibration comparison
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -File tools/calibration-adaptive-ci.ps1 2>&1 | Tee-Object calibration-adaptive-ci.log
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: calibration-adaptive-evidence
+          path: |
+            calibration-adaptive-ci.json
+            calibration-adaptive-ci.log
