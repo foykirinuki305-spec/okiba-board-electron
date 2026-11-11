@@ -98,9 +98,10 @@ async function main(){
   report.passed=true;note('RESEARCH_PASS_NOT_MIXED_DPI_PROOF',{denseShortcuts:42,hiddenPerCycle:6,oldCellGuards:3,cycles:3,oldIconsUnchanged:true});
  }finally{
   if(!await c.stopAndWait(10000))unsafe=true;
-  if(!unsafe){for(const f of owned){assert.equal(path.dirname(f),desktop);assert(path.basename(f).startsWith(tag));if(fs.existsSync(f))fs.unlinkSync(f);}const p=path.resolve(temp);assert(p.startsWith(fs.realpathSync.native(os.tmpdir())+path.sep)&&path.basename(p).startsWith('okiba-dense-ci-'));fs.rmSync(p,{recursive:true,force:true});}
+  if(!unsafe){for(const f of owned){assert.equal(path.dirname(f),desktop);assert(path.basename(f).startsWith(tag));if(fs.existsSync(f))fs.unlinkSync(f);}}
   else {report.passed=false;report.cleanupError='helper not stopped; cleanup withheld';}
   if(!unsafe&&original){try{for(let n=0;n<60;n++){const s=await observe('cleanup',original);if(s.ok&&s.icons.length===original.icons.length){note('cleanup',{originalIconsUnchanged:true});break;}if(n===59)throw Error('fixture icons remain after cleanup');await sleep(100);}}finally{if(!await c.stopAndWait(10000))unsafe=true;}}
+  if(!unsafe){const p=path.resolve(temp);assert(p.startsWith(fs.realpathSync.native(os.tmpdir())+path.sep)&&path.basename(p).startsWith('okiba-dense-ci-'));fs.rmSync(p,{recursive:true,force:true});}
   fs.writeFileSync(path.join(root,'hidden-snap-off-ci.json'),JSON.stringify(report,null,2));
   if(unsafe)throw Error(report.cleanupError);
  }
