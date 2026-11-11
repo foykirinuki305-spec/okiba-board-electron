@@ -565,8 +565,8 @@ async function main() {
   await page.locator('.item', { hasText: '外部素材' }).first().click({ button: 'right' });
   await page.waitForSelector('#ctxMenu:not([hidden]) .ctx-item');
   const missMenu = await page.locator('#ctxMenu .ctx-item').allTextContents();
-  assert(missMenu.length === 1 && missMenu[0].includes('ボードから外す'),
-    'missing item menu offers ONLY ボードから外す (nothing destructive)');
+  assert(missMenu.length === 2 && missMenu[0].includes('素材を探す') && missMenu[1].includes('ボードから外す'),
+    'missing item menu offers search and unlink only (nothing destructive)');
   await page.locator('#ctxMenu .ctx-item', { hasText: 'ボードから外す' })
     .dispatchEvent('mousedown');
   await waitFor(async () => {
