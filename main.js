@@ -696,6 +696,18 @@ function registerIpc() {
   let desktopLeaseClient=null,desktopLeasePending=false,desktopLeaseVerification=null;
   function leaseOptIn(){return process.env.OKIBA_TEST_HOOKS==='1'&&process.env.OKIBA_TEST_SNAP_LEASE==='1';}
   function pendingLeaseResult(reason){return {moved:[],destinations:[],skipped:[],failed:[],error:'配置処理の完了をまだ確認できません。素材の再移動はせず、このまま確認結果をお待ちください。',reason,pendingVerification:true,retrySafe:false,position:{status:'pending'}};}
+  // BEGIN tested-desktop-lease-preflight
+  async function desktopLeasePreflight(target,clientFactory=leaseClient) {
+    if(!leaseOptIn())return {ok:true,blocked:false};
+    try{
+      const c=clientFactory();const ready=await c.ready();
+      if(!ready?.ok)return {ok:false,blocked:true,reason:ready?.reason||'lease-readiness-unverified'};
+      const state=await c.desktopState();
+      if(!state?.ok||typeof state.blocked!=='boolean'||typeof state.desktop!=='string'||!target?.path||!ln.samePath(state.desktop,target.path))return {ok:false,blocked:true,reason:'desktop-lease-state-unverified'};
+      return state;
+    }catch(e){return {ok:false,blocked:true,reason:String(e.message||e)};}
+  }
+  // END tested-desktop-lease-preflight
   // BEGIN tested-main-lease-verification
   function beginLeaseVerification({result,adapter,onCommitted,diagnostic}) {
     desktopLeasePending=true;
@@ -724,7 +736,12 @@ function registerIpc() {
   }
   // END tested-main-lease-verification
   function leaseClient(){
-    if(desktopLeaseClient)return desktopLeaseClient;
+    if(desktopLeaseClient){
+      if(desktopLeaseClient.diagnostics().connected||desktopLeasePending)return desktopLeaseClient;
+      // Failed read-only init has disconnected. A new probe may observe a lease
+      // which another watchdog has since finalized; never erase its journal.
+      desktopLeaseClient=null;
+    }
     const fake=process.env.OKIBA_TEST_HELPER==='fake';
     const hosted=process.env.GITHUB_ACTIONS==='true'&&process.env.RUNNER_OS==='Windows'&&process.env.RUNNER_ENVIRONMENT==='github-hosted';
     if(!leaseOptIn()||(!fake&&!hosted))throw Error('lease-test-environment-required');
@@ -865,6 +882,14 @@ function registerIpc() {
     const diagnostic=(phase,detail)=>{try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop diagnostic '+JSON.stringify({id:diagnosticId,phase,...detail})+'\n');}catch(_){}};
     try {
       if(!payload?.boardName || !target?.path) return desktopBlocked('unknown-board');
+      // This shared preflight covers ALL Desktop return kinds, including legacy
+      // fallback. It does NOT reserve the global lock for a legacy operation:
+      // a different process starting after this check remains a documented race.
+      const available=await desktopLeasePreflight(target);
+      if(!available.ok||available.blocked){
+        diagnostic('lease-shared-preflight-blocked',{state:available});
+        return {...desktopBlocked(available.reason||'desktop-lease-active-or-unresolved'),leaseBlocked:true,retrySafe:false,error:'別の配置処理の完了・復旧を確認できないため中止しました。素材は変更していません。'};
+      }
       const folder=guardBoard(payload.boardName), data=bf.loadBoard(folder);
       const targetStat=fs.statSync(target.path);if(!targetStat.isDirectory())return desktopBlocked('invalid-destination');
       const meta=path.join(folder,'.okiba-board.json');

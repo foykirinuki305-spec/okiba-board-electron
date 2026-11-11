@@ -22,6 +22,9 @@ jobs:
       - name: Independent global Desktop exclusion
         shell: pwsh
         run: node ./tools/desktop-lease-global-lock-selftest.js
+      - name: Initialization failure does not leak watchdogs
+        shell: pwsh
+        run: node ./tools/desktop-lease-init-selftest.js
       - name: Canonical lease geometry pure checks
         shell: pwsh
         run: pwsh -NoProfile -File ./tools/snap-lease-geometry-selftest.ps1
@@ -31,6 +34,9 @@ jobs:
       - name: Truthful attribute notification contract without Shell events
         shell: pwsh
         run: powershell -NoProfile -File ./tools/hidden-notify-stub-selftest.ps1
+      - name: Batch attribute safety pure checks
+        shell: pwsh
+        run: powershell -NoProfile -File ./tools/lease-attribute-batch-selftest.ps1
       - name: Atomic journal replacement pure checks
         shell: pwsh
         run: powershell -NoProfile -File ./tools/snap-lease-json-selftest.ps1

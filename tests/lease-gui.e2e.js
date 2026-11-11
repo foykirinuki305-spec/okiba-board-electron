@@ -18,13 +18,33 @@ async function scenario(mode){
  const env={...process.env,OKIBA_BASE:base,OKIBA_OLD_BASE:old,OKIBA_SHORTCUT_DESKTOP:desktop,OKIBA_CLEANUP_DESKTOP:desktop,OKIBA_CLEANUP_DOWNLOADS:desktop,OKIBA_TEST_DESKTOP_DIR:desktop,OKIBA_TEST_HOOKS:'1',OKIBA_TEST_ATTRIB:'stub',OKIBA_TEST_HELPER:'fake',OKIBA_TEST_SNAP_LEASE:'1',OKIBA_TEST_POSITIONER:'',OKIBA_TEST_RESOLVER_DIR:'',OKIBA_FAKE_LANDING:desktop,OKIBA_FAKE_TYPE:'desktop',OKIBA_TEST_DESKTOP_SNAPSHOT:JSON.stringify(snapshot),OKIBA_FAKE_LEASE:'1',OKIBA_FAKE_LEASE_ROOT:temp,OKIBA_FAKE_LEASE_LOG:log,OKIBA_FAKE_LEASE_MODE:isDrag?'success':mode,ELECTRON_DISABLE_SECURITY_WARNINGS:'1'};
  let app,clean=false,afterForCleanup=null;
  try{
-  app=await electron.launch({args:[ROOT,'--no-sandbox','--user-data-dir='+profile],env,timeout:60000});const page=await app.firstWindow();await page.waitForSelector('#boardGrid .board-card');await page.click('#boardGrid .board-card[data-name="Lease"]');
+  app=await electron.launch({args:[ROOT,'--no-sandbox','--user-data-dir='+profile],env,timeout:60000});let page=await app.firstWindow();await page.waitForSelector('#boardGrid .board-card');await page.click('#boardGrid .board-card[data-name="Lease"]');
   await page.evaluate(paths=>window.okiba.linkFiles('Lease',paths,{anchor:[3,1],offsets:[[0,0],[0,1]]}),files);
   const card=n=>page.locator('.item').filter({has:page.locator('.name',{hasText:n})}).first();
   await wait(async()=>(await page.locator('.item .name').allTextContents()).includes('first.txt'),'linked cards');await sleep(500);
   // Install a future-version field after normal intake, so the tested commit must retain it.
   const data=JSON.parse(fs.readFileSync(meta,'utf8'));data.future={untouched:['value',17]};fs.writeFileSync(meta,JSON.stringify(data));await sleep(500);
   const before=fs.readFileSync(meta,'utf8'),beforeData=JSON.parse(before);afterForCleanup=JSON.stringify({...beforeData,links:beforeData.links.filter(l=>l.path!==files[0])},null,2);const keptBox=await card('keep.txt').boundingBox();
+  if(mode==='restart-global'||mode==='restart-journal'){
+   await app.close();app=null;
+   await wait(()=>[...new Set(records().filter(r=>r.cmd==='fake-start').flatMap(r=>[r.pid,r.parent]))].every(pid=>{try{process.kill(pid,0);return false;}catch{return true;}}),'first app and watchdog stopped');
+   let marker;
+   if(mode==='restart-global'){
+    const lock=require('../lib/desktop-lease-global-lock').createDesktopLeaseLock({desktop,sessionId:0,localAppData:path.join(temp,'localAppData')});marker=lock.pointer;
+   }else marker=path.join(profile,'desktop-lease-journals','a'.repeat(32)+'.json');
+   fs.mkdirSync(path.dirname(marker),{recursive:true});fs.writeFileSync(marker,JSON.stringify({version:1,token:'a'.repeat(32),phase:'blocked',fixture:true}));
+   app=await electron.launch({args:[ROOT,'--no-sandbox','--user-data-dir='+profile],env,timeout:60000});page=await app.firstWindow();await page.waitForSelector('#boardGrid .board-card');await page.click('#boardGrid .board-card[data-name="Lease"]');
+   const blocked=await page.evaluate(p=>window.okiba.safeTakeout({boardName:'Lease',paths:[p],linkedPaths:[]}),keep);
+   check(blocked.leaseBlocked===true&&blocked.retrySafe===false,'restart unresolved state blocks legacy resident return');
+   check(fs.existsSync(keep)&&!fs.existsSync(path.join(desktop,'keep.txt')),'unresolved preflight performs no file move');check(fs.readFileSync(meta,'utf8')===before,'unresolved preflight preserves metadata bytes');
+   check(!records().some(r=>r.cmd==='leasePrepare'),'unresolved preflight opens no new lease');
+   // Fixture operator resolves its own marker. The app must not delete it itself.
+   check(fs.existsSync(marker),'app preserved unresolved marker');fs.unlinkSync(marker);await sleep(500);
+   const unblocked=await page.evaluate(p=>window.okiba.safeTakeout({boardName:'Lease',paths:[p],linkedPaths:[]}),keep);
+   check(!unblocked.error&&unblocked.moved.includes(keep),'legacy path still works after authoritative fixture resolution');
+   check(fs.readFileSync(path.join(desktop,'keep.txt'),'utf8')==='unchanged resident','legacy original bytes preserved');
+   return;
+  }
   if(isDrag){
    await card('first.txt').click();await card('second.txt').click({modifiers:['Control']});
    check(await page.locator('.item.selected').count()===2,'pointer group has both selected links');
@@ -91,4 +111,4 @@ async function scenario(mode){
   if(clean){const resolved=path.resolve(temp);assert(resolved.startsWith(path.resolve(os.tmpdir())+path.sep)&&path.basename(resolved).startsWith('okiba-lease-gui-'));fs.rmSync(resolved,{recursive:true,force:true});}
  }
 }
-(async()=>{for(const mode of ['success','reveal-fail','pending','transient-native','retry-native','release-fail','foreign-change','drag-success','drag-occupied','drag-outside'])await scenario(mode);console.log('LEASE GUI '+checks+' checks PASS');})().catch(e=>{console.error(e);process.exitCode=1;});
+(async()=>{for(const mode of ['success','reveal-fail','pending','transient-native','retry-native','release-fail','foreign-change','restart-global','restart-journal','drag-success','drag-occupied','drag-outside'])await scenario(mode);console.log('LEASE GUI '+checks+' checks PASS');})().catch(e=>{console.error(e);process.exitCode=1;});

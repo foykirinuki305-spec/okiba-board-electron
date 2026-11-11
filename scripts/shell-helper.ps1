@@ -716,6 +716,14 @@ public static class OkibaFolderView {
   if(pid!=(uint)expectedPid||(hwnd.ToInt64()!=expectedLv&&!IsChild(hwnd,new IntPtr(expectedLv))))throw new InvalidOperationException("lease-view-changed");
   using(var p=System.Diagnostics.Process.GetProcessById(expectedPid)){if(p.StartTime.ToUniversalTime().Ticks.ToString()!=expectedStarted)throw new InvalidOperationException("lease-explorer-changed");}
  }
+ // Read-only per-item lease witness. Never changes settings or positions.
+ public static void AssertLeaseSessionFlags(uint expectedFlags,long expectedLv,int expectedPid,string expectedStarted){
+  using(var s=new Session()){
+   AssertLeaseSession(s,expectedLv,expectedPid,expectedStarted);
+   uint flags;Marshal.ThrowExceptionForHR(s.Folder.GetCurrentFolderFlags(out flags));
+   if(flags!=expectedFlags||(flags&5)!=0||s.Folder.GetAutoArrange()!=1)throw new InvalidOperationException("lease-flags-changed");
+  }
+ }
  public static void SetLeaseSnap(uint expectedFlags,bool enabled,long expectedLv,int expectedPid,string expectedStarted,string[] identities,int[] xs,int[] ys){
   if(identities==null||xs==null||ys==null||identities.Length!=xs.Length||xs.Length!=ys.Length)throw new ArgumentException("lease-invalid-guard");
   using(var s=new Session()){

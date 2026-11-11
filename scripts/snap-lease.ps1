@@ -65,8 +65,9 @@ function Lease-CheckRecord($record) {
  return $n
  }finally{Add-LeasePerf 'metadatafilechecks' $metricClock}
 }
-function Lease-SetHidden($record,[bool]$hidden){
+function Lease-SetHidden($record,[bool]$hidden,$expectedHidden=$null){
  $n=Lease-CheckRecord $record
+ if($null -ne $expectedHidden -and $n.hidden -ne [bool]$expectedHidden){throw 'lease-selected-hidden-state-changed'}
  Measure-LeaseStep 'attributes' {$null=[OkibaFileAttributes]::SetRecordedAndNotify($record.path,$record.identity,$n.hidden,$hidden,$record.size,$record.mtime,[uint32]$record.attributes)}
 }
 function Lease-SetSnap($r,$current,[bool]$enabled){
@@ -134,6 +135,29 @@ function Lease-WaitVisibility($r,[bool]$visible){
  }while([DateTime]::UtcNow -lt $until)
  throw 'lease-visibility-timeout'
 }
+function Lease-AssertFastOff($r,[uint32]$off){
+ [OkibaFolderView]::AssertLeaseSessionFlags($off,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted)
+}
+function Lease-RevealAttributeBatch($r,[uint32]$off){
+ $attempted=New-Object 'System.Collections.Generic.List[string]';$changed=New-Object 'System.Collections.Generic.List[string]'
+ try{
+  foreach($record in $r.records){if(-not (Lease-CheckRecord $record).hidden){throw 'lease-selected-not-hidden'}}
+  $before=Measure-LeaseStep 'batchPreGuard' {Lease-Snapshot};$null=Lease-Guard $r $before
+  if([uint32]$before.folderFlags -ne $off){throw 'lease-flags-changed'}
+  foreach($record in $r.records){
+   Measure-LeaseStep 'itemFastGuard' {Lease-AssertFastOff $r $off}
+   $attempted.Add([string]$record.path)
+   Lease-SetHidden $record $false $true
+   $changed.Add([string]$record.path)
+  }
+  $after=Measure-LeaseStep 'batchPostGuard' {Lease-Snapshot};$null=Lease-Guard $r $after
+  if([uint32]$after.folderFlags -ne $off){throw 'lease-flags-changed'}
+ }catch{
+  # A setter can fail after mutation; attemptedPaths is deliberately conservative.
+  $script:LeaseBatchFailure=@{attemptedPaths=@($attempted.ToArray());changedPaths=@($changed.ToArray());partialMutationPossible=($attempted.Count -gt 0)}
+  throw
+ }
+}
 function Lease-RevealPlace([string]$token){
  $script:LeasePhase='reveal-preflight'
  $r=Lease-Require $token;if(([OkibaLeaseOwner]::Read()).state -ne 'alive'){throw 'lease-owner-not-alive'};$s=Lease-Snapshot;Lease-ValidateRecovery $r $s
@@ -143,7 +167,7 @@ function Lease-RevealPlace([string]$token){
  Lease-SetSnap $r $s $false
  $off=[uint32]$r.originalFlags -band ([uint32]::MaxValue -bxor 4)
  $script:LeasePhase='reveal-attributes'
- foreach($record in $r.records){$s=Measure-LeaseStep 'perRecordSnapshot' {Lease-Snapshot};$null=Lease-Guard $r $s;if([uint32]$s.folderFlags -ne $off){throw 'lease-flags-changed'};Lease-SetHidden $record $false}
+ Lease-RevealAttributeBatch $r $off
  $script:LeasePhase='reveal-arrival'
  $s=Measure-LeaseStep 'arrival' {Lease-WaitVisibility $r $true};$selected=Lease-Guard $r $s
  if([uint32]$s.folderFlags -ne $off){throw 'lease-flags-changed'}
@@ -188,7 +212,7 @@ function Lease-Rollback([string]$token){
 }
 function Invoke-SnapLeaseRequestCore($req){
  try{
-  $script:LeasePhase=[string]$req.cmd
+  $script:LeasePhase=[string]$req.cmd;$script:LeaseBatchFailure=$null
   if($env:OKIBA_SNAP_LEASE -ne '1'){throw 'lease-dedicated-helper-required'}
   switch($req.cmd){
    'leaseHelperIdentity' {return @{ok=$true;pid=$PID;started=([Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().Ticks.ToString());sessionId=[Diagnostics.Process]::GetCurrentProcess().SessionId;desktop=[Environment]::GetFolderPath('DesktopDirectory');localAppData=[Environment]::GetFolderPath('LocalApplicationData')}}
@@ -206,7 +230,7 @@ function Invoke-SnapLeaseRequestCore($req){
  }catch{
   $inner=$_.Exception;while($null -ne $inner.InnerException){$inner=$inner.InnerException}
   $detail=[regex]::Replace([string]$inner.Message,'[^\x20-\x7E]','?')
-  return @{ok=$false;reason='lease-operation-failed';detail=$detail;phase=$script:LeasePhase;errorType=$inner.GetType().FullName;hresult=('0x{0:X8}' -f $inner.HResult);line=$_.InvocationInfo.ScriptLineNumber}
+  return @{ok=$false;reason='lease-operation-failed';detail=$detail;phase=$script:LeasePhase;errorType=$inner.GetType().FullName;hresult=('0x{0:X8}' -f $inner.HResult);line=$_.InvocationInfo.ScriptLineNumber;batch=$script:LeaseBatchFailure}
  }
 }
 
