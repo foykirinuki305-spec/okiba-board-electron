@@ -43,6 +43,10 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -File ./tools/helper-calibration-selftest.ps1
 
+      - name: Calibration settle guard pure checks
+        shell: pwsh
+        run: pwsh -NoProfile -File ./tools/helper-settle-selftest.ps1
+
       # Real-desktop integration test: position-desktop-icons.ps1
       # drives the runner's actual Explorer desktop listview (the
       # v1.3.0 LVITEM-offset bug passed every stubbed test and only

@@ -922,6 +922,35 @@ function Get-StrictTransactionState($baseline,$current,$targets) {
 # One transaction-local proof only. Never persist calibration from another
 # desktop state, and never accept caller-supplied grid without measured proof.
 $script:DesktopCalibration=$null
+function Wait-CalibrationSettled($baseline,$probe,$patch,$clock) {
+  $settle=[Diagnostics.Stopwatch]::StartNew();$candidate=$null;$candidateAt=0;$lastIssue=$null
+  Start-Sleep -Milliseconds 180
+  while($settle.ElapsedMilliseconds -lt 1500 -and $clock.ElapsedMilliseconds -lt 90000){
+    $now=Get-StrictDesktopSnapshot
+    if(-not $now.ok){
+      $lastIssue=$now
+      if($now.reason -ne 'desktop-changing'){return @{ok=$false;reason='calibration-snapshot-failed';snapshotDetail=$now}}
+      # An internally inconsistent read is not evidence of an old-icon move.
+      # A separately readable raw snapshot still must preserve all old icons.
+      $raw=Get-RawStrictDesktopSnapshot
+      if($raw.ok){
+        $guard=Get-StrictTransactionState $baseline $raw @($probe)
+        if(-not $guard.ok){$guard.snapshotDetail=$raw.reason;return $guard}
+        if($guard.new.Count -eq 1){$i=$guard.new[0];if($i.x -lt $patch.left -or $i.y -lt $patch.top -or $i.x -gt $patch.right -or $i.y -gt $patch.bottom){return @{ok=$false;reason='calibration-left-patch';observed=@{x=$i.x;y=$i.y}}}}
+      }elseif($raw.reason -ne 'desktop-changing'){return @{ok=$false;reason='calibration-raw-snapshot-failed';snapshotDetail=$raw}}
+      $candidate=$null;Start-Sleep -Milliseconds 150;continue
+    }
+    $current=Get-StrictTransactionState $baseline $now @($probe)
+    if(-not $current.ok){return $current}
+    if($current.new.Count -ne 1){return @{ok=$false;reason='calibration-probe-disappeared'}}
+    $i=$current.new[0]
+    if($i.x -lt $patch.left -or $i.y -lt $patch.top -or $i.x -gt $patch.right -or $i.y -gt $patch.bottom){return @{ok=$false;reason='calibration-left-patch';observed=@{x=$i.x;y=$i.y}}}
+    if($null -ne $candidate -and (Strict-Near $candidate.new[0] $i) -and $settle.ElapsedMilliseconds-$candidateAt -ge 150){return $current}
+    $candidate=$current;$candidateAt=$settle.ElapsedMilliseconds
+    Start-Sleep -Milliseconds 150
+  }
+  return @{ok=$false;reason='calibration-settle-timeout';elapsedMs=$clock.ElapsedMilliseconds;snapshotDetail=$lastIssue;lastProbe=$(if($null -ne $candidate){@{x=$candidate.new[0].x;y=$candidate.new[0].y}}else{$null})}
+}
 function Calibrate-DesktopGrid($baseline,$probe,$plan) {
   $script:DesktopCalibration=$null
   $clock=[Diagnostics.Stopwatch]::StartNew()
@@ -961,8 +990,7 @@ function Calibrate-DesktopGrid($baseline,$probe,$plan) {
       $i=$fresh.new[0]
       if($clock.ElapsedMilliseconds -ge 90000){return @{ok=$false;reason='calibration-deadline'}}
       [OkibaFolderView]::PositionNewItem([int]$i.index,$dest,[int]$i.x,[int]$i.y,[int]$q.x,[int]$q.y)
-      Start-Sleep -Milliseconds 180
-      $after=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) @($probe)
+      $after=Wait-CalibrationSettled $baseline $probe $patch $clock
       if(-not $after.ok){$after.phase='calibration-after';$after.sampleId=$q.id;$after.axis=$q.axis;$after.pass=$q.pass;$after.elapsedMs=$clock.ElapsedMilliseconds;return $after}
       if($after.new.Count -ne 1){return @{ok=$false;reason='calibration-probe-disappeared'}}
       $i=$after.new[0]
