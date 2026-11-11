@@ -1729,6 +1729,7 @@ app.whenReady().then(async () => {
   startupRoute = sc.routeFromArgv(process.argv, BASE);
   registerIpc();
   createWindow();
+  if(process.platform==='win32'&&!leasePreview()&&!legacyDesktopTest())require('./lib/folder-return').warmNative(path.join(app.isPackaged?process.resourcesPath:__dirname,'scripts','folder-return.ps1')).catch(()=>{});
   setupWatchers(null);
   // Once-per-version update cleanup (v2.2.1): fire and forget —
   // it runs after the window is up and never blocks startup.
