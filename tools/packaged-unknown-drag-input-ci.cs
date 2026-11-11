@@ -24,7 +24,7 @@ public static class OkibaDragInputCI {
   if(IntPtr.Size!=8)throw new Exception("x64 only");uint got;var w=GetForegroundWindow();GetWindowThreadProcessId(w,out got);if(got!=pid)throw new Exception("foreground mismatch");
   if(GetAncestor(WindowFromPoint(new P{x=x,y=y}),2)!=w)throw new Exception("start outside owned window");R wr;GetWindowRect(w,out wr);
   if(tx<l||tx>=r||ty<t||ty>=b||(tx>=wr.l&&tx<wr.r&&ty>=wr.t&&ty<wr.b))throw new Exception("drop outside workarea or in app");
-  var hit=WindowFromPoint(new P{x=tx,y=ty});var kind=new StringBuilder(256);GetClassName(hit,kind,256);if(kind.ToString()!="SysListView32"&&kind.ToString()!="WorkerW"&&kind.ToString()!="Progman")throw new Exception("drop is not exposed desktop");
+  var hit=WindowFromPoint(new P{x=tx,y=ty});var kind=new StringBuilder(256);GetClassName(hit,kind,256);if(kind.ToString()!="SysListView32"&&kind.ToString()!="WorkerW"&&kind.ToString()!="Progman"){uint hitPid;GetWindowThreadProcessId(hit,out hitPid);R hr;GetWindowRect(hit,out hr);throw new Exception("drop is not exposed desktop: class="+kind+" ownerPID="+hitPid+" hwnd="+hit.ToInt64()+" rect="+hr.l+","+hr.t+","+hr.r+","+hr.b+" target="+tx+","+ty);}
   P original;if(!GetCursorPos(out original))throw new Exception("original cursor unknown");bool down=false;
   try{MoveExact(x,y);Thread.Sleep(150);if(GetForegroundWindow()!=w)throw new Exception("foreground changed");
    if(SendInput(1,new[]{new INPUT{flags=2}},40)!=1)throw new Exception("down failed");down=true;
