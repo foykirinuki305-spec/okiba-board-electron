@@ -1,4 +1,4 @@
-param([ValidateSet('none','notify')][string]$Mode='none')
+param([ValidateSet('none','notify','delete-create')][string]$Mode='none')
 $ErrorActionPreference='Stop'
 if($env:GITHUB_ACTIONS-ne'true'-or$env:RUNNER_OS-ne'Windows'-or$env:RUNNER_ENVIRONMENT-ne'github-hosted'){throw 'Hosted Windows CI only; user Desktop forbidden'}
 . (Join-Path $PSScriptRoot 'desktop-fixture-guard.ps1')

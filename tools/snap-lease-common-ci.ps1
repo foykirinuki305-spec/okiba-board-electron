@@ -28,10 +28,30 @@ public static class LeaseFileCI {
  public static void Updated(string p){if(!System.IO.File.Exists(p))throw new InvalidOperationException("missing-file");SHChangeNotify(0x2000u,0x1005u,p,IntPtr.Zero);}
 }
 '@
-function Read-LeaseJson([string]$p){return (Get-Content -LiteralPath $p -Raw|ConvertFrom-Json)}
+function Invoke-LeaseFileExchange($action){
+ for($attempt=0;$attempt -lt 20;$attempt++){
+  try{return (& $action)}catch{
+   $ex=$_.Exception;while($ex.InnerException){$ex=$ex.InnerException}
+   $code=$ex.HResult -band 65535
+   if($ex -isnot [IO.IOException] -or $code -notin @(2,32,33) -or $attempt -eq 19){throw}
+   Start-Sleep -Milliseconds 10
+  }
+ }
+}
+function Read-LeaseJson([string]$p){
+ $text=Invoke-LeaseFileExchange {
+  $stream=$null;$reader=$null
+  try{
+   $stream=[IO.FileStream]::new($p,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+   $reader=[IO.StreamReader]::new($stream,[Text.Encoding]::UTF8,$true)
+   return $reader.ReadToEnd()
+  }finally{if($reader){$reader.Dispose()}elseif($stream){$stream.Dispose()}}
+ }
+ return ($text|ConvertFrom-Json -ErrorAction Stop)
+}
 function Save-LeaseJson([string]$p,$value){
  $tmp=$p+'.'+[guid]::NewGuid().ToString('N')+'.tmp';[IO.File]::WriteAllText($tmp,($value|ConvertTo-Json -Depth 24 -Compress),[Text.UTF8Encoding]::new($false))
- if([IO.File]::Exists($p)){[IO.File]::Replace($tmp,$p,[System.Management.Automation.Language.NullString]::Value)}else{[IO.File]::Move($tmp,$p)}
+ Invoke-LeaseFileExchange {if([IO.File]::Exists($p)){[IO.File]::Replace($tmp,$p,[System.Management.Automation.Language.NullString]::Value)}else{[IO.File]::Move($tmp,$p)}}
 }
 function Assert-LeasePath($p,$tag){
  $full=[IO.Path]::GetFullPath($p);$desktop=[IO.Path]::GetFullPath([Environment]::GetFolderPath('DesktopDirectory'))
@@ -81,3 +101,4 @@ function Wait-LeaseHidden($spec){
  }while([DateTime]::UtcNow -lt $deadline)
  throw 'Selected fixture visibility did not settle hidden'
 }
+
