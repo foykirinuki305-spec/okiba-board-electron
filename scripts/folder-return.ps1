@@ -1,3 +1,4 @@
+param([switch]$Persistent)
 $ErrorActionPreference='Stop'
 [Console]::InputEncoding=New-Object Text.UTF8Encoding($false)
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
@@ -6,12 +7,13 @@ function Write-ReturnJson($value) {
  $ascii=[regex]::Replace($json,'[^\x00-\x7F]',[Text.RegularExpressions.MatchEvaluator]{param($m) '\u'+([int][char]$m.Value).ToString('x4')})
  [Console]::Out.WriteLine($ascii)
 }
+try { Add-Type -Path (Join-Path $PSScriptRoot 'folder-return-native.cs') } catch { Write-ReturnJson @{ok=$false;reason=$_.Exception.Message}; exit 1 }
+function Invoke-ReturnRequest($line) {
 try {
- $line=[Console]::In.ReadLine()
  if($null -eq $line -or $line.Length -gt 4194304){throw 'return-invalid-request-size'}
  $request=$line|ConvertFrom-Json
+ if($request.action -eq 'ping'){Write-ReturnJson @{ok=$true;ready=$true};return}
  if($request.action -notin @('prepare','execute','probe','finalize')){throw 'return-invalid-action'}
- Add-Type -Path (Join-Path $PSScriptRoot 'folder-return-native.cs')
  if($request.action -eq 'prepare') {
   if($request.sources -isnot [array] -or $request.sources.Count -lt 1 -or $request.sources.Count -gt 1000 -or $request.destDir -isnot [string]){throw 'return-invalid-request'}
   $items=@();$failed=@();$seen=@{}
@@ -36,4 +38,11 @@ try {
   }
   Write-ReturnJson @{ok=$true;results=$results}
  }
-} catch {Write-ReturnJson @{ok=$false;reason=$_.Exception.Message};exit 1}
+} catch {Write-ReturnJson @{ok=$false;reason=$_.Exception.Message};if(!$Persistent){exit 1}}
+}
+do {
+ $line=[Console]::In.ReadLine()
+ if($null -eq $line){break}
+ Invoke-ReturnRequest $line
+ [Console]::Out.Flush()
+} while($Persistent)

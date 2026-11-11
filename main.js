@@ -1743,5 +1743,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  require('./lib/folder-return').stopNative();
   if (shellHelper) shellHelper.dispose();
 });

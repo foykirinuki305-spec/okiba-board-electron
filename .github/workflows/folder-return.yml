@@ -19,6 +19,8 @@ jobs:
         run: powershell -NoProfile -NonInteractive -File tools/folder-return-native-selftest.ps1
       - name: Real C to D and D to C moves are refused without copying
         run: powershell -NoProfile -NonInteractive -File tools/folder-return-cross-volume-ci.ps1
+      - name: Persistent worker real rename and warm timing
+        run: node tools/folder-return-worker-selftest.js
       - run: npm run build
       - name: Packaged Desktop drop redirects to normal folder without copy
         run: node tests/packaged-folder-return.e2e.js
