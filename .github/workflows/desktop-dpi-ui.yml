@@ -8,9 +8,12 @@ on:
 jobs:
   display-ui:
     runs-on: windows-latest
-    timeout-minutes: 6
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       - name: Actual scale via Windows Settings UI only
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/desktop-dpi-ui-ci.ps1
@@ -19,4 +22,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: desktop-dpi-ui-evidence
-          path: desktop-dpi-ui-ci.json
+          path: |
+            desktop-dpi-ui-ci.json
+            unknown-grid-success-ci.json
+            unknown-grid-success-ci.log
+            unknown-grid-success-journals/**
