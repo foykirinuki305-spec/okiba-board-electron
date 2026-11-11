@@ -56,7 +56,7 @@ async function main(){
   }`;
     fs.writeFileSync(f,code.replace(anchor,anchor+injected));policy.proofPath=path.join(hd,'show-proof.json');
    }
-   helperPath=diagnosticCopy(helperPath,dir);
+   helperPath=diagnosticCopy(helperPath,dir);if(showCase)policy.proofPath=path.join(path.dirname(helperPath),'show-proof.json');
    const journalDir=path.join(dir,'journal');client=createDesktopLeaseClient({journalDir,helperTimeoutMs:name==='hang-first-move'?4000:30000,helper:{command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',helperPath]}});assert((await client.ready()).ok);
    let targets=plan.targets.map(t=>({...t,path:items.find(i=>i.name===t.name).dest}));let area=before.areas.findIndex(a=>targets.every(t=>t.x>=a.left&&t.x<a.right&&t.y>=a.top&&t.y<a.bottom));
    const metadata=path.join(dir,'board.json'),beforeText='{"resident":true}',afterText='{"resident":false}';fs.writeFileSync(metadata,beforeText);const receipts=[{path:metadata,beforeHash:hash(beforeText),afterHash:hash(afterText)}];

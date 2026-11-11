@@ -32,7 +32,7 @@ function generateMixedDriver(copy,source){let s=fs.readFileSync(source,'utf8');
  replace('  baseline=await stable();',"  assert.equal((await showPolicy('read')).value,false,'ShowHidden ON unsupported for initial Hidden link group');baseline=await stable();");
  replace("helper:{command:'powershell.exe',args:","helper:{env:{...process.env,OKIBA_MIXED_TRACE_PATH:path.join(dir,'mixed-trace.jsonl')},command:'powershell.exe',args:");
  replace("const {diagnosticCopy}=require('./resident-diagnostic-copy-ci');", "");
- replace("   helperPath=diagnosticCopy(helperPath,dir);", "");
+ replace("   helperPath=diagnosticCopy(helperPath,dir);if(showCase)policy.proofPath=path.join(path.dirname(helperPath),'show-proof.json');", "");
  replace("const fs=require('fs')","const {runOwnedResidents}=require('./mixed-owned-resident-fixture-ci');\nconst fs=require('fs')");
  replace('let client=null,unsafe=false,baseline,policy=null;','let client=null,unsafe=false,baseline,policy=null,denseState=null;');
  replace("   const dir=path.join(temp,name);",`   if(name==='success-dense'){

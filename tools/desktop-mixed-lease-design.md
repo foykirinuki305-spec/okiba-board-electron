@@ -111,3 +111,11 @@ The guard and all dense/original old icons must stay exact. Cleanup only removes
 owned fixture files after terminal verification and checks the original baseline.
 External OFF, mid-operation ShowHidden, and stop-during-rollback robustness are
 still separate unimplemented cases. Initial ShowHidden ON remains unsupported.
+
+## Mixed boundary result: external ShowHidden change (cb7)
+
+The first nine hosted cases passed again, including 42 dense old icons, cached-destination occupancy, and verified cleanup in the earlier c3d run. The new tenth case changed ShowHidden from OFF to ON during the first resident stage. It failed: reveal returned an operation error, then rollback's first full snapshot reported `lease-old-icon-moved`. Cleanup was not verified and no settings or old-icon positions were blindly restored.
+
+This is **not a pass** for concurrent external display-setting changes. Current evidence establishes an old PIDL coordinate mismatch after the change, but does not contain before/after coordinate diagnostics sufficient to attribute the exact displacement mechanism solely to the OS. The no-movement guarantee does not cover changing external display settings during an active transaction. The current guard detects the discrepancy and stops; it does not undo external setting changes or reposition old icons. Initial selected-visible / ShowHidden ON remains unsupported for the mixed samepath-link scope. This research boundary remains outside product enablement; normal nine-case evidence must not be described as universal safety. Further expansion of this boundary test is paused in favor of product integration.
+
+The separate resident `show-proof.json` ENOENT in cb7 was a fixture path bug after diagnostic-helper copying: the successful proof was present in `diagnostic-helper`, while the driver read `show-helper`. The driver now follows the actual helper directory. No production guard or rollback behavior changed.
