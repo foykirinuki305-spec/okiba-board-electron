@@ -955,7 +955,9 @@ function itemPointer(e, el, key, fullPath) {
       if (movedLinked.size) {
         boardData.links = boardData.links.filter((l) => !movedLinked.has(l.path));
       }
-      await persistBoard();
+      // A lease already committed the exact metadata under its receipt.
+      // Never re-save renderer's normalized/stale copy over that authoritative state.
+      if(res.metadataCommitted!==true)await persistBoard();
       const isDesktop = res.resolved && res.resolved.type === 'desktop';
       // v2.2.2: this reply arrives as soon as the MOVE is done —
       // desktop icon positioning finishes in the background, and

@@ -47,6 +47,25 @@ function kindOf(name, isDir) {
 // OKIBA_SELFTEST=1: run in-app fs checks against a temp OKIBA_BASE and
 // exit 0 (ok) / 1 (fail) without opening a window. Used by CI launch
 // smoke on windows-latest.
+// Read-only packaged watchdog smoke: no lease scope, Desktop enumeration or flags.
+async function runReadonlyLeaseSmoke(base) {
+  if(process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Windows'||process.env.RUNNER_ENVIRONMENT!=='github-hosted')throw Error('readonly-lease-smoke-hosted-only');
+  const temp=path.resolve(process.env.RUNNER_TEMP||require('os').tmpdir());
+  if(!path.resolve(base).toLowerCase().startsWith((temp+path.sep).toLowerCase()))throw Error('smoke-base-not-isolated');
+  const packed=path.join(process.resourcesPath,'scripts','shell-helper.ps1');
+  const helperScript=fs.existsSync(packed)?packed:path.join(__dirname,'scripts','shell-helper.ps1');
+  const client=require('./lib/desktop-lease-client').createDesktopLeaseClient({journalDir:path.join(base,'readonly-lease-smoke-journal'),helper:{command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',helperScript]},owner:{pid:process.pid},timeoutMs:60000});
+  const evidence={packaged:app.isPackaged,watchdogModule:path.join(__dirname,'lib','desktop-lease-watchdog.js'),helperScript};
+  try {
+    evidence.ready=await client.ready();if(!evidence.ready.ok)throw Error('readonly-ready-failed');
+    evidence.status=await client.status();if(!evidence.status.ok||evidence.status.phase!=='idle'||evidence.status.helper.spawns!==1)throw Error('readonly-status-failed');
+    evidence.closed=await client.close();if(!evidence.closed.ok)throw Error('readonly-close-failed');
+    const end=Date.now()+10000;while(client.diagnostics().connected&&Date.now()<end)await new Promise(r=>setTimeout(r,50));
+    if(client.diagnostics().connected)throw Error('readonly-child-exit-unconfirmed');
+    evidence.ok=true;
+  }finally{client.disconnect();fs.writeFileSync(path.join(base,'readonly-lease-smoke.json'),JSON.stringify(evidence,null,2));}
+}
+
 async function runInAppSelfTest() {
   const log = [];
   try {
@@ -70,6 +89,7 @@ async function runInAppSelfTest() {
     fs.writeFileSync(src, 'in');
     const placed = bf.placeDroppedItems([src], folder);
     if (placed.length !== 1) throw new Error('intake');
+    if(process.env.OKIBA_LEASE_READONLY_SMOKE==='1'){await runReadonlyLeaseSmoke(base);log.push('read-only packaged lease smoke OK');}
     log.push('in-app self-test OK');
     console.log(log.join('\n'));
     return 0;
@@ -967,7 +987,7 @@ function registerIpc() {
       if(warnings.length){try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop cleanup '+JSON.stringify(warnings)+'\n');}catch(_){}}
       try{recordHistory(payload.boardName,{folder,positions:data.positions,links:data.links},planned.map(i=>({kind:i.isLink?'linked':'resident',destPath:i.dest,fileName:i.name,col:i.cell[0],row:i.cell[1]})),payload.groupId);}catch(e){warnings.push({warning:"history-save-failed",recovery:planned.map(i=>i.dest)});}
       if(win&&!win.isDestroyed())win.webContents.send('fs-changed');
-      return {moved:planned.map(i=>i.path),destinations:planned.map(i=>i.dest),skipped:[],failed:[],error:null,warnings,warningText:warnings.length?'元データの予備コピーが残っています: '+warnings.map(w=>w.backupPath||(w.recovery||[]).join(' / ')).join(' / '):'',position:{status:'ok',positioned:planned.length}};
+      return {metadataCommitted:leaseTransaction?.ok===true,moved:planned.map(i=>i.path),destinations:planned.map(i=>i.dest),skipped:[],failed:[],error:null,warnings,warningText:warnings.length?'元データの予備コピーが残っています: '+warnings.map(w=>w.backupPath||(w.recovery||[]).join(' / ')).join(' / '):'',position:{status:'ok',positioned:planned.length}};
     } catch(e){return desktopBlocked(String(e.message||e));}
     finally {desktopBusy=false;try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop ms plan='+planMs+' position='+positionMs+' total='+(Date.now()-started)+'\n');}catch(_){}}
   }
@@ -1099,6 +1119,12 @@ function registerIpc() {
   }
   shellHelper = createShellHelper();
   if (shellHelper) {shellHelper.start();ensureCalibrationImported().catch(()=>{});}
+  // Test-only background prewarm; native owner pin is read-only and never blocks UI.
+  if(leaseOptIn()) {
+    Promise.resolve().then(()=>leaseClient().ready()).then(result=>{
+      try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' lease-prewarm '+JSON.stringify(result)+'\n');}catch(_){}
+    }).catch(error=>{try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' lease-prewarm '+JSON.stringify({ok:false,reason:String(error.message||error)})+'\n');}catch(_){}});
+  }
 
   // The SHELL Desktop folder (what the helper reads icons from);
   // bf.desktopDir() is the plain ~/Desktop path. Both are accepted

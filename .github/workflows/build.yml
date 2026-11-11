@@ -132,9 +132,11 @@ jobs:
         run: |
           $exe = Get-ChildItem -Path dist -Filter 'OkibaBoard.exe' | Select-Object -First 1
           $env:OKIBA_SELFTEST = '1'
+          $env:OKIBA_LEASE_READONLY_SMOKE = '1'
           $env:OKIBA_BASE = Join-Path $env:RUNNER_TEMP 'okiba-smoke-base'
           $env:OKIBA_OLD_BASE = Join-Path $env:RUNNER_TEMP 'okiba-smoke-old'
           $p = Start-Process -FilePath $exe.FullName -PassThru -Wait
+          Get-Content (Join-Path $env:OKIBA_BASE 'readonly-lease-smoke.json')
           Write-Host "smoke exit code: $($p.ExitCode)"
           if ($p.ExitCode -ne 0) { throw "launch smoke failed with exit code $($p.ExitCode)" }
 
@@ -152,6 +154,7 @@ jobs:
           if (-not $setup) { throw 'installer not found in dist' }
           $installDir = Join-Path $env:RUNNER_TEMP 'okiba-install'
           $env:OKIBA_SELFTEST = '1'
+          $env:OKIBA_LEASE_READONLY_SMOKE = '1'
           $env:OKIBA_BASE = Join-Path $env:RUNNER_TEMP 'okiba-installer-base'
           $env:OKIBA_OLD_BASE = Join-Path $env:RUNNER_TEMP 'okiba-installer-old'
 
@@ -169,6 +172,7 @@ jobs:
           Write-Host "Installed exe: $exe"
 
           $p = Start-Process -FilePath $exe -PassThru -Wait
+          Get-Content (Join-Path $env:OKIBA_BASE 'readonly-lease-smoke.json')
           Write-Host "installed smoke exit code: $($p.ExitCode)"
           if ($p.ExitCode -ne 0) { throw "installed exe smoke failed with exit code $($p.ExitCode)" }
           $dataBoard = Join-Path $env:OKIBA_BASE 'ボード1'

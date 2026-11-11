@@ -6,6 +6,7 @@ let checks=0;const check=(v,m)=>{assert.ok(v,m);checks++;console.log('ok '+m);};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function wait(fn,label){const end=Date.now()+25000;while(Date.now()<end){try{if(await fn())return;}catch{}await sleep(100);}throw Error('timeout: '+label);}
 async function scenario(mode){
+ const isDrag=mode.startsWith('drag-');
  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-lease-gui-'));const base=path.join(temp,'boards'),board=path.join(base,'Lease'),desktop=path.join(temp,'desktop'),old=path.join(temp,'old'),profile=path.join(temp,'profile');for(const p of [board,desktop,old])fs.mkdirSync(p,{recursive:true});
  const files=['first.txt','second.txt'].map(n=>path.join(desktop,n));files.forEach((p,i)=>fs.writeFileSync(p,'selected-'+i));
  const keep=path.join(board,'keep.txt');fs.writeFileSync(keep,'unchanged resident');const sentinel=path.join(desktop,'sentinel.txt');fs.writeFileSync(sentinel,'untouched');const sentinelStat=fs.statSync(sentinel);
@@ -13,7 +14,8 @@ async function scenario(mode){
  fs.writeFileSync(path.join(base,'.home.json'),JSON.stringify({appVersion:require('../package.json').version,positions:{Lease:{col:0,row:0}},theme:'light'}));
  const log=path.join(temp,'lease.jsonl');const records=()=>fs.existsSync(log)?fs.readFileSync(log,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse):[];
  const snapshot={ok:true,identityVersion:1,autoArrange:false,snap:true,sx:100,sy:100,gx:0,gy:0,origin:{x:0,y:0},areas:[{left:0,top:0,right:3000,bottom:2000,grid:{gx:0,gy:0,sx:100,sy:100}}],icons:[{identity:'old-sentinel',label:'sentinel.txt',path:sentinel,x:2000,y:1000}]};
- const env={...process.env,OKIBA_BASE:base,OKIBA_OLD_BASE:old,OKIBA_SHORTCUT_DESKTOP:desktop,OKIBA_CLEANUP_DESKTOP:desktop,OKIBA_CLEANUP_DOWNLOADS:desktop,OKIBA_TEST_DESKTOP_DIR:desktop,OKIBA_TEST_HOOKS:'1',OKIBA_TEST_ATTRIB:'stub',OKIBA_TEST_HELPER:'fake',OKIBA_TEST_SNAP_LEASE:'1',OKIBA_TEST_POSITIONER:'',OKIBA_TEST_RESOLVER_DIR:'',OKIBA_FAKE_LANDING:desktop,OKIBA_FAKE_TYPE:'desktop',OKIBA_TEST_DESKTOP_SNAPSHOT:JSON.stringify(snapshot),OKIBA_FAKE_LEASE:'1',OKIBA_FAKE_LEASE_ROOT:temp,OKIBA_FAKE_LEASE_LOG:log,OKIBA_FAKE_LEASE_MODE:mode,ELECTRON_DISABLE_SECURITY_WARNINGS:'1'};
+ if(mode==='drag-occupied')snapshot.icons.push({identity:'occupied-second-cell',label:'guard.txt',path:path.join(desktop,'guard.txt'),x:500,y:600});
+ const env={...process.env,OKIBA_BASE:base,OKIBA_OLD_BASE:old,OKIBA_SHORTCUT_DESKTOP:desktop,OKIBA_CLEANUP_DESKTOP:desktop,OKIBA_CLEANUP_DOWNLOADS:desktop,OKIBA_TEST_DESKTOP_DIR:desktop,OKIBA_TEST_HOOKS:'1',OKIBA_TEST_ATTRIB:'stub',OKIBA_TEST_HELPER:'fake',OKIBA_TEST_SNAP_LEASE:'1',OKIBA_TEST_POSITIONER:'',OKIBA_TEST_RESOLVER_DIR:'',OKIBA_FAKE_LANDING:desktop,OKIBA_FAKE_TYPE:'desktop',OKIBA_TEST_DESKTOP_SNAPSHOT:JSON.stringify(snapshot),OKIBA_FAKE_LEASE:'1',OKIBA_FAKE_LEASE_ROOT:temp,OKIBA_FAKE_LEASE_LOG:log,OKIBA_FAKE_LEASE_MODE:isDrag?'success':mode,ELECTRON_DISABLE_SECURITY_WARNINGS:'1'};
  let app,clean=false;
  try{
   app=await electron.launch({args:[ROOT,'--no-sandbox','--user-data-dir='+profile],env,timeout:60000});const page=await app.firstWindow();await page.waitForSelector('#boardGrid .board-card');await page.click('#boardGrid .board-card[data-name="Lease"]');
@@ -23,6 +25,31 @@ async function scenario(mode){
   // Install a future-version field after normal intake, so the tested commit must retain it.
   const data=JSON.parse(fs.readFileSync(meta,'utf8'));data.future={untouched:['value',17]};fs.writeFileSync(meta,JSON.stringify(data));await sleep(500);
   const before=fs.readFileSync(meta,'utf8'),beforeData=JSON.parse(before);const keptBox=await card('keep.txt').boundingBox();
+  if(isDrag){
+   await card('first.txt').click();await card('second.txt').click({modifiers:['Control']});
+   check(await page.locator('.item.selected').count()===2,'pointer group has both selected links');
+   const firstCell=beforeData.links.find(l=>l.path===files[0]),secondCell=beforeData.links.find(l=>l.path===files[1]);
+   check(firstCell.col===secondCell.col&&secondCell.row-firstCell.row===1,'fixture is a vertical two-item group');
+   const physical={x:550,y:mode==='drag-outside'?1950:550};
+   const dip=await app.evaluate(({screen},p)=>screen.screenToDipPoint(p),physical);
+   const box=await card('first.txt').boundingBox();await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width/2+30,box.y+box.height/2,{steps:5});
+   await card('first.txt').evaluate((el,p)=>el.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,pointerId:1,clientX:-80,clientY:120,screenX:p.x,screenY:p.y})),dip);await page.mouse.up();
+   await wait(async()=>(await page.evaluate(()=>window.okiba.dropLog())).some(r=>r.kind==='safe-desktop'),'pointer drag IPC result');
+   if(mode==='drag-success'){
+    await wait(async()=>!(await page.locator('.item .name').allTextContents()).includes('first.txt'),'drag first card removed');
+    await wait(async()=>!(await page.locator('.item .name').allTextContents()).includes('second.txt'),'drag second card removed');
+    const targets=records().find(r=>r.cmd==='leasePrepare').targets;check(targets.length===2,'one lease receives complete selected group');
+    const a=targets.find(t=>t.path===files[0]),b=targets.find(t=>t.path===files[1]);check(a.x===500&&a.y===500&&b.x===500&&b.y===600,'drop point and vertical relative shape exact');
+    await sleep(300);const final=JSON.parse(fs.readFileSync(meta,'utf8'));for(const k of Object.keys(beforeData).filter(k=>k!=='links'))check(JSON.stringify(final[k])===JSON.stringify(beforeData[k]),'drag preserves '+k+' without renderer resave');check(final.links.length===0,'both selected links committed once');
+   }else{
+    await wait(async()=>(await page.locator('.item .name').allTextContents()).includes('second.txt'),'cancelled group returns to board');
+    check(!records().some(r=>r.cmd==='leasePrepare'),'invalid complete shape cancelled before revealing');check(fs.readFileSync(meta,'utf8')===before,'cancel retains metadata exactly');check(!fs.existsSync(path.join(base,'.move-history.json')),'cancel creates no history');
+    const names=await page.locator('.item .name').allTextContents();check(names.includes('first.txt')&&names.includes('second.txt'),'both cancelled cards present');
+   }
+   const finalKeep=await card('keep.txt').boundingBox();check(finalKeep.x===keptBox.x&&finalKeep.y===keptBox.y,'drag leaves existing card position unchanged');
+   for(let i=0;i<files.length;i++)check(fs.readFileSync(files[i],'utf8')==='selected-'+i,'drag keeps original bytes');
+   return;
+  }
   await card('first.txt').click({button:'right'});await page.getByText('デスクトップへ移動',{exact:true}).click();
   await wait(()=>records().some(r=>r.cmd==='leasePrepare'),'real Node watchdog reached fake helper');
   if(mode==='reveal-fail'){
@@ -52,4 +79,4 @@ async function scenario(mode){
   if(clean){const resolved=path.resolve(temp);assert(resolved.startsWith(path.resolve(os.tmpdir())+path.sep)&&path.basename(resolved).startsWith('okiba-lease-gui-'));fs.rmSync(resolved,{recursive:true,force:true});}
  }
 }
-(async()=>{for(const mode of ['success','reveal-fail','pending'])await scenario(mode);console.log('LEASE GUI '+checks+' checks PASS');})().catch(e=>{console.error(e);process.exitCode=1;});
+(async()=>{for(const mode of ['success','reveal-fail','pending','drag-success','drag-occupied','drag-outside'])await scenario(mode);console.log('LEASE GUI '+checks+' checks PASS');})().catch(e=>{console.error(e);process.exitCode=1;});

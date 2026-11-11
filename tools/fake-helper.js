@@ -54,7 +54,7 @@ function leaseLog(command,extra={}){if(process.env.OKIBA_FAKE_LEASE_LOG)calibrat
 if(leaseFake){leaseLog('fake-start',{parent:process.ppid});process.on('exit',()=>leaseLog('fake-exit'));}
 function fakeLeaseCommand(req){
  if(!leaseFake||!req.cmd.startsWith('lease'))return null;
- leaseLog(req.cmd,{token:req.token});
+ leaseLog(req.cmd,{token:req.token,targets:req.scope?.targets});
  const mode=process.env.OKIBA_FAKE_LEASE_MODE||'success';
  const identity=p=>{const st=calibrationFs.statSync(leaseOwned(p));return st.dev+':'+st.ino;};
  const alive=()=>{try{process.kill(fakeOwner.pid,0);return 'alive';}catch{return 'exited';}};
