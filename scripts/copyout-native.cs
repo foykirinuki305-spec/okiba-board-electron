@@ -65,10 +65,23 @@ public static class OkibaCopyOutFiles {
  public sealed class CopyResult {public string src,dest,reason,partialPath,sourceIdentity,destIdentity,sha256;public bool copied,skipped,cleanupVerified;public double copyMs;}
  static void DeleteOwned(SafeFileHandle h){IntPtr b=Marshal.AllocHGlobal(1);try{Marshal.WriteByte(b,1);if(!SetFileInformationByHandle(h,4,b,1))throw Error("copy-owned-disposition");}finally{Marshal.FreeHGlobal(b);}}
  static string HashStream(Stream s){s.Position=0;using(var sha=SHA256.Create()){return BitConverter.ToString(sha.ComputeHash(s)).Replace("-","");}}
+ // Pure path comparison; caller supplies OS-resolved known folders, not UI guesses.
+ static void RejectDesktopDestination(string folder,string userDesktop,string commonDesktop){
+  if(String.IsNullOrWhiteSpace(folder)||String.IsNullOrWhiteSpace(userDesktop)||String.IsNullOrWhiteSpace(commonDesktop))throw new InvalidOperationException("copy-desktop-location-unverified");
+  string dest=Path.GetFullPath(folder).TrimEnd('\\','/');
+  foreach(string desktop in new string[]{userDesktop,commonDesktop}){
+   string known=Path.GetFullPath(desktop).TrimEnd('\\','/');
+   if(String.Equals(dest,known,StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("copy-desktop-destination-refused");
+  }
+ }
  public static CopyResult Copy(string source,string folder){
   var result=new CopyResult{src=source,cleanupVerified=true};SafeFileHandle dh=null;FileStream ds=null;bool owned=false;var clock=System.Diagnostics.Stopwatch.StartNew();
   try{
-   source=Full(source);folder=Full(folder);string dest=Full(Path.Combine(folder,Path.GetFileName(source)));result.dest=dest;
+   folder=Full(folder);
+   RejectDesktopDestination(folder,
+    Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory,Environment.SpecialFolderOption.DoNotVerify),
+    Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory,Environment.SpecialFolderOption.DoNotVerify));
+   source=Full(source);string dest=Full(Path.Combine(folder,Path.GetFileName(source)));result.dest=dest;
    if(String.Equals(source,dest,StringComparison.OrdinalIgnoreCase)){result.skipped=true;result.reason="same-path";return result;}
    using(var sourceParents=new Pins(Path.GetDirectoryName(source)))using(var destParents=new Pins(folder))using(var sh=Open(source,0x80000080,1)){
     var original=RecordOf(sh,source);result.sourceIdentity=original.identity;

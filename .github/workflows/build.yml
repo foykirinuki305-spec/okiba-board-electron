@@ -125,6 +125,10 @@ jobs:
           path: lease-gui-evidence/
           if-no-files-found: ignore
 
+      - name: Native copy refuses Desktop roots before opening material
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./tools/copyout-desktop-guard-selftest.ps1
+
       - name: Original-preserving native copy in generated TEMP fixtures
         run: node tools/copyout-selftest.js
 
