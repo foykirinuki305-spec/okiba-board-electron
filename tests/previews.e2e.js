@@ -28,21 +28,27 @@ async function run(shots = path.join(ROOT, 'screenshots')) {
   const files = [meta,...names.filter(n=>n!=='folder').map(n=>path.join(board,n))];
   const snapshot = () => files.map(p=>({path:p,hash:crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'),mtime:fs.statSync(p).mtimeMs}));
   let before;
-  let app;
+  let app;let stage="launch";const diagnostic={stages:[],stdout:"",stderr:""};const mark=s=>{stage=s;diagnostic.stages.push({stage:s,at:new Date().toISOString()});console.log("  preview stage - "+s);};
   try {
-    app = await electron.launch({args:[ROOT,'--no-sandbox','--user-data-dir='+path.join(tmp,'userdata')],timeout:60000,env:{...process.env,
+    mark("launch");app = await electron.launch({args:[ROOT,'--no-sandbox','--user-data-dir='+path.join(tmp,'userdata')],timeout:60000,env:{...process.env,
       OKIBA_BASE:base,OKIBA_OLD_BASE:old,OKIBA_SHORTCUT_DESKTOP:desktop,OKIBA_CLEANUP_DESKTOP:desktop,OKIBA_CLEANUP_DOWNLOADS:desktop,
       OKIBA_TEST_HELPER:'fake',OKIBA_TEST_ATTRIB:'stub',OKIBA_TEST_POSITIONER:'stub',
       OKIBA_TEST_RESOLVER_DIR:desktop,OKIBA_TEST_HOOKS:'1',ELECTRON_DISABLE_SECURITY_WARNINGS:'1'}});
-    await app.evaluate(({shell}, shortcuts) => {
-      for (const shortcut of shortcuts) if (!shell.writeShortcutLink(shortcut.file,'create',{target:shortcut.target})) throw Error('fixture shortcut creation failed');
-    }, shortcuts.map(s=>({...s,file:path.join(board,s.name)})));
-    before=snapshot();
-    const page = await app.firstWindow();
+    const child=app.process();diagnostic.pid=child.pid;child.stdout?.on('data',b=>{diagnostic.stdout=(diagnostic.stdout+b.toString()).slice(-32768);});child.stderr?.on('data',b=>{diagnostic.stderr=(diagnostic.stderr+b.toString()).slice(-32768);});child.on('exit',(code,signal)=>{diagnostic.exit={code,signal};});
+    mark('first-window-ready');const page=await app.firstWindow();await page.waitForLoadState('domcontentloaded');
+    await page.waitForSelector('#boardGrid .board-card[data-name="Preview Test"]');
+    mark('create-and-read-shortcut-fixtures');
+    const created=await app.evaluate(({shell}, shortcuts) => shortcuts.map(shortcut=>{
+      if(!shell.writeShortcutLink(shortcut.file,'create',{target:shortcut.target}))throw Error('fixture shortcut creation failed: '+shortcut.file);
+      const actual=shell.readShortcutLink(shortcut.file);return {file:shortcut.file,target:actual.target};
+    }),shortcuts.map(s=>({...s,file:path.join(board,s.name)})));
+    assert(created.length===shortcuts.length,'all shortcut fixtures explicitly returned');
+    created.forEach((v,i)=>assert(v.file===path.join(board,shortcuts[i].name)&&v.target.toLowerCase()===shortcuts[i].target.toLowerCase(),'shortcut fixture readback matches target: '+shortcuts[i].name));
+    before=snapshot();mark('open-preview-board');
     await page.waitForSelector('#boardGrid .board-card[data-name="Preview Test"]');
     await page.click('#boardGrid .board-card[data-name="Preview Test"]');
     await page.waitForSelector('#boardView:not([hidden]) .item');
-    for (const name of names.filter(n=>n!=='folder')) {
+    mark('actual-native-preview-assertions');for (const name of names.filter(n=>n!=='folder')) {
       // The board refresh replaces cards asynchronously. Query and inspect the
       // current connected image in ONE renderer task, rather than holding a
       // locator handle across attachment/load/style checks.
@@ -76,7 +82,7 @@ async function run(shots = path.join(ROOT, 'screenshots')) {
     const sources=await page.locator('.item').evaluateAll(els=>Object.fromEntries(els.map(e=>[e.querySelector('.name')?.textContent,e.querySelector('.thumb img')?.src])));
     assert(new Set(['preview-wide.png','preview-tall.png','preview-wide.mp4','preview-green.mp4'].map(n=>sources[n])).size===4,'two images and two real videos have distinguishable thumbnail content');
     assert(sources['preview-wide.mp4']!==sources['broken.mp4'] && sources['preview-green.mp4']!==sources['broken.mp4'],'real videos use frame thumbnails rather than shared MP4 icon fallback');
-    if (shortcuts.length) {
+    mark('actual-target-icon-comparison');if (shortcuts.length) {
       const targetIcons=await page.evaluate(async targets=>Promise.all(targets.map(p=>window.okiba.thumb(p))),shortcuts.map(s=>s.target));
       assert(targetIcons.every(Boolean) && targetIcons[0]!==targetIcons[1],'two executable targets have distinct native icons');
       shortcuts.forEach((shortcut,i)=>assert(sources[shortcut.name]===targetIcons[i],shortcut.name+': shortcut icon equals its target executable icon'));
@@ -91,6 +97,7 @@ async function run(shots = path.join(ROOT, 'screenshots')) {
     assert(JSON.stringify(snapshot())===JSON.stringify(before),'closing the preview app leaves metadata and sources unchanged');
     console.log('NATIVE PREVIEW E2E PASSED');
   } catch (error) {
+    diagnostic.failedStage=stage;diagnostic.error=error.stack||String(error);console.error('Native previews failed at '+stage+'\n'+diagnostic.error);fs.mkdirSync(shots,{recursive:true});fs.writeFileSync(path.join(shots,'native-previews-diagnostic.json'),JSON.stringify(diagnostic,null,2));
     if (app) {
       try {
         fs.mkdirSync(shots,{recursive:true});
@@ -99,7 +106,7 @@ async function run(shots = path.join(ROOT, 'screenshots')) {
       } catch (captureError) { console.error('preview failure screenshot unavailable: '+captureError.message); }
     }
     throw error;
-  } finally { if(app) await app.close().catch(()=>{}); fs.rmSync(tmp,{recursive:true,force:true}); }
+  } finally { diagnostic.lastStage=stage;fs.mkdirSync(shots,{recursive:true});fs.writeFileSync(path.join(shots,'native-previews-diagnostic.json'),JSON.stringify(diagnostic,null,2));if(app) await app.close().catch(()=>{}); fs.rmSync(tmp,{recursive:true,force:true}); }
 }
 module.exports=run;
 if(require.main===module) run().catch(e=>{console.error(e);process.exitCode=1});

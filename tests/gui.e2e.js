@@ -1445,6 +1445,6 @@ async function main() {
 }
 
 main().then(() => process.exit(0)).catch((e) => {
-  console.error('\nGUI E2E FAILED: ' + (e && e.message || e));
+  console.error('\nGUI E2E FAILED: ' + (e && e.stack || e));
   process.exit(1);
 });
