@@ -21,6 +21,10 @@ jobs:
           if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
           node tools/unknown-grid-adaptive-driver-selftest.js
           if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          node tools/unknown-grid-binding-size-selftest.js
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          node tools/unknown-grid-json-wire-selftest.js
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
           node tools/unknown-grid-sample-wire-selftest.js
           if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
           node tools/unknown-grid-success-flow-selftest.js
@@ -28,6 +32,9 @@ jobs:
           node tools/unknown-grid-lease-flow-selftest.js
           if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
           ./tools/unknown-grid-lease-native-guards-selftest.ps1
+      - name: PowerShell 5.1 JSON bytes and Japanese roundtrip (no Desktop)
+        shell: powershell
+        run: ./tools/unknown-grid-json-wire-native-selftest.ps1
       - name: Hosted N3 sparse success and no-fit abort
         shell: pwsh
         run: |

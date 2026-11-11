@@ -1,8 +1,13 @@
 # CI-copy-only success operations. No production import.
+function Unknown-BindingDigest([string]$canonical){
+ if($null -eq $canonical){throw 'unknown-null-canonical-key'}
+ $sha=[Security.Cryptography.SHA256]::Create()
+ try{return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+}
 function Unknown-SuccessInit($r,$scope){
  if($null -eq $scope.success){return}
  if(@($r.records).Count -gt 32){throw 'unknown-success-fixture-limit'}
- $r.success=@{baseline=($r.snapshot|ConvertTo-Json -Depth 15 -Compress|ConvertFrom-Json);items=@($scope.success.items);anchorPath=$scope.success.anchorPath;requestedAnchor=$scope.success.requestedAnchor;binding=@{token=$r.token;probeId=$r.records[0].path;geometryKey=(Strict-GeometryKey $r.snapshot);iconsKey=(Strict-IconsKey $r.snapshot)};samples=@()}
+ $r.success=@{bindingFormat='sha256-utf8-v1';baseline=($r.snapshot|ConvertTo-Json -Depth 15 -Compress|ConvertFrom-Json);items=@($scope.success.items);anchorPath=$scope.success.anchorPath;requestedAnchor=$scope.success.requestedAnchor;binding=@{token=$r.token;probeId=$r.records[0].path;geometryKey=(Unknown-BindingDigest (Strict-GeometryKey $r.snapshot));iconsKey=(Unknown-BindingDigest (Strict-IconsKey $r.snapshot))};samples=@()}
  if(@($r.success.items).Count -ne @($r.records).Count){throw 'unknown-shape-count'}
  $seen=@{};foreach($item in $r.success.items){$p=Lease-Path $item.path;if($seen.ContainsKey($p) -or @($r.records|Where-Object{(Lease-Path $_.path) -ieq $p}).Count -ne 1 -or @($item.cell).Count -ne 2){throw 'unknown-shape-path'};$seen[$p]=$true;foreach($n in $item.cell){if($null -eq $n -or [double]$n -ne [int]$n){throw 'unknown-shape-cell'}}}
  if(-not $seen.ContainsKey((Lease-Path $r.success.anchorPath)) -or -not(Strict-PointValid $r.success.requestedAnchor)){throw 'unknown-shape-anchor'}
@@ -15,7 +20,7 @@ function Unknown-RecordSample($r,$req,$observed){
 }
 function Unknown-AssertProofBinding($r){
  $b=$r.success.binding;$original=$r.success.baseline
- if($null -eq $original -or $b.token -cne $r.token -or $b.probeId -cne $r.records[0].path -or $b.geometryKey -cne (Strict-GeometryKey $original) -or $b.iconsKey -cne (Strict-IconsKey $original) -or (Strict-GeometryKey $r.snapshot) -cne (Strict-GeometryKey $original) -or (Strict-IconsKey $r.snapshot) -cne (Strict-IconsKey $original)){throw 'unknown-proof-binding-changed'}
+ if($r.success.bindingFormat -cne 'sha256-utf8-v1' -or $b.geometryKey -cnotmatch '^[a-f0-9]{64}$' -or $b.iconsKey -cnotmatch '^[a-f0-9]{64}$' -or $null -eq $original -or $b.token -cne $r.token -or $b.probeId -cne $r.records[0].path -or $b.geometryKey -cne (Unknown-BindingDigest (Strict-GeometryKey $original)) -or $b.iconsKey -cne (Unknown-BindingDigest (Strict-IconsKey $original)) -or (Unknown-BindingDigest (Strict-GeometryKey $r.snapshot)) -cne $b.geometryKey -or (Unknown-BindingDigest (Strict-IconsKey $r.snapshot)) -cne $b.iconsKey){throw 'unknown-proof-binding-changed'}
 }
 function Unknown-AssertVisiblePhase($r){if($r.phase -notin @('resolved-restored','resolve-only')){throw 'unknown-visible-phase-forbidden'}}
 function Unknown-VisibleAttributesMatch([uint32]$original,[uint32]$current){

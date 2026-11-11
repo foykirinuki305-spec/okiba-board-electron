@@ -24,8 +24,11 @@ if((Unknown-VisibleAttributesMatch 2 32) -or (Unknown-VisibleAttributesMatch 34 
 function Strict-GeometryKey($s){return $s.key}
 function Strict-IconsKey($s){return $s.iconsKey}
 $original=@{key='geometry';iconsKey='old-icons'}
-$bound=@{token='owned';records=@(@{path='probe'});snapshot=$original;success=@{baseline=$original;binding=@{token='owned';probeId='probe';geometryKey='geometry';iconsKey='old-icons'}}}
+$bound=@{token='owned';records=@(@{path='probe'});snapshot=$original;success=@{bindingFormat='sha256-utf8-v1';baseline=$original;binding=@{token='owned';probeId='probe';geometryKey=(Unknown-BindingDigest 'geometry');iconsKey=(Unknown-BindingDigest 'old-icons')}}}
 Unknown-AssertProofBinding $bound
 foreach($key in @('token','probeId','geometryKey','iconsKey')){$before=$bound.success.binding[$key];$bound.success.binding[$key]='foreign';ExpectThrow {Unknown-AssertProofBinding $bound};$bound.success.binding[$key]=$before}
 $bound.snapshot=@{key='changed';iconsKey='old-icons'};ExpectThrow {Unknown-AssertProofBinding $bound}
 Write-Output 'PASS native pure abort-only visible refusal, NORMAL normalization and immutable proof binding'
+
+if((Unknown-BindingDigest 'abc') -cne 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'){throw 'binding-digest-not-sha256-utf8'}
+Write-Output 'PASS native pure SHA-256 binding digest known vector'

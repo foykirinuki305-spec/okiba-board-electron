@@ -1,7 +1,7 @@
 // Pure stdin validator. Only a copied helper with its private ledger invokes this.
 'use strict';const {verifyProof,fixShape,verifyTargets}=require('./unknown-grid-success-model-ci');
-let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',s=>{input+=s;if(Buffer.byteLength(input)>1048576){process.stderr.write('input-limit');process.exit(2);}});process.stdin.on('end',()=>{try{
- const p=JSON.parse(input);const proof=verifyProof(p.proof);if(!proof.ok)throw Error(proof.reason);const shape=fixShape(p.items,p.anchorPath);const g=proof.grid;
+const {parseUtf8Json}=require('./unknown-grid-json-wire-ci');const chunks=[];let inputSize=0;process.stdin.on('data',s=>{chunks.push(s);inputSize+=s.length;if(inputSize>1048576){process.stderr.write('input-limit');process.exit(2);}});process.stdin.on('end',()=>{try{
+ const p=parseUtf8Json(Buffer.concat(chunks));const proof=verifyProof(p.proof);if(!proof.ok)throw Error(proof.reason);const shape=fixShape(p.items,p.anchorPath);const g=proof.grid;
  const anchor={x:g.gx+Math.floor((p.requestedAnchor.x-g.gx)/g.sx+.5)*g.sx,y:g.gy+Math.floor((p.requestedAnchor.y-g.gy)/g.sy+.5)*g.sy};
  const targets=shape.map(s=>({path:s.path,x:anchor.x+s.dx*g.sx,y:anchor.y+s.dy*g.sy}));const result=verifyTargets({shape,targets,anchor,grid:g,area:p.area,old:p.old});if(!result.ok)throw Error(result.reason);
  const output=JSON.stringify({ok:true,grid:g,anchor,shape,targets});if(Buffer.byteLength(output)>65536)throw Error('output-limit');process.stdout.write(output);
