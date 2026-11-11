@@ -6,25 +6,46 @@ $cut=$source.IndexOf('# ---- Main loop ')
 if($cut -lt 0){throw 'Helper definition boundary missing'}
 . ([scriptblock]::Create($source.Substring(0,$cut)))
 $ErrorActionPreference='Stop'
-$report=@{scope='Single-display Shell snap evidence, NOT mixed-DPI verification';samples=@();proven=$false}
+$report=@{scope='Single-display Shell snap evidence, NOT mixed-DPI verification';samples=@();events=@();proven=$false}
 $probe=$null;$created=$false;$baseline=$null;$originalFlags=$null;$beforeSetup=$null
 $dpi=[OkibaWin32]::EnterPhysicalScope()
 function Old-Key($s){return (@($s.icons | Where-Object {$_.label -cne $script:name -and $_.label -cne $script:stem} | ForEach-Object {Strict-IconKey $_} | Sort-Object) | ConvertTo-Json -Compress)}
 function Geometry($s){return (@($s.autoArrange,$s.snap,$s.sx,$s.sy,$s.origin,@($s.areas | ForEach-Object {@($_.left,$_.top,$_.right,$_.bottom,$_.scale)})) | ConvertTo-Json -Compress -Depth 8)}
-function Guard {
- $s=Get-StrictDesktopSnapshot
- if(-not $s.ok){throw 'Snapshot unavailable or changing'}
- if((Old-Key $s) -cne $script:oldKey -or (Geometry $s) -cne $script:geometry){throw 'Existing icons or desktop geometry changed; no existing icon will be moved back automatically'}
- return $s
+function Evidence($phase,$snapshot,$detail='') {
+ $script:report.events+=@{time=[DateTime]::UtcNow.ToString('o');phase=$phase;detail=$detail;snapshot=$snapshot}
 }
+function Stable([string]$phase,[bool]$guardOld=$false) {
+ $deadline=[DateTime]::UtcNow.AddSeconds(10);$previous=$null
+ do {
+  $s=Get-StrictDesktopSnapshot
+  if(-not $s.ok){
+   Evidence $phase $s 'strict-snapshot-not-ready'
+   try {
+    $raw=Get-RawStrictDesktopSnapshot
+    Evidence $phase $raw 'diagnostic-raw-snapshot'
+   }catch{Evidence $phase $null ('raw-exception: '+$_.Exception.ToString());$raw=$null}
+   if($guardOld -and $raw -and $raw.ok -and ((Old-Key $raw) -cne $script:oldKey -or (Geometry $raw) -cne $script:geometry)){throw ('Existing icons or geometry changed during '+$phase)}
+   $previous=$null
+  } else {
+   if($guardOld -and ((Old-Key $s) -cne $script:oldKey -or (Geometry $s) -cne $script:geometry)){
+    Evidence $phase $s 'existing-icon-or-geometry-mismatch';throw ('Existing icons or geometry changed during '+$phase)
+   }
+   if($null -ne $previous -and (Strict-IconsKey $previous) -ceq (Strict-IconsKey $s) -and (Geometry $previous) -ceq (Geometry $s)){return $s}
+   Evidence $phase $s 'waiting-for-second-identical-snapshot';$previous=$s
+  }
+  Start-Sleep -Milliseconds 150
+ }while([DateTime]::UtcNow -lt $deadline)
+ throw ('Snapshot did not stabilize: '+$phase)
+}
+function Guard {return (Stable $script:phase $true)}
 function Sample([int]$x,[int]$y,[string]$axis){
- $s=Guard
+ $script:phase='before-'+$axis;$s=Guard
  $icons=@($s.icons | Where-Object {$_.label -ceq $script:name -or $_.label -ceq $script:stem})
  if($icons.Count -ne 1){throw 'Probe identity ambiguous'}
  $i=$icons[0]
  [OkibaFolderView]::PositionNewItem([int]$i.index,$script:probe,[int]$i.x,[int]$i.y,$x,$y)
  Start-Sleep -Milliseconds 180
- $after=Guard;$q=@($after.icons | Where-Object {$_.label -ceq $script:name -or $_.label -ceq $script:stem})
+ $script:phase='after-'+$axis;$after=Guard;$q=@($after.icons | Where-Object {$_.label -ceq $script:name -or $_.label -ceq $script:stem})
  if($q.Count -ne 1){throw 'Probe disappeared'}
  $r=@{axis=$axis;requestX=$x;requestY=$y;x=[int]$q[0].x;y=[int]$q[0].y}
  if($r.x -lt $script:patch.left -or $r.y -lt $script:patch.top -or $r.x -gt $script:patch.right -or $r.y -gt $script:patch.bottom){throw 'Probe snapped outside reserved empty patch'}
@@ -32,12 +53,14 @@ function Sample([int]$x,[int]$y,[string]$axis){
  return $r
 }
 try {
- $beforeSetup=Get-StrictDesktopSnapshot
+ $phase='initial';$beforeSetup=Stable $phase
+ $report.beforeSetup=$beforeSetup
  if(-not $beforeSetup.ok){throw 'Initial desktop snapshot unavailable'}
  $originalFlags=[OkibaFolderView]::ReadState()
  [OkibaFolderView]::SetFlagsForCI([uint32]5,[uint32]4)
  Start-Sleep -Milliseconds 300
- $baseline=Get-StrictDesktopSnapshot
+ $phase='settings';$baseline=Stable $phase
+ $report.baseline=$baseline
  if(-not $baseline.ok -or $baseline.autoArrange -or -not $baseline.snap){throw 'CI Shell did not enable manual arrangement and snap ON'}
  if((Strict-IconsKey $beforeSetup) -cne (Strict-IconsKey $baseline)){throw 'CI settings initialization moved existing icons; probe aborted'}
  if(@($baseline.areas).Count -ne 1){throw 'This experiment is single-display only'}
@@ -58,6 +81,7 @@ try {
  $stream=[IO.File]::Open($probe,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
  try{$bytes=[Text.Encoding]::UTF8.GetBytes($payload);$stream.Write($bytes,0,$bytes.Length);$created=$true}finally{$stream.Dispose()}
  $deadline=[DateTime]::UtcNow.AddSeconds(10)
+ $phase='arrival'
  do{Start-Sleep -Milliseconds 100;$s=Guard;$found=@($s.icons | Where-Object {$_.label -ceq $name -or $_.label -ceq $stem})}while($found.Count -ne 1 -and [DateTime]::UtcNow -lt $deadline)
  if($found.Count -ne 1){throw 'Probe did not appear'}
  $cx=$patch.left+[int][Math]::Floor(2.5*$sx);$cy=$patch.top+[int][Math]::Floor(2.5*$sy)
@@ -89,7 +113,7 @@ try {
    if([IO.File]::ReadAllText($probe) -cne $payload){throw 'Probe changed; refusing deletion'}
    Remove-Item -LiteralPath $probe
    Start-Sleep -Milliseconds 400
-   $null=Guard
+   $phase='cleanup-removal';$null=Guard
   }
  } finally {
   try {
@@ -98,8 +122,9 @@ try {
     Start-Sleep -Milliseconds 300
     $restored=[OkibaFolderView]::ReadState()
     if(($restored[0] -band 5) -ne ($originalFlags[0] -band 5) -or $restored[1] -ne $originalFlags[1]){throw 'CI original Shell flags restoration failed'}
-    $last=Get-StrictDesktopSnapshot
-    if(-not $last.ok -or (Strict-IconsKey $last) -cne (Strict-IconsKey $beforeSetup)){throw 'CI existing icon positions differ after cleanup and settings restoration'}
+    $phase='settings-restoration';$last=Stable $phase
+    $report.afterRestoration=$last
+    if((Strict-IconsKey $last) -cne (Strict-IconsKey $beforeSetup)){throw 'CI existing icon positions differ after cleanup and settings restoration (stable snapshots)'}
     $report.settingsRestored=$true
    }
   } catch {$report.cleanupError=$_.Exception.Message;throw} finally {
