@@ -58,8 +58,10 @@ async function main(){
     const birth=(await run('powershell.exe',['-NoProfile','-NonInteractive','-Command',birthScript],{windowsHide:true,env:{...process.env,OKIBA_CHILD_PID:String(m.watchdog.pid)}})).stdout.trim();
     const dead=new Promise(r=>host.once('exit',r));host.kill();await Promise.race([dead,sleep(5000)]);assert(host.exitCode!==null||host.signalCode!==null);
     let jr;for(let n=0;n<300;n++){const files=fs.existsSync(deathJournal)?fs.readdirSync(deathJournal).filter(f=>/^[a-f0-9]{32}\.json$/.test(f)):[];if(files.length){jr=JSON.parse(fs.readFileSync(path.join(deathJournal,files[0]),'utf8'));if(['aborted','blocked','released'].includes(jr.phase))break;}await sleep(100);}assert.equal(jr?.phase,'aborted',JSON.stringify(jr));report.ownerDeath.journal=jr;
-    const waitScript="$ErrorActionPreference='Stop';foreach($x in (ConvertFrom-Json $env:OKIBA_CHILDREN)){try{$p=[Diagnostics.Process]::GetProcessById([int]$x.pid)}catch [ArgumentException]{continue};$null=$p.Handle;if($p.HasExited){continue};if($p.StartTime.ToUniversalTime().Ticks.ToString() -cne $x.started){continue};if(-not $p.WaitForExit(15000)){throw 'owned helper/watchdog did not exit'}}";
-    await run('powershell.exe',['-NoProfile','-NonInteractive','-Command',waitScript],{windowsHide:true,timeout:40000,env:{...process.env,OKIBA_CHILDREN:JSON.stringify([{pid:m.watchdog.pid,started:birth},m.status.helper.history.at(-1)])}});
+    try {
+     const proof=await run('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(root,'tools/wait-owned-processes-ci.ps1')],{windowsHide:true,timeout:40000,env:{...process.env,OKIBA_CHILDREN:JSON.stringify([{pid:m.watchdog.pid,started:birth},m.status.helper.history.at(-1)])}});
+     report.ownerDeath.processExit=JSON.parse(proof.stdout);assert(report.ownerDeath.processExit.ok);assert.equal(report.ownerDeath.processExit.processes.length,2);assert(report.ownerDeath.processExit.processes.every(p=>p.stopConfirmed===true));
+    } catch(e) {report.ownerDeath.processExitError={message:e.message,code:e.code,signal:e.signal,stdout:e.stdout,stderr:e.stderr};throw e;}
     unsafe=false;result={ok:true,state:'aborted',ownerDeathVerified:true};
    }
    else{

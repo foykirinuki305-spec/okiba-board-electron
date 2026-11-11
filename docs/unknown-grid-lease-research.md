@@ -60,3 +60,30 @@ The failure was **not stale old coordinates**: Windows temporarily exposed the n
 Do not adopt fast settling, remove the delayed audit, or reinterpret cleanup success as algorithm success. Keep the fixed-settle 24-observation variant (approximately 21-27 s in these runs) as the current research candidate. Its improvement comes from fewer requests while retaining the established settle protocol, not from weakening that protocol. The fixed strategy still needs genuine 150% mixed-DPI and lease recovery tests; it is not a general guarantee against all Windows scheduling delays.
 
 No additional wait reduction is justified by these measurements. Before another optimization, profile native pre-snapshot, repeated Shell session setup, validation and JSON/IPC separately while leaving the wait/stability protocol unchanged. Session reuse is only a possible future investigation, not a demonstrated improvement. Preserve the failed fast experiment as negative evidence; do not retry it on the user's Desktop or integrate it into production.
+
+
+## DPI-derived pitch shortcut: deferred, alias counterexample
+
+Using spacing * monitorDPI / viewDPI as a hypothesis only might eliminate the four candidate-discovery observations. It cannot halve the current 24-point method: retaining twenty evidence observations plus one initial XY snap gives roughly 21 points, saving only three. Failed hypotheses add cost before fallback.
+
+More importantly, skipping candidate discrimination is unsound with the sparse evidence alone. Run `node tools/grid-pitch-hypothesis-counterexample.js` (pure, no native operations). Actual pitch 117, origin 15, center 400 can falsely validate hypothesis pitch 234, inferred origin 132. Requests 132/308/424/542/658 return 132/366/366/600/600; reverse requests repeat exactly. These appear to be three cells and two plateaus at pitch 234, but true cells 249 and 483 were skipped. Quarter-pitch offsets floor(234/4)=58 lie just inside the real half-spacing 58.5. The analogous aliases actual9/hypothesis18 and actual147/hypothesis294 also reproduce. Thus the sparse proof does not prove that its cells are adjacent without the earlier candidate discrimination.
+
+Preserve full adaptive candidate discovery. A future hypothesis shortcut would need independent intermediate-cell/boundary tests that reject divisors/aliases, plus wrong rounding, nonuniform, unsnapped and time-varying counterexamples. Finite probes cannot establish uniformity outside the observed patch. No additional native test or production change is justified for this small possible saving now.
+
+## Lease integration phase table (design only, no parallel implementation)
+
+All native mutation must run in the same dedicated lease helper under the global Desktop exclusion. Do not call the ordinary calibration helper concurrently with an active lease. Existing known-grid and resident movement implementations remain untouched until ownership coordination and approval.
+
+| Subphase | Durable intent before action | Preconditions and action | Verified exit / failure |
+|---|---|---|---|
+| prepare-unknown | Versioned unresolved-grid scope, original flags/icons/geometry, selected source/destination file IDs and Hidden, receipts, original drop anchor/relative shape, guarded patch | Separate scope variant; do not silently weaken existing resolved-target validation. Reserve global lease and confirm all old known-grid positions | No mutation if unsafe patch, unknown populated old area, stale identities or wrong flags |
+| probe-reveal | Probe identity and original Hidden, exact allowed patch, rollback subset | Snap OFF through lease; reveal first selected item only, ATTRIBUTES, wait for appearance under old guards, place in patch | Old identities/xy unchanged and probe exact inside patch; rest remain hidden |
+| probe-snap | Snap-ON intent and probe-only off-grid exception | Dedicated phase guard proves all old icons on measured grids; probe alone may be off-grid inside patch; enable snap | Actual readback old exact, probe bounded, flags exact; otherwise stop and recover, never rewrite old coordinates |
+| calibration-fixed | Measurement phase and bounds, no metadata/cache permit | Fixed-settle adaptive candidate search plus complete evidence, every sample old/geometry/flags guarded | Proof obtained or bounded failure. Fast wait shortening remains rejected |
+| resolve-shape | Measured proof and original placement intent, still no commit | Snap OFF; derive actual targets from measured grid, original anchor and relative shape; recheck current collisions and monitor fit | No-fit cancels without metadata/history change; no shape scattering or old-icon movement |
+| reveal-place-rest | Final resolved target plan and rollback identities | Reveal remaining selected subset; normal guarded batch positioning | Full old guard plus exact selected targets |
+| restore-verify | Snap restore intent | Standard final grid checks, snap ON, full exact verification | Only then may existing commit permission / receipt protocol proceed |
+| commit/release | Durable metadata permit and committed receipts | Commit metadata/history once, release lease; only successful proof can become cache evidence | Cache bound to Explorer/geometry; restart invalidation rules remain |
+| abort/recovery | Last durable phase, original states and revealed subset | Confirm failed helper stopped; watchdog identity-bound rehide selected subset, verify disappearance and old icons, restore flags | Uncertain termination or old-state mismatch stays unresolved. No blind toggle, duplicate mutation or old-position repair |
+
+For resident source-to-Desktop moves, exact rename/rollback identity records must also be integrated with this state table; this document does not authorize a second competing transaction owner. Interrupted calibration must never grant metadata commit. Test every phase boundary, timeout, probe replacement, foreign patch entry, Explorer restart, no-fit, and post-commit recovery independently before enabling unknown-grid lease mode.

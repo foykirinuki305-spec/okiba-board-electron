@@ -13,17 +13,16 @@ async function run(spec){
  let scope={kind:spec.kind||'samepath-hidden',desktop:spec.desktop,items:spec.selected.map(i=>({path:i.path,destination:i.destination||i.path,hidden:true})),snapshot:spec.baseline,targetAreaIndex:spec.targetAreaIndex,targets:spec.targets,metadataPaths:spec.receipts.map(r=>r.path)};
  scope=await client.prepareScope(scope);
  const commit=async(permit,receipts)=>{for(const r of receipts){const saved=spec.receipts.find(x=>x.path===r.path),tmp=r.path+'.write';const fd=fs.openSync(tmp,'wx');try{fs.writeFileSync(fd,saved.afterText);fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(tmp,r.path);}};
- const adapter=client.adapter(commit);const started=Date.now();
+ const adapter=client.adapter(commit),adapterEvents=[];for(const method of ['prepare','revealAndPlace','restoreAndVerify','prepareCommit','commitDone','release','abort','resolveCommit']){const original=adapter[method];adapter[method]=async(...args)=>{const result=await original(...args);adapterEvents.push({method,result});return result;};}const started=Date.now();
  if(spec.commitCase==='success'||spec.commitCase==='helper-hang'||spec.commitCase.startsWith('release-')||['post-restore-off','restore-reply-loss'].includes(spec.commitCase)){
-  let result=await runLease({scope,receipts:spec.receipts,adapter});const initialResult=result,verificationAttempts=[];
-  if(spec.commitCase==='restore-reply-loss'&&result.verificationContext&&result.resolution?.state!=='aborted'){
+  let result=await runLease({scope,receipts:spec.receipts,adapter});const initialResult=result,initialStatus=await client.status(),verificationAttempts=[];
+  if(result.verificationContext&&(result.pendingVerification||(!result.ok&&result.resolution?.state!=='aborted'))){
    for(let attempt=0;attempt<3;attempt++){
     await new Promise(r=>setTimeout(r,2000));const verified=await resumeLeaseVerification({adapter,context:initialResult.verificationContext});verificationAttempts.push({verified,status:await client.status()});
-    if(verified.verifiedAborted){result={...initialResult,...verified};break;}
-    if(verified.ok)throw Error('restore failure unexpectedly committed');
+    if(verified.verifiedAborted||verified.ok){result={...initialResult,...verified};break;}
    }
   }
-  send({phase:'done',result,initialResult,verificationAttempts,ms:Date.now()-started,status:await client.status(),watchdog:client.diagnostics()});return;
+  send({phase:'done',result,initialResult,initialStatus,verificationAttempts,adapterEvents,ms:Date.now()-started,status:await client.status(),watchdog:client.diagnostics()});return;
  }
  const p=await adapter.prepare(scope);if(!p.ok)throw Error(JSON.stringify(p));const token=p.token;
  let r=await adapter.revealAndPlace(token);if(!r.ok)throw Error(JSON.stringify(r));
