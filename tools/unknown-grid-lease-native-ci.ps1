@@ -99,7 +99,7 @@ function Invoke-UnknownLeaseCI($req){
   'leaseUnknownBeginCalibration' {
    if($r.phase -cne 'probe-visible-off'){throw 'unknown-phase-invalid'};$found=Unknown-ProbeVisible $r;Unknown-Patch $r $found.probe $false
    Lease-AllGrid $r.snapshot $r.snapshot;$s=$found.snapshot
-   [OkibaFolderView]::SetLeaseSnap([uint32]$s.folderFlags,$true,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted,[string[]]@($s.icons.identity),[int[]]@($s.icons.x),[int[]]@($s.icons.y))
+   [OkibaFolderView]::SetLeaseSnap([uint32]$s.folderFlags,$true,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted,[string[]]@($s.icons|ForEach-Object{$_.identity}),[int[]]@($s.icons|ForEach-Object{$_.x}),[int[]]@($s.icons|ForEach-Object{$_.y}))
    $r.flagState='on';$clock=[Diagnostics.Stopwatch]::StartNew();$probe=@{path=$r.records[0].path;name=[IO.Path]::GetFileName($r.records[0].path)}
    $after=Wait-CalibrationSettled $r.snapshot $probe $r.plan.patch $clock;if(-not $after.ok){throw ('unknown-probe-snap-failed:'+ [string]$after.reason)}
    Unknown-AssertFlags $r $after.current;$r.phase='calibrating';return @{ok=$true;recovery=$r;snapshot=$after.current;probe=$after.new[0]}

@@ -75,7 +75,7 @@ function Lease-SetSnap($r,$current,[bool]$enabled){
  $script:LeasePhase=if($enabled){'native-snap-enable'}else{'native-snap-disable'}
  $null=Lease-Guard $r $current
  if($enabled){Lease-AllGrid $r.snapshot $current}
- Measure-LeaseStep $(if($enabled){'restoreNative'}else{'disable'}) {[OkibaFolderView]::SetLeaseSnap([uint32]$current.folderFlags,$enabled,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted,[string[]]@($current.icons.identity),[int[]]@($current.icons.x),[int[]]@($current.icons.y))}
+ Measure-LeaseStep $(if($enabled){'restoreNative'}else{'disable'}) {[OkibaFolderView]::SetLeaseSnap([uint32]$current.folderFlags,$enabled,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted,[string[]]@($current.icons|ForEach-Object{$_.identity}),[int[]]@($current.icons|ForEach-Object{$_.x}),[int[]]@($current.icons|ForEach-Object{$_.y}))}
 }
 function Lease-Require([string]$token){
  if($null -eq $script:SnapLease -or $script:SnapLease.token -cne $token){throw 'lease-token-invalid'}

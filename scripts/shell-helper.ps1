@@ -595,15 +595,32 @@ public static class OkibaFolderView {
   if(secondCount!=0)throw new InvalidOperationException("item-count-changed");
   return true;
  }
+ // Only this known missing-enumerator HRESULT can use independent empty proof.
+ public static bool ResolveEmptyItems(int itemsHr,IntPtr ptr,Func<int[]> readCount){
+  if(itemsHr==0){if(ptr==IntPtr.Zero)throw new InvalidOperationException("missing-items-enumerator");return false;}
+  Exception original=Marshal.GetExceptionForHR(itemsHr)??new InvalidOperationException("items-not-s-ok");
+  if(itemsHr==unchecked((int)0x80070490)&&ptr==IntPtr.Zero){
+   try{
+    int[] first=readCount();
+    if(first==null||first.Length!=2)throw new InvalidOperationException("bad-count-proof");
+    original.Data["firstCountHr"]=first[0];original.Data["firstCount"]=first[1];
+    if(first[0]==0&&first[1]==0){
+     int[] second=readCount();
+     if(second==null||second.Length!=2)throw new InvalidOperationException("bad-count-proof");
+     original.Data["secondCountHr"]=second[0];original.Data["secondCount"]=second[1];
+     if(second[0]==0&&second[1]==0)return true;
+    }
+   }catch(Exception detail){original.Data["countProofError"]=detail.Message;}
+  }
+  throw original;
+ }
  static IntPtr[] EnumerateRead(IFolderView2 view){
-  int firstCount;int firstHr=view.ItemCount(2u,out firstCount);
-  if(firstHr!=0||firstCount<0)VerifyEmptyCounts(firstHr,firstCount,0,0);
-  if(firstCount==0){int secondCount;int secondHr=view.ItemCount(2u,out secondCount);if(VerifyEmptyCounts(firstHr,firstCount,secondHr,secondCount))return new IntPtr[0];}
-
   Guid iid=typeof(IEnumIDListRead).GUID;IntPtr ptr=IntPtr.Zero,array=IntPtr.Zero;object obj=null;
   var result=new System.Collections.Generic.List<IntPtr>();
   try {
-   Marshal.ThrowExceptionForHR(view.Items(0x80000002u,ref iid,out ptr));obj=Marshal.GetObjectForIUnknown(ptr);array=Marshal.AllocCoTaskMem(256*IntPtr.Size);
+   int itemsHr=view.Items(0x80000002u,ref iid,out ptr);
+   if(ResolveEmptyItems(itemsHr,ptr,delegate(){int count;int hr=view.ItemCount(2u,out count);return new int[]{hr,count};}))return new IntPtr[0];
+   obj=Marshal.GetObjectForIUnknown(ptr);array=Marshal.AllocCoTaskMem(256*IntPtr.Size);
    while(true){uint fetched;int hr=((IEnumIDListRead)obj).Next(256,array,out fetched);Marshal.ThrowExceptionForHR(hr);if(fetched>256)throw new InvalidOperationException("bad-enum-count");for(int i=0;i<fetched;i++)result.Add(Marshal.ReadIntPtr(array,i*IntPtr.Size));if(result.Count>10000)throw new InvalidOperationException("too-many-items");if(hr==1||fetched==0)break;}
    return result.ToArray();
   }catch{foreach(var p in result)Marshal.FreeCoTaskMem(p);throw;}

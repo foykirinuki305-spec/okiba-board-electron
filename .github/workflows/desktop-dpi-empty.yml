@@ -19,6 +19,9 @@ jobs:
       - name: Empty COM count validation
         shell: powershell
         run: ./tools/desktop-empty-count-selftest.ps1
+      - name: Empty native argument projection
+        shell: powershell
+        run: ./tools/desktop-empty-array-selftest.ps1
       - name: Single actual 150 empty fixture only
         shell: powershell
         run: ./tools/desktop-dpi-empty-ci.ps1
