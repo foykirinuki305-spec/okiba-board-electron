@@ -861,10 +861,9 @@ function registerIpc() {
       if(!leasePreview()&&!plan.ok&&(plan.reason==='unknown-desktop'||(payload.automatic&&plan.reason==='no-space'))) {
         const candidateAreas=(snap.areas||[]).map((area,index)=>({area,index})).filter(({area})=>Object.hasOwn(area,'grid')&&area.grid===null&&(payload.automatic||(point&&point.x>=area.left&&point.x<area.right&&point.y>=area.top&&point.y<area.bottom)));
         if(payload.automatic||candidateAreas.length===1)for(const {area,index} of candidateAreas) {
-          const ratio=Number(area.scale)*96/(Number(snap.viewDpi)*100);
-          if(!Number.isFinite(ratio)||ratio<=0||!Number.isInteger(snap.sx)||!Number.isInteger(snap.sy))continue;
-          const maxSpacing={x:Math.ceil(snap.sx*Math.max(1,ratio)*1.25),y:Math.ceil(snap.sy*Math.max(1,ratio)*1.25)};
-          const step=Math.ceil(Math.max(maxSpacing.x,maxSpacing.y)/16);
+          const bounds=desktopCalibration.searchBounds(snap,index);
+          if(!bounds.ok)continue;
+          const {maxSpacing,step}=bounds;
           const candidate=desktopCalibration.planCalibration({snapshot:snap,areaIndex:index,probeId:planned[0].dest,maxSpacing,step});
           if(candidate.ok&&candidate.requests.length<=192){calibrationPlan=candidate;plan={ok:true,calibrationPending:true};break;}
         }

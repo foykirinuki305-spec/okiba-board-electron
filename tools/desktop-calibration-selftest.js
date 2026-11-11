@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('assert/strict');
-const {planCalibration,inferCalibration}=require('../lib/desktop-calibration');
+const {searchBounds,planCalibration,inferCalibration}=require('../lib/desktop-calibration');
 let n=0;function ok(v,m){assert(v,m);console.log('ok - '+m);n++;}
 const snapshot={ok:true,autoArrange:false,snap:true,viewDpi:96,origin:{x:0,y:0},areas:[{left:0,top:0,right:1920,bottom:1080,scale:150,grid:null}],icons:[]};
 const args={snapshot,areaIndex:0,probeId:'C:\\fixture.txt',maxSpacing:{x:180,y:180}};
@@ -58,4 +58,16 @@ const swapped={...strictIdentity,icons:strictIdentity.icons.map(i=>({...i,identi
 const swapPlan=planCalibration({...args,snapshot:swapped});ok(strictPlan.iconsKey!==swapPlan.iconsKey,'same-label icons swapping positions changes identity fingerprint');
 ok(!planCalibration({...args,snapshot:{...strictIdentity,icons:strictIdentity.icons.map(i=>{const {identity,...rest}=i;return rest;})}}).ok,'production missing PIDL identities fails closed');
 ok(!planCalibration({...args,snapshot:{...strictIdentity,icons:strictIdentity.icons.map(i=>({...i,identity:'same-id'}))}}).ok,'duplicate PIDL identities fail closed');
+
+const metric={ok:true,sx:75,sy:107,viewDpi:96,areas:[{scale:100,grid:null}]};
+const original=JSON.stringify(metric),b100=searchBounds(metric,0);assert.deepEqual(b100,{ok:true,maxSpacing:{x:94,y:134},step:9});ok(true,'100 percent bounds and main step unchanged');
+const b150=searchBounds({...metric,areas:[{scale:150,grid:null}]},0);assert.deepEqual(b150,{ok:true,maxSpacing:{x:141,y:201},step:13});ok(true,'150 percent search limit includes observed 161 without asserting grid');
+ok(JSON.stringify(metric)===original,'bounds never mutate snapshot/grid');
+for(const change of [{sx:NaN},{sy:Infinity},{sx:1.5},{viewDpi:0},{areas:[{scale:-1}]},{areas:[{scale:'150'}]},{sx:Number.MAX_SAFE_INTEGER},{sx:1},{sx:8,sy:400}])ok(!searchBounds({...metric,...change},0).ok,'invalid or unsafe search metric rejected '+JSON.stringify(change));
+for(const index of [-1,0.5,1,NaN])ok(!searchBounds(metric,index).ok,'invalid area index rejected '+index);
+ok(!searchBounds(null,0).ok,'missing snapshot rejected');
+const large=searchBounds({...metric,sx:500,sy:500},0);ok(large.ok&&large.maxSpacing.x===625&&large.maxSpacing.y===625,'existing main bounds above 512 remain allowed when arithmetic is safe');
+const lower=searchBounds({...metric,areas:[{scale:50}]},0);assert.deepEqual(lower,b100);ok(true,'lower DPI never shrinks previous search budget');
+// Research intentionally keeps planCalibration default sampling step, while main
+// retains its explicit historical step. Both now use the same search limits.
 console.log('desktop calibration: '+n+' checks passed (pure model, NOT mixed-DPI Shell proof)');
