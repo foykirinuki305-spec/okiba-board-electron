@@ -9,6 +9,7 @@ on:
       - 'lib/desktop-lease-*'
       - 'lib/durable-rename.js'
       - 'tools/durable-rename-*'
+      - 'tools/desktop-commit-gate-selftest.js'
       - 'scripts/snap-lease.ps1'
       - 'scripts/shell-helper.ps1'
       - 'lib/safe-desktop.js'
@@ -23,6 +24,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - name: Durable commit permission gate regression
+        shell: pwsh
+        run: node tools/desktop-commit-gate-selftest.js
       - name: Durable journal rename regression
         shell: pwsh
         run: |
