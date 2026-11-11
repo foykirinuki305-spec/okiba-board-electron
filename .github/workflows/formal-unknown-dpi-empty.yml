@@ -1,0 +1,42 @@
+name: formal-unknown-dpi-empty-native
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/formal-unknown-*'
+      - 'lib/desktop-unknown-*'
+      - 'scripts/unknown-grid-*'
+      - '.github/workflows/formal-unknown-dpi-empty.yml'
+jobs:
+  isolated:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Formal fixed-entry and restore guards
+        run: node tools/formal-unknown-dpi-selftest.js
+      - name: Pure fixture allowlist
+        run: node tools/desktop-dpi-empty-selftest.js
+      - name: Empty COM count validation
+        shell: powershell
+        run: ./tools/desktop-empty-count-selftest.ps1
+      - name: Empty native argument projection
+        shell: powershell
+        run: ./tools/desktop-empty-array-selftest.ps1
+      - name: Native calibrated result assertion
+        run: node tools/unknown-grid-result-assert-selftest.js
+      - name: Single actual 150 empty fixture only
+        shell: powershell
+        run: ./tools/formal-unknown-dpi-empty-ci.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: formal-unknown-dpi-empty-evidence
+          path: |
+            formal-unknown-dpi-empty-*.json
+            formal-unknown-dpi-ui-ci.json
+            formal-unknown-success-ci.json
+            formal-unknown-success-journals/**

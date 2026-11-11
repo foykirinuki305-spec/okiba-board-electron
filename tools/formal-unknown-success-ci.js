@@ -44,7 +44,16 @@ async function main(){const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-unk
     // Separate fixture cleanup process, only after owner/watchdog/helpers have stopped.
     const output=await require('util').promisify(require('child_process').execFile)('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(__dirname,'formal-unknown-cleanup-ci.ps1')],{windowsHide:true,timeout:30000,env:{...process.env,OKIBA_PREVIEW_TERMINAL:'confirmed',OKIBA_PREVIEW_RECORDS:JSON.stringify(selected.map(item=>({...item.attrs,path:item.path})))}});
     const hidden=JSON.parse(output.stdout);assert(hidden.ok);note('owned-cleanup-hide',hidden);
-    const absent=await stable('cleanup-hidden');assert.deepEqual(absent.icons.map(i=>[i.identity,i.x,i.y]).sort(),baseline.icons.map(i=>[i.identity,i.x,i.y]).sort());
+    const cleanupDeadline=Date.now()+15000;let absent;
+    do{
+     for(const item of selected){const current=await request('readHiddenFile',{path:item.path});assert(current.ok&&current.hidden);for(const key of ['identity','size','mtime','attributes'])assert.equal(current[key],item.attrs[key]);assert.equal(hash(item.path),item.hash);}
+     absent=await stable('cleanup-hidden');
+     const ownPaths=new Set(selected.map(item=>path.resolve(item.path).toLowerCase())),oldIds=new Set(baseline.icons.map(item=>item.identity));
+     for(const icon of absent.icons)assert(oldIds.has(icon.identity)||(icon.path&&ownPaths.has(path.resolve(icon.path).toLowerCase())),'unrelated icon appeared during terminal cleanup');
+     if(!absent.icons.some(icon=>icon.path&&ownPaths.has(path.resolve(icon.path).toLowerCase())))break;
+     assert(Date.now()<cleanupDeadline,'owned icons did not disappear after verified hide');await sleep(150);
+    }while(true);
+    assert.deepEqual(absent.icons.map(i=>[i.identity,i.x,i.y]).sort(),baseline.icons.map(i=>[i.identity,i.x,i.y]).sort());
    }
    for(const item of selected){assert.equal(path.dirname(item.path),desktop);assert(path.basename(item.path).startsWith('OkibaUnknown-'));fs.unlinkSync(item.path);}
    const cleanup=await stable('case-cleanup');assert.deepEqual(cleanup.icons.map(i=>[i.identity,i.x,i.y]).sort(),baseline.icons.map(i=>[i.identity,i.x,i.y]).sort());
