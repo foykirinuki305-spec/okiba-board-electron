@@ -16,6 +16,8 @@ async function scenario(mode){
  const snapshot={ok:true,identityVersion:1,autoArrange:false,snap:true,sx:100,sy:100,gx:0,gy:0,origin:{x:0,y:0},areas:[{left:0,top:0,right:3000,bottom:2000,grid:{gx:0,gy:0,sx:100,sy:100}}],icons:[{identity:'old-sentinel',label:'sentinel.txt',path:sentinel,x:2000,y:1000}]};
  if(mode==='drag-occupied')snapshot.icons.push({identity:'occupied-second-cell',label:'guard.txt',path:path.join(desktop,'guard.txt'),x:500,y:600});
  const env={...process.env,OKIBA_BASE:base,OKIBA_OLD_BASE:old,OKIBA_SHORTCUT_DESKTOP:desktop,OKIBA_CLEANUP_DESKTOP:desktop,OKIBA_CLEANUP_DOWNLOADS:desktop,OKIBA_TEST_DESKTOP_DIR:desktop,OKIBA_TEST_HOOKS:'1',OKIBA_TEST_ATTRIB:'stub',OKIBA_TEST_HELPER:'fake',OKIBA_TEST_SNAP_LEASE:'1',OKIBA_TEST_POSITIONER:'',OKIBA_TEST_RESOLVER_DIR:'',OKIBA_FAKE_LANDING:desktop,OKIBA_FAKE_TYPE:'desktop',OKIBA_TEST_DESKTOP_SNAPSHOT:JSON.stringify(snapshot),OKIBA_FAKE_LEASE:'1',OKIBA_FAKE_LEASE_ROOT:temp,OKIBA_FAKE_LEASE_LOG:log,OKIBA_FAKE_LEASE_MODE:isDrag?'success':mode,ELECTRON_DISABLE_SECURITY_WARNINGS:'1'};
+ if(mode==='legacy-abort')env.OKIBA_FAKE_PLAN_FAIL='1';
+ if(mode==='legacy-concurrent')env.OKIBA_FAKE_POSITION_DELAY_MS='2500';
  let app,clean=false,afterForCleanup=null;
  try{
   app=await electron.launch({args:[ROOT,'--no-sandbox','--user-data-dir='+profile],env,timeout:60000});let page=await app.firstWindow();await page.waitForSelector('#boardGrid .board-card');await page.click('#boardGrid .board-card[data-name="Lease"]');
@@ -25,6 +27,23 @@ async function scenario(mode){
   // Install a future-version field after normal intake, so the tested commit must retain it.
   const data=JSON.parse(fs.readFileSync(meta,'utf8'));data.future={untouched:['value',17]};fs.writeFileSync(meta,JSON.stringify(data));await sleep(500);
   const before=fs.readFileSync(meta,'utf8'),beforeData=JSON.parse(before);afterForCleanup=JSON.stringify({...beforeData,links:beforeData.links.filter(l=>l.path!==files[0])},null,2);const keptBox=await card('keep.txt').boundingBox();
+  if(mode==='legacy-abort'||mode==='legacy-concurrent'){
+   const operation=page.evaluate(p=>window.okiba.safeTakeout({boardName:'Lease',paths:[p],linkedPaths:[]}),keep);
+   if(mode==='legacy-concurrent'){
+    await wait(()=>fs.existsSync(path.join(desktop,'keep.txt')),'legacy operation is holding its reservation');
+    const {createDesktopLeaseClient}=require('../lib/desktop-lease-client');
+    const contender=createDesktopLeaseClient({journalDir:path.join(temp,'contender-journals'),helper:{command:process.execPath,args:[path.join(ROOT,'tools/fake-helper.js')],env:{...env,ELECTRON_RUN_AS_NODE:'1'}},owner:{pid:process.pid}});
+    try{check((await contender.ready()).ok,'contender ready read-only');const denied=await contender.reserveLegacy({desktop});check(!denied.ok,'simultaneous process cannot reserve active legacy Desktop');}
+    finally{await contender.close();}
+   }
+   const result=await operation;
+   check(fs.readFileSync(meta,'utf8')===before,'legacy return preserves metadata unknown fields and positions');
+   if(mode==='legacy-abort'){check(!!result.error&&!result.pendingVerification,'verified rollback is not pending');check(fs.existsSync(keep)&&!fs.existsSync(path.join(desktop,'keep.txt')),'failed positioning returns own original');}
+   else check(!result.error&&result.moved.includes(keep),'reserved legacy return completes');
+   const lock=require('../lib/desktop-lease-global-lock').createDesktopLeaseLock({desktop,sessionId:0,localAppData:path.join(temp,'localAppData')});
+   check(!fs.existsSync(lock.pointer),'confirmed legacy terminal releases shared pointer');
+   return;
+  }
   if(mode==='restart-global'||mode==='restart-journal'){
    await app.close();app=null;
    await wait(()=>[...new Set(records().filter(r=>r.cmd==='fake-start').flatMap(r=>[r.pid,r.parent]))].every(pid=>{try{process.kill(pid,0);return false;}catch{return true;}}),'first app and watchdog stopped');
@@ -111,4 +130,4 @@ async function scenario(mode){
   if(clean){const resolved=path.resolve(temp);assert(resolved.startsWith(path.resolve(os.tmpdir())+path.sep)&&path.basename(resolved).startsWith('okiba-lease-gui-'));fs.rmSync(resolved,{recursive:true,force:true});}
  }
 }
-(async()=>{for(const mode of ['success','reveal-fail','pending','transient-native','retry-native','release-fail','foreign-change','restart-global','restart-journal','drag-success','drag-occupied','drag-outside'])await scenario(mode);console.log('LEASE GUI '+checks+' checks PASS');})().catch(e=>{console.error(e);process.exitCode=1;});
+(async()=>{for(const mode of ['success','reveal-fail','pending','transient-native','retry-native','release-fail','foreign-change','restart-global','restart-journal','legacy-abort','legacy-concurrent','drag-success','drag-occupied','drag-outside'])await scenario(mode);console.log('LEASE GUI '+checks+' checks PASS');})().catch(e=>{console.error(e);process.exitCode=1;});

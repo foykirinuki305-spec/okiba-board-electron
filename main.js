@@ -703,7 +703,8 @@ function registerIpc() {
       const c=clientFactory();const ready=await c.ready();
       if(!ready?.ok)return {ok:false,blocked:true,reason:ready?.reason||'lease-readiness-unverified'};
       const state=await c.desktopState();
-      if(!state?.ok||typeof state.blocked!=='boolean'||typeof state.desktop!=='string'||!target?.path||!ln.samePath(state.desktop,target.path))return {ok:false,blocked:true,reason:'desktop-lease-state-unverified'};
+      const canonicalTarget=typeof target?.path==='string'?fs.realpathSync.native(target.path):null;
+      if(!state?.ok||typeof state.blocked!=='boolean'||typeof state.desktop!=='string'||!canonicalTarget||!ln.samePath(state.desktop,canonicalTarget))return {ok:false,blocked:true,reason:'desktop-lease-state-unverified',targetPath:target?.path,canonicalTarget,state};
       return state;
     }catch(e){return {ok:false,blocked:true,reason:String(e.message||e)};}
   }
@@ -782,6 +783,7 @@ function registerIpc() {
   }
   let desktopBusy = false;
   let desktopUnsafe = false;
+  let legacyHelperState=null;
   function desktopBlocked(reason, recovery=[]) {
     let message='安全を確認できなかったため中止しました。';
     if(['occupied-or-outside','no-space'].includes(reason))message='並びを保って置けません。別の空いている場所へ戻してください。';
@@ -811,7 +813,7 @@ function registerIpc() {
     }
     if(!shellHelper)throw Error('helper-unavailable');
     const r=await shellHelper.request('moveNoReplace',{source,destination},{timeoutMs:15000});
-    if(!r.ok){const stopped=await shellHelper.stopAndWait();if(!stopped)desktopUnsafe=true;const e=Error('move-outcome-unknown');e.unsafe=!stopped;throw e;}
+    if(!r.ok){const stopped=await shellHelper.stopAndWait();if(legacyHelperState){legacyHelperState.allRequestsCompleted=false;legacyHelperState.stopConfirmed=stopped;}if(!stopped)desktopUnsafe=true;const e=Error('move-outcome-unknown');e.unsafe=!stopped;throw e;}
     if(!r.result?.ok){const e=Error(r.result?.reason||'move-failed');e.win32Code=r.result?.errorCode;throw e;}
   }
 
@@ -872,19 +874,36 @@ function registerIpc() {
   }
   // END tested-lease-metadata
 
+  // BEGIN tested-legacy-reservation-proof
+  function legacyOldUnchanged(before,after) {
+    if(!before?.ok||!after?.ok||before.identityVersion!==1||after.identityVersion!==1)return false;
+    const fields=['autoArrange','snap','sx','sy','viewDpi','folderFlags','shellAutoArrange','explorerPid','explorerStarted','listviewHwnd','identityVersion'];
+    if(fields.some(k=>before[k]!==after[k]))return false;
+    const canonical=v=>Array.isArray(v)?v.map(canonical):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])])):v;
+    const geometry=s=>({origin:s.origin,areas:(s.areas||[]).map(({grid,...a})=>a)});
+    if(JSON.stringify(canonical(geometry(before)))!==JSON.stringify(canonical(geometry(after))))return false;
+    if(!Array.isArray(before.icons)||!Array.isArray(after.icons))return false;
+    const valid=icons=>icons.every(i=>typeof i.identity==='string'&&i.identity&&Number.isInteger(i.x)&&Number.isInteger(i.y))&&new Set(icons.map(i=>i.identity)).size===icons.length;
+    if(!valid(before.icons)||!valid(after.icons))return false;
+    const current=new Map(after.icons.map(i=>[i.identity,i]));
+    return before.icons.every(i=>{const j=current.get(i.identity);return j&&i.x===j.x&&i.y===j.y;});
+  }
+  // END tested-legacy-reservation-proof
+
   async function safeDesktopMove(payload,target) {
     if(desktopLeasePending)return pendingLeaseResult('lease-verification-pending');
     if(desktopUnsafe)return desktopBlocked('helper-not-stopped');
     if(desktopBusy) return desktopBlocked('busy');
     desktopBusy=true;
     const started=Date.now();let planMs=0,positionMs=0;
+    let legacyReservation=null,legacySettled=false,legacyReserveRequested=false;
     const diagnosticId=process.pid+'-'+started;
     const diagnostic=(phase,detail)=>{try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop diagnostic '+JSON.stringify({id:diagnosticId,phase,...detail})+'\n');}catch(_){}};
     try {
       if(!payload?.boardName || !target?.path) return desktopBlocked('unknown-board');
       // This shared preflight covers ALL Desktop return kinds, including legacy
-      // fallback. It does NOT reserve the global lock for a legacy operation:
-      // a different process starting after this check remains a documented race.
+      // fallback. The legacy branch also acquires the same shared reservation
+      // immediately before mutation, closing the check-to-operation race.
       const available=await desktopLeasePreflight(target);
       if(!available.ok||available.blocked){
         diagnostic('lease-shared-preflight-blocked',{state:available});
@@ -966,6 +985,12 @@ function registerIpc() {
           }
         }else diagnostic('lease-not-covered',{reason:calibrationPlan?'unknown-grid-calibration':'scope-not-supported',legacyArrivalRiskUnresolved:true});
       }
+      if(!leaseTransaction&&leaseOptIn()){
+        const client=leaseClient();legacyReserveRequested=true;const reserved=await client.reserveLegacy({desktop:target.path});
+        if(!reserved?.ok||!reserved.token){legacyReserveRequested=false;return {...desktopBlocked(reserved?.reason||'desktop-reservation-unconfirmed'),leaseBlocked:true,retrySafe:false};}
+        legacyReservation={client,token:reserved.token};legacyHelperState={allRequestsCompleted:true,stopConfirmed:false};
+      }
+      let expectedLegacyMeta=before;
       const tx=leaseTransaction||await safeDesk.executeDesktop({items:planned,plan,snapshot:snap,adapter:{
         snapshot:desktopSnapshot,
         completePlanAfterFirstMove:calibrationPlan?async probe=>{
@@ -973,7 +998,7 @@ function registerIpc() {
           const calibrationStarted=Date.now();
           const response=await shellHelper.request('calibrateDesktopGrid',{snapshot:snap,probe:{path:probe.dest,name:probe.name},plan:calibrationPlan},{timeoutMs:100000});
           diagnostic('calibration-result',{elapsedMs:Date.now()-calibrationStarted,transportOk:response.ok,transportError:response.error,result:response.result});
-          if(!response.ok){const stopped=await shellHelper.stopAndWait();if(!stopped)desktopUnsafe=true;diagnostic('calibration-helper-stop',{stopped});return {ok:false,reason:'calibration-unavailable',unsafe:!stopped};}
+          if(!response.ok){const stopped=await shellHelper.stopAndWait();if(legacyHelperState){legacyHelperState.allRequestsCompleted=false;legacyHelperState.stopConfirmed=stopped;}if(!stopped)desktopUnsafe=true;diagnostic('calibration-helper-stop',{stopped});return {ok:false,reason:'calibration-unavailable',unsafe:!stopped};}
           if(!response.result?.ok)return response.result||{ok:false,reason:'calibration-unavailable'};
           const inferred=desktopCalibration.inferCalibration({plan:calibrationPlan,samples:response.result.samples});
           if(!inferred.ok)return inferred;
@@ -1015,7 +1040,7 @@ function registerIpc() {
           const r=await shellHelper.request('positionDesktopPlan',{snapshot,targets:p.targets.map(t=>({...t,path:planned.find(i=>i.path===t.path).dest})),buffer:p.buffer,...(calibrationEvidence?{calibration:calibrationEvidence}:{})},{timeoutMs:60000});
           positionMs=Date.now()-posStart;
           diagnostic('position-result',{elapsedMs:positionMs,transportOk:r.ok,transportError:r.error,result:r.result});
-          if(!r.ok){const stopped=await shellHelper.stopAndWait();if(!stopped)desktopUnsafe=true;diagnostic('helper-stop',{stopped});return {ok:false,reason:'position-unavailable',unsafe:!stopped,detail:r.error};}
+          if(!r.ok){const stopped=await shellHelper.stopAndWait();if(legacyHelperState){legacyHelperState.allRequestsCompleted=false;legacyHelperState.stopConfirmed=stopped;}if(!stopped)desktopUnsafe=true;diagnostic('helper-stop',{stopped});return {ok:false,reason:'position-unavailable',unsafe:!stopped,detail:r.error};}
           return r.result||{ok:false,reason:'position-unavailable'};
         },
         async commit() {
@@ -1025,7 +1050,7 @@ function registerIpc() {
             const json=before===null?{version:6,positions:{},links:[],notes:[],size_percent:100}:JSON.parse(before);
             json.links=(json.links||[]).filter(l=>!planned.some(i=>i.isLink&&ln.samePath(i.path,l.path)));
             const tmp=meta+'.safe-'+process.pid+'-'+Date.now()+'.tmp';
-            try {fs.writeFileSync(tmp,JSON.stringify(json,null,2),'utf8');fs.renameSync(tmp,meta);}
+            try {expectedLegacyMeta=JSON.stringify(json,null,2);fs.writeFileSync(tmp,expectedLegacyMeta,'utf8');fs.renameSync(tmp,meta);}
             finally {try{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}catch(_){}}
           }
         },
@@ -1035,17 +1060,28 @@ function registerIpc() {
         }
       }});
       diagnostic('transaction-result',{result:tx});
+      const releaseLegacy=async warnings=>{
+        if(!legacyReservation)return true;
+        let proof;
+        try{proof={outcome:tx.ok?'committed':tx.blocked?'no-mutation':'rolled-back',mutationsSettled:!desktopUnsafe&&!(tx.recovery||[]).length&&!warnings.length,metadataSettled:readMeta()===(tx.ok?expectedLegacyMeta:before),oldUnchanged:legacyOldUnchanged(snap,await desktopSnapshot()),helper:{...legacyHelperState}};}catch(e){diagnostic('legacy-proof-unavailable',{reason:String(e.message||e)});return false;}
+        diagnostic('legacy-proof',{proof});
+        const released=await legacyReservation.client.releaseLegacy(legacyReservation.token,proof);
+        legacySettled=released?.ok===true&&released.leaseReleased===true;
+        diagnostic('legacy-release',{result:released});return legacySettled;
+      };
+      if(!tx.ok&&!(await releaseLegacy([])))return {...pendingLeaseResult('legacy-reservation-unresolved'),recovery:tx.recovery||[]};
       if(!tx.ok){try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop '+JSON.stringify(tx)+'\n');}catch(_){}return desktopBlocked(tx.reason,tx.recovery);}
       if(calibrationEvidence){try{await persistCalibrationEvidence();}catch(_){}}
       const warnings=[];
       for(const item of planned)if(item.crossTx){try{const cleaned=await item.crossTx.cleanup();if(!cleaned.ok)warnings.push(cleaned);}catch(e){warnings.push({warning:String(e.message||e),recovery:item.crossTx.recoveryPaths});}}
       for(const item of planned)if(item.crossTx){try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop cross-volume '+JSON.stringify(item.crossTx.timings)+'\n');}catch(_){}}
+      if(!(await releaseLegacy(warnings)))return {...pendingLeaseResult('legacy-reservation-unresolved'),recovery:planned.map(i=>({path:i.recoveryPath||i.dest}))};
       if(warnings.length){try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop cleanup '+JSON.stringify(warnings)+'\n');}catch(_){}}
       try{recordHistory(payload.boardName,{folder,positions:data.positions,links:data.links},planned.map(i=>({kind:i.isLink?'linked':'resident',destPath:i.dest,fileName:i.name,col:i.cell[0],row:i.cell[1]})),payload.groupId);}catch(e){warnings.push({warning:"history-save-failed",recovery:planned.map(i=>i.dest)});}
       if(win&&!win.isDestroyed())win.webContents.send('fs-changed');
       return {metadataCommitted:leaseTransaction?.ok===true,moved:planned.map(i=>i.path),destinations:planned.map(i=>i.dest),skipped:[],failed:[],error:null,warnings,warningText:warnings.length?'元データの予備コピーが残っています: '+warnings.map(w=>w.backupPath||(w.recovery||[]).join(' / ')).join(' / '):'',position:{status:'ok',positioned:planned.length}};
-    } catch(e){return desktopBlocked(String(e.message||e));}
-    finally {desktopBusy=false;try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop ms plan='+planMs+' position='+positionMs+' total='+(Date.now()-started)+'\n');}catch(_){}}
+    } catch(e){if(legacyReserveRequested&&!legacySettled)return pendingLeaseResult('legacy-reservation-unconfirmed: '+String(e.message||e));return desktopBlocked(String(e.message||e));}
+    finally {if(legacyReserveRequested&&!legacySettled)desktopLeasePending=true;legacyHelperState=null;desktopBusy=false;try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop ms plan='+planMs+' position='+positionMs+' total='+(Date.now()-started)+'\n');}catch(_){}}
   }
   ipcMain.handle('safe-takeout',(_e,payload)=>safeDesktopMove({...payload,automatic:true},{type:'desktop',path:desktopReturnDir()}));
 

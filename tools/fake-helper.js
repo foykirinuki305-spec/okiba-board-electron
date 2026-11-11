@@ -60,7 +60,7 @@ function fakeLeaseCommand(req){
  const identity=p=>{const st=calibrationFs.statSync(leaseOwned(p));return st.dev+':'+st.ino;};
  const alive=()=>{try{process.kill(fakeOwner.pid,0);return 'alive';}catch{return 'exited';}};
  switch(req.cmd){
- case 'leaseHelperIdentity':{const desktop=leaseOwned(process.env.OKIBA_FAKE_LANDING||leasePath.join(process.env.OKIBA_FAKE_LEASE_ROOT,'desktop'));const localAppData=leaseOwned(leasePath.join(process.env.OKIBA_FAKE_LEASE_ROOT,'localAppData'));calibrationFs.mkdirSync(desktop,{recursive:true});calibrationFs.mkdirSync(localAppData,{recursive:true});return {ok:true,pid:process.pid,started:fakeHelperStarted,sessionId:0,desktop,localAppData};}
+ case 'leaseHelperIdentity':{const desktop=leaseOwned(process.env.OKIBA_FAKE_LANDING||leasePath.join(process.env.OKIBA_FAKE_LEASE_ROOT,'desktop'));const localAppData=leaseOwned(leasePath.join(process.env.OKIBA_FAKE_LEASE_ROOT,'localAppData'));calibrationFs.mkdirSync(desktop,{recursive:true});calibrationFs.mkdirSync(localAppData,{recursive:true});leaseLog('fake-helper-location',{desktop,canonicalDesktop:calibrationFs.realpathSync.native(desktop),localAppData});return {ok:true,pid:process.pid,started:fakeHelperStarted,sessionId:0,desktop,localAppData};}
  case 'leaseOwnerPin':fakeOwner={pid:req.pid,started:req.started||(req.pid===process.ppid?'2':'1')};return {ok:true,...fakeOwner,state:alive()};
  case 'leaseOwnerState':return {ok:true,...fakeOwner,state:alive()};
  case 'leaseReadFiles':return {ok:true,records:req.paths.map(p=>({path:p,identity:identity(p)}))};

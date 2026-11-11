@@ -4,6 +4,8 @@ on:
     paths:
       - 'tools/snap-lease-*'
       - 'tools/desktop-lease-protocol-*'
+      - 'tools/desktop-legacy-*'
+      - 'lib/desktop-legacy-*'
       - 'lib/desktop-lease-*'
       - 'scripts/snap-lease.ps1'
       - 'scripts/shell-helper.ps1'
@@ -25,6 +27,9 @@ jobs:
       - name: Initialization failure does not leak watchdogs
         shell: pwsh
         run: node ./tools/desktop-lease-init-selftest.js
+      - name: Legacy route reservation state machine
+        shell: pwsh
+        run: node ./tools/desktop-legacy-reservation-selftest.js
       - name: Canonical lease geometry pure checks
         shell: pwsh
         run: pwsh -NoProfile -File ./tools/snap-lease-geometry-selftest.ps1
@@ -45,12 +50,16 @@ jobs:
         run: |
           & pwsh -NoProfile -File ./tools/desktop-lease-protocol-ci.ps1 2>&1 | Tee-Object -FilePath desktop-lease-protocol-ci.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Legacy owner death preserves global reservation (hosted only)
+        shell: pwsh
+        run: node ./tools/desktop-legacy-native-ci.js
       - name: Retain journal and fault evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: desktop-lease-protocol-evidence
           path: |
+            desktop-legacy-native-ci.json
             desktop-lease-protocol-ci.json
             desktop-lease-protocol-ci.log
             desktop-lease-protocol-journals/**
