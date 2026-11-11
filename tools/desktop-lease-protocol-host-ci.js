@@ -14,7 +14,7 @@ async function run(spec){
  scope=await client.prepareScope(scope);
  const commit=async(permit,receipts)=>{for(const r of receipts){const saved=spec.receipts.find(x=>x.path===r.path),tmp=r.path+'.write';const fd=fs.openSync(tmp,'wx');try{fs.writeFileSync(fd,saved.afterText);fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(tmp,r.path);}};
  const adapter=client.adapter(commit);const started=Date.now();
- if(spec.commitCase==='success'||spec.commitCase==='helper-hang'){
+ if(spec.commitCase==='success'||spec.commitCase==='helper-hang'||spec.commitCase.startsWith('release-')){
   const result=await runLease({scope,receipts:spec.receipts,adapter});send({phase:'done',result,ms:Date.now()-started,status:await client.status(),watchdog:client.diagnostics()});return;
  }
  const p=await adapter.prepare(scope);if(!p.ok)throw Error(JSON.stringify(p));const token=p.token;

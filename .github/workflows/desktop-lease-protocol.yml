@@ -30,6 +30,9 @@ jobs:
       - name: Legacy route reservation state machine
         shell: pwsh
         run: node ./tools/desktop-legacy-reservation-selftest.js
+      - name: Legacy fixture process lifetime checks
+        shell: pwsh
+        run: node ./tools/desktop-legacy-stop-selftest.js
       - name: Canonical lease geometry pure checks
         shell: pwsh
         run: pwsh -NoProfile -File ./tools/snap-lease-geometry-selftest.ps1

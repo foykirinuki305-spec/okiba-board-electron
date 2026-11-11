@@ -210,6 +210,21 @@ function Lease-Rollback([string]$token){
  if($selected.Count -ne 0 -or [uint32]$s.folderFlags -ne [uint32]$r.originalFlags){throw 'lease-rollback-unverified'}
  return @{ok=$true;snapRestored=$true;oldUnchanged=$true;selectedHidden=$true}
 }
+function Lease-Release([string]$token,[string]$expectedOutcome){
+ if($expectedOutcome -cne 'visible' -and $expectedOutcome -cne 'hidden'){throw 'lease-release-outcome-required'}
+ $r=Lease-Require $token
+ $visible=$expectedOutcome -ceq 'visible'
+ # Verify again at the final release boundary, not just at an earlier commit gate.
+ $s=Lease-Snapshot;$selected=Lease-Guard $r $s $visible
+ if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags -or -not $s.snap){throw 'lease-still-disabled'}
+ foreach($record in $r.records){$n=Lease-CheckRecord $record;if($n.hidden -eq $visible){throw 'lease-release-visibility-changed'}}
+ $s=Lease-Snapshot;$selected=Lease-Guard $r $s $visible
+ if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags -or -not $s.snap){throw 'lease-still-disabled'}
+ if(($visible -and $selected.Count -ne @($r.records).Count) -or (-not $visible -and $selected.Count -ne 0)){throw 'lease-release-visibility-changed'}
+ Lease-AllGrid $r.snapshot $s
+ $script:SnapLease=$null
+ return @{ok=$true;released=$true;expectedOutcome=$expectedOutcome;snapRestored=$true;oldUnchanged=$true;targetsExact=$visible;selectedHidden=(-not $visible)}
+}
 function Invoke-SnapLeaseRequestCore($req){
  try{
   $script:LeasePhase=[string]$req.cmd;$script:LeaseBatchFailure=$null
@@ -224,7 +239,7 @@ function Invoke-SnapLeaseRequestCore($req){
    'leaseRestoreVerify' {return Lease-RestoreVerify $req.token}
    'leaseRollback' {return Lease-Rollback $req.token}
    'leaseAdopt' {if($null -ne $script:SnapLease){throw 'lease-already-active'};$r=$req.recovery;$owner=[OkibaLeaseOwner]::Read();if($owner.state -eq 'unknown' -or $owner.pid -ne $r.owner.pid -or $owner.started -cne $r.owner.started){throw 'lease-owner-mismatch'};$s=Lease-Snapshot;Lease-ValidateRecovery $r $s;$script:SnapLease=$r;return @{ok=$true}}
-   'leaseRelease' {$r=Lease-Require $req.token;$s=Lease-Snapshot;$null=Lease-Guard $r $s;if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){throw 'lease-still-disabled'};$script:SnapLease=$null;return @{ok=$true}}
+   'leaseRelease' {return Lease-Release $req.token $req.expectedOutcome}
    default {throw 'lease-unknown-command'}
   }
  }catch{

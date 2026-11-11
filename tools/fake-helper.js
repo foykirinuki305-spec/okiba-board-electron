@@ -80,6 +80,7 @@ function fakeLeaseCommand(req){
  case 'leaseRollback':
   if(fakeLease?.token!==req.token)throw Error('fake-token');fakeLease.visible=false;fakeLease.snap=true;return {ok:true};
  case 'leaseRelease':
+  if(!['visible','hidden'].includes(req.expectedOutcome))throw Error('lease-release-outcome-required');
   if(mode==='release-fail'&&++releaseCalls===1)return {ok:false,reason:'injected-release-failure'};
   if(fakeLease?.token!==req.token)throw Error('fake-token');leaseLog('fake-terminal',{visible:fakeLease.visible,snap:fakeLease.snap});return {ok:true};
  default:return {ok:false,reason:'unsupported-fake-lease-command'};

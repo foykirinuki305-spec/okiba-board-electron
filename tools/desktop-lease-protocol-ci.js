@@ -93,7 +93,7 @@ async function main(){
   async function ownerMessage(child,timeout=120000){return new Promise((resolve,reject)=>{const t=setTimeout(()=>{child.off('message',f);reject(Error('owner message timeout'));},timeout);function f(m){clearTimeout(t);child.off('message',f);if(m.phase==='error')reject(Error(m.error));else resolve(m);}child.on('message',f);});}
   async function killOwner(child){if(child.exitCode!==null||child.signalCode!==null)return;const exited=new Promise(r=>child.once('exit',r));child.kill();await Promise.race([exited,sleep(5000)]);if(child.exitCode===null&&child.signalCode===null){unsafe=true;throw Error('owner stop unconfirmed');}}
   async function journalTerminal(dir){for(let n=0;n<300;n++){const files=fs.existsSync(dir)?fs.readdirSync(dir).filter(x=>/^[a-f0-9]{32}\.json$/.test(x)):[];for(const f of files){const j=JSON.parse(fs.readFileSync(path.join(dir,f),'utf8'));if(['released','aborted','blocked'].includes(j.phase))return j;}await sleep(100);}throw Error('journal recovery timeout');}
-  for(const [index,commitCase] of ['success','success','kill-reveal','ack-lost','disconnect-alive','helper-hang'].entries()){
+  for(const [index,commitCase] of ['success','success','kill-reveal','ack-lost','disconnect-alive','helper-hang','release-target-shift','release-file-changed'].entries()){
    const name=index+'-'+commitCase,caseDir=path.join(temp,name);fs.mkdirSync(caseDir);
    const before=await stable('protocol-before',remaining),plan=planDesktop({snapshot:before,items:selected,automatic:true});assert(plan.ok);
    const targets=plan.targets.map(t=>({...t,path:selected.find(i=>i.name===t.name).dest}));
@@ -105,6 +105,14 @@ async function main(){
     const hd=path.join(caseDir,'helper');fs.mkdirSync(hd);helperPath=path.join(hd,'shell-helper.ps1');fs.copyFileSync(path.join(root,'scripts','shell-helper.ps1'),helperPath);
     let lease=fs.readFileSync(path.join(root,'scripts','snap-lease.ps1'),'utf8');const anchor=" $script:LeasePhase='reveal-arrival'";assert.equal(lease.split(anchor).length-1,1,'unique post-unhide/pre-arrival phase marker required');lease=lease.replace(anchor," if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'CI fault only'};Start-Sleep -Seconds 60\n"+anchor);fs.writeFileSync(path.join(hd,'snap-lease.ps1'),lease);
    }
+   if(commitCase.startsWith('release-')){
+    const hd=path.join(caseDir,'helper');fs.mkdirSync(hd);helperPath=path.join(hd,'shell-helper.ps1');fs.copyFileSync(path.join(root,'scripts','shell-helper.ps1'),helperPath);
+    let lease=fs.readFileSync(path.join(root,'scripts','snap-lease.ps1'),'utf8');const begin=lease.indexOf('function Lease-Release('),end=lease.indexOf('function Invoke-SnapLeaseRequestCore',begin);assert(begin>=0&&end>begin);let fragment=lease.slice(begin,end);
+    const guard=" $s=Lease-Snapshot;$selected=Lease-Guard $r $s $visible";assert(fragment.includes(guard));
+    const once=" if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'CI fault only'};if(-not $script:ReleaseFaultInjected){$script:ReleaseFaultInjected=$true;";
+    const fault=commitCase==='release-target-shift'?once+"$s=($s|ConvertTo-Json -Depth 50 -Compress|ConvertFrom-Json);foreach($i in $s.icons){if($i.path -ieq $r.targets[0].path){$i.x=[int]$i.x+1}}}":once+"throw 'lease-selected-file-changed'}";
+    fragment=fragment.replace(guard," $s=Lease-Snapshot;\n"+fault+"\n $selected=Lease-Guard $r $s $visible");lease=lease.slice(0,begin)+fragment+lease.slice(end);fs.writeFileSync(path.join(hd,'snap-lease.ps1'),lease);
+   }
    const journalDir=index===1?warmJournal:path.join(caseDir,'journal');
    const spec={desktop,caseDir,journalDir,commitCase,helperPath,baseline:before,selected:selected.map(i=>({path:i.dest})),targets,targetAreaIndex,receipts};
    let ownerChild=index===1?warmOwner:fork(path.join(root,'tools','desktop-lease-protocol-host-ci.js'),[],{windowsHide:true,stdio:['ignore','ignore','ignore','ipc']});
@@ -114,6 +122,7 @@ async function main(){
     const response=ownerMessage(ownerChild);ownerChild.send({cmd:'run',spec});const message=await response;lastMessage=message;note('protocol-owner',{name,...message});
     let expected;
     if(commitCase==='success'){assert(message.result.ok);assert.equal(message.status.helper.spawns,1,'normal transactions must reuse one warm helper');expected='released';}
+    else if(commitCase.startsWith('release-')){assert(message.result.ok&&message.result.recovered,'failed terminal must be reverified before recovered success');const attempts=message.status.nativeTimings.filter(t=>t.command==='leaseRelease');assert(attempts.length>=2&&attempts[0].nativeOk===false&&attempts[attempts.length-1].nativeOk===true);assert.equal(message.status.helper.spawns,1);expected='released';}
     else if(commitCase==='helper-hang'){assert(!message.result.ok);assert.equal(message.result.resolution?.state,'aborted');const h=message.status.helper;assert(h.cumulativeRestartCount>=1);assert(h.history.length>=2);const old=h.history[h.history.length-2],fresh=h.history[h.history.length-1];assert(old.stoppedConfirmed&&old.stopCause==='restart');assert.equal(old.pid,old.spawnPid);assert.equal(fresh.pid,fresh.spawnPid);assert(old.pid!==fresh.pid||old.started!==fresh.started,'native helper PID/birth must differ after confirmed termination');expected='aborted';}
     else{
      if(commitCase==='disconnect-alive'){

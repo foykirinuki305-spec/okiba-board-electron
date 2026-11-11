@@ -58,6 +58,33 @@ Reset-RestoreMocks @($visible);$script:mockHidden=$true
 Reject {Lease-RestoreVerify $r.token} 'lease-target-hidden'
 Reset-RestoreMocks @($off,$changed)
 Reject {Lease-RestoreVerify $r.token} 'lease-old-icon-moved'
+# Release boundary faults: an earlier verify must not authorize stale success.
+$script:SnapLease=$r
+Reset-RestoreMocks @($visible,$visible)
+$reply=Lease-Release $r.token 'visible'
+Pass ($reply.released -and $reply.targetsExact -and $null -eq $script:SnapLease) 'visible release verifies exact targets and file records'
+$script:SnapLease=$r
+Reset-RestoreMocks @($s,$s);$script:mockHidden=$true
+$reply=Lease-Release $r.token 'hidden'
+Pass ($reply.released -and $reply.selectedHidden -and $null -eq $script:SnapLease) 'hidden release verifies rollback state'
+foreach($fault in @('target-moved','target-disappeared','old-moved','flags','file-changed','hidden','late-target-moved')){
+ $script:SnapLease=$r;$bad=Clone-Data $visible
+ switch($fault){
+  'target-moved' {$bad.icons[1].x=300}
+  'target-disappeared' {$bad.icons=@($bad.icons[0])}
+  'old-moved' {$bad.icons[0].x=100}
+  'flags' {$bad.folderFlags=0;$bad.snap=$false}
+ }
+ if($fault -eq 'late-target-moved'){$bad.icons[1].x=300;Reset-RestoreMocks @($visible,$bad)}else{Reset-RestoreMocks @($bad,$bad)}
+ $script:mockHidden=$fault -eq 'hidden';$script:releaseFileChanged=$fault -eq 'file-changed'
+ function Lease-CheckRecord($record){$script:fileChecks++;if($script:releaseFileChanged){throw 'lease-selected-file-changed'};return @{hidden=$script:mockHidden}}
+ $failed=$false;try{Lease-Release $r.token 'visible'|Out-Null}catch{$failed=$true}
+ Pass ($failed -and $null -ne $script:SnapLease) ('release retains token after '+$fault)
+}
+$script:releaseFileChanged=$false;$script:SnapLease=$r;Reset-RestoreMocks @($visible,$visible)
+Reject {Lease-Release $r.token ''} 'lease-release-outcome-required'
+$script:SnapLease=$r;Reset-RestoreMocks @($visible,$visible);$script:mockHidden=$true
+Reject {Lease-Release $r.token 'hidden'} 'lease-release-visibility-changed'
 $script:SnapLease=$null;$script:LeasePerf=$null
 Write-Host ('snap lease pure: '+$n+' passed; no desktop mutations')
 
