@@ -50,14 +50,20 @@ function Unknown-ProbeVisible($r){
  do{$s=Unknown-Current $r;$selected=Lease-Guard $r $s;if($selected.Count -eq 1 -and $selected.ContainsKey((Lease-Path $r.records[0].path))){return @{snapshot=$s;probe=$selected[(Lease-Path $r.records[0].path)]}};if($selected.Count -gt 1){throw 'unknown-extra-selected-visible'};Start-Sleep -Milliseconds 100}while([DateTime]::UtcNow -lt $deadline)
  throw 'unknown-probe-arrival-timeout'
 }
-function Unknown-Abort($r){
+function Unknown-HideAndVerify($r){
  $s=Unknown-Current $r
  foreach($record in $r.records){$null=Unknown-Current $r;Lease-SetHidden $record $true}
  $s=Lease-WaitVisibility $r $false;Unknown-AssertFlags $r $s;Lease-AllGrid $r.snapshot $s
+ Unknown-TerminalHidden $r;$r.phase='abort-hidden';return @{ok=$true;selectedHidden=$true;oldUnchanged=$true;recovery=$r}
+}
+function Unknown-RestoreAndVerify($r){
+ if($r.phase -cne 'abort-hidden'){throw 'unknown-restore-before-hide'}
+ $s=Unknown-Current $r;Unknown-TerminalHidden $r
+ if((Lease-Guard $r $s).Count -ne 0){throw 'unknown-restore-selected-visible'};Lease-AllGrid $r.snapshot $s
  if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){Lease-SetSnap $r $s $true};$r.flagState='on'
  Start-Sleep -Milliseconds 250;$s=Unknown-Current $r;$selected=Lease-Guard $r $s
  if($selected.Count -ne 0 -or [uint32]$s.folderFlags -ne [uint32]$r.originalFlags){throw 'unknown-abort-unverified'}
- Unknown-TerminalHidden $r;$r.phase='aborted';return @{ok=$true;snapRestored=$true;selectedHidden=$true;oldUnchanged=$true}
+ Unknown-TerminalHidden $r;$r.phase='aborted';return @{ok=$true;snapRestored=$true;selectedHidden=$true;oldUnchanged=$true;recovery=$r}
 }
 function Invoke-UnknownLeaseCI($req){
  Unknown-CIOnly
@@ -71,7 +77,8 @@ function Invoke-UnknownLeaseCI($req){
   $current=Unknown-Current $r;$r.phase='abort-only';$script:SnapLease=$r;return @{ok=$true;abortOnly=$true}
  }
  $r=Lease-Require $req.token
- if($req.cmd -ceq 'leaseUnknownAbort'){return Unknown-Abort $r}
+ if($req.cmd -ceq 'leaseUnknownHideAndVerify'){return Unknown-HideAndVerify $r}
+ if($req.cmd -ceq 'leaseUnknownRestoreAndVerify'){return Unknown-RestoreAndVerify $r}
  if($req.cmd -ceq 'leaseUnknownRelease'){
   if($r.phase -cne 'aborted'){throw 'unknown-release-before-abort'};$s=Unknown-Current $r
   if((Lease-Guard $r $s).Count -ne 0 -or $s.folderFlags -ne $r.originalFlags){throw 'unknown-release-unverified'}

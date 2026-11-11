@@ -30,8 +30,14 @@ function createUnknownFlow(io){
   },
   async abort(token){
    const a=io.get();if(!a||a.mode!=='unknown-ci'||a.token!==token||a.permit)throw Error('unknown-abort-invalid');if(a.phase==='aborted')return {ok:true,state:'aborted'};
-   a.phase='aborting';a.recovery.abortFromFlagState=a.recovery.flagState;a.recovery.flagState='restore-on-intent';a.restoreAttempted=true;await io.save();const r=await io.native('leaseUnknownAbort',{token});
-   if(!r.ok||!r.oldUnchanged||!r.selectedHidden||!r.snapRestored)throw Error('unknown-rollback-unverified');
+   a.phase='abort-hide-intent';await io.save(); // Keep exact old flag through hiding and any helper loss.
+   const hidden=await io.native('leaseUnknownHideAndVerify',{token});
+   if(!hidden.ok||!hidden.oldUnchanged||!hidden.selectedHidden||!hidden.recovery||!['on','off'].includes(hidden.recovery.flagState))throw Error('unknown-hide-unverified');
+   a.recovery=hidden.recovery;a.phase='abort-hidden';await io.save();
+   a.recovery.abortFromFlagState=a.recovery.flagState;a.recovery.flagState='restore-on-intent';a.phase='abort-restore-intent';a.restoreAttempted=true;await io.save();
+   const r=await io.native('leaseUnknownRestoreAndVerify',{token});
+   if(!r.ok||!r.oldUnchanged||!r.selectedHidden||!r.snapRestored||!r.recovery)throw Error('unknown-rollback-unverified');
+   a.recovery=r.recovery;a.phase='abort-restored';await io.save();
    const released=await io.native('leaseUnknownRelease',{token});if(!released?.ok)throw Error('unknown-release-unverified');a.phase='aborted';await io.save();await io.release(token);return {ok:true,state:'aborted'};
   }
  };
