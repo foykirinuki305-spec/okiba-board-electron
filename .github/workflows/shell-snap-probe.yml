@@ -1,0 +1,22 @@
+name: shell-snap-probe
+on:
+  push:
+    paths:
+      - 'tools/shell-snap-probe-ci.ps1'
+      - '.github/workflows/shell-snap-probe.yml'
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Experimental Shell snap evidence only
+        shell: pwsh
+        run: pwsh -NoProfile -File ./tools/shell-snap-probe-ci.ps1
+      - name: Save evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shell-snap-probe-evidence
+          path: shell-snap-probe-ci.json
+          if-no-files-found: warn
