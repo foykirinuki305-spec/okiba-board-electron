@@ -5,6 +5,16 @@ const {_electron:electron}=require('playwright');const ROOT=path.resolve(__dirna
 let checks=0;const check=(v,m)=>{assert.ok(v,m);checks++;console.log('ok '+m);};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function wait(fn,label){const end=Date.now()+25000;while(Date.now()<end){try{if(await fn())return;}catch{}await sleep(100);}throw Error('timeout: '+label);}
+async function stableCardBox(locator,label){
+ let previous=null,box=null,stable=0;
+ await wait(async()=>{
+  box=await locator.boundingBox();
+  if(!box){previous=null;stable=0;return false;}
+  const key=JSON.stringify(box);stable=key===previous?stable+1:1;previous=key;
+  return stable>=3;
+ },label+' connected and stable after refresh');
+ return box;
+}
 async function scenario(mode){
  const isDrag=mode.startsWith('drag-');
  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-lease-gui-'));const base=path.join(temp,'boards'),board=path.join(base,'Lease'),desktop=path.join(temp,'desktop'),old=path.join(temp,'old'),profile=path.join(temp,'profile');for(const p of [board,desktop,old])fs.mkdirSync(p,{recursive:true});
@@ -26,7 +36,7 @@ async function scenario(mode){
   await wait(async()=>(await page.locator('.item .name').allTextContents()).includes('first.txt'),'linked cards');await sleep(500);
   // Install a future-version field after normal intake, so the tested commit must retain it.
   const data=JSON.parse(fs.readFileSync(meta,'utf8'));data.future={untouched:['value',17]};fs.writeFileSync(meta,JSON.stringify(data));await sleep(500);
-  const before=fs.readFileSync(meta,'utf8'),beforeData=JSON.parse(before);afterForCleanup=JSON.stringify({...beforeData,links:beforeData.links.filter(l=>l.path!==files[0])},null,2);const keptBox=await card('keep.txt').boundingBox();
+  const before=fs.readFileSync(meta,'utf8'),beforeData=JSON.parse(before);afterForCleanup=JSON.stringify({...beforeData,links:beforeData.links.filter(l=>l.path!==files[0])},null,2);const keptBox=await stableCardBox(card('keep.txt'),'initial keep card');
   if(mode==='legacy-abort'||mode==='legacy-concurrent'){
    const operation=page.evaluate(p=>window.okiba.safeTakeout({boardName:'Lease',paths:[p],linkedPaths:[]}),keep);
    if(mode==='legacy-concurrent'){
@@ -85,7 +95,7 @@ async function scenario(mode){
     check(!records().some(r=>r.cmd==='leasePrepare'),'invalid complete shape cancelled before revealing');check(fs.readFileSync(meta,'utf8')===before,'cancel retains metadata exactly');check(!fs.existsSync(path.join(base,'.move-history.json')),'cancel creates no history');
     const names=await page.locator('.item .name').allTextContents();check(names.includes('first.txt')&&names.includes('second.txt'),'both cancelled cards present');
    }
-   const finalKeep=await card('keep.txt').boundingBox();check(finalKeep.x===keptBox.x&&finalKeep.y===keptBox.y,'drag leaves existing card position unchanged');
+   const finalKeep=await stableCardBox(card('keep.txt'),'drag keep card');check(finalKeep.x===keptBox.x&&finalKeep.y===keptBox.y,'drag leaves existing card position unchanged');
    for(let i=0;i<files.length;i++)check(fs.readFileSync(files[i],'utf8')==='selected-'+i,'drag keeps original bytes');
    return;
   }
@@ -117,9 +127,15 @@ async function scenario(mode){
     check(new Set(records().filter(r=>r.cmd==='leasePrepare').map(r=>r.pid)).size===1,'two transactions reuse dedicated helper');
    }
   }
-  const afterBox=await card('keep.txt').boundingBox();check(keptBox.x===afterBox.x&&keptBox.y===afterBox.y,'existing resident card stays at same position');check(fs.readFileSync(keep,'utf8')==='unchanged resident','resident original bytes unchanged');check(fs.statSync(sentinel).mtimeMs===sentinelStat.mtimeMs&&fs.readFileSync(sentinel,'utf8')==='untouched','unrelated desktop fixture unchanged');
+  const afterBox=await stableCardBox(card('keep.txt'),'final keep card');check(keptBox.x===afterBox.x&&keptBox.y===afterBox.y,'existing resident card stays at same position');check(fs.readFileSync(keep,'utf8')==='unchanged resident','resident original bytes unchanged');check(fs.statSync(sentinel).mtimeMs===sentinelStat.mtimeMs&&fs.readFileSync(sentinel,'utf8')==='untouched','unrelated desktop fixture unchanged');
   for(let i=0;i<files.length;i++)check(fs.readFileSync(files[i],'utf8')==='selected-'+i,'selected original file bytes unchanged');
+ }catch(e){
+  // Preserve non-hidden evidence: upload-artifact excludes dotfiles by default.
+  const diagnostic={mode,error:String(e.stack||e),metadata:fs.existsSync(meta)?fs.readFileSync(meta,'utf8'):null,keepExists:fs.existsSync(keep)};
+  if(app){try{const page=await app.firstWindow();diagnostic.dom=await page.evaluate(()=>({names:[...document.querySelectorAll('.item .name')].map(e=>e.textContent),boardHidden:document.getElementById('boardView')?.hidden,toast:document.getElementById('toast')?.textContent}));await page.screenshot({path:path.join(temp,'failure.png')});}catch(x){diagnostic.inspectError=String(x);}}
+  fs.writeFileSync(path.join(temp,'failure.json'),JSON.stringify(diagnostic,null,2));throw e;
  }finally{
+  if(fs.existsSync(meta))fs.copyFileSync(meta,path.join(temp,'final-board-metadata.json'));
   // Test-owned foreign edit is restored only by this cleanup, never by the app.
   // This lets the independent fake watchdog terminate after owner exit.
   if(mode==='foreign-change'&&afterForCleanup)fs.writeFileSync(meta,afterForCleanup);
