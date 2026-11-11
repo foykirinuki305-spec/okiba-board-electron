@@ -278,7 +278,7 @@ async function main() {
   await page.waitForSelector('#ctxMenu:not([hidden]) .ctx-item');
   const menuLabels = await page.locator('#ctxMenu .ctx-item').allTextContents();
   assert(menuLabels.some((t) => t.includes('名前を変更')), 'menu has 名前を変更');
-  assert(menuLabels.some((t) => t.includes('デスクトップへ移動')), 'menu has デスクトップへ移動');
+  assert(menuLabels.some((t) => t.includes('戻し先フォルダへ移動')), 'menu has 戻し先フォルダへ移動');
   await page.locator('#ctxMenu .ctx-item', { hasText: '名前を変更' }).dispatchEvent('mousedown');
   await page.waitForSelector('#modalOverlay:not([hidden])');
   assert(true, 'rename modal opened');
@@ -454,8 +454,8 @@ async function main() {
   assert(true, 'positioning script invoked with the drop point and landed name');
   await waitFor(async () => {
     const t = await page.evaluate(() => document.getElementById('toast').textContent);
-    return t.includes('デスクトップへ移動しました');
-  }, 'status line says デスクトップへ移動しました');
+    return t.includes('戻し先フォルダへ移動しました');
+  }, 'status line says 戻し先フォルダへ移動しました');
   await waitFor(async () => {
     const ns = await page.locator('.item .name').allTextContents();
     return !ns.some((t) => t.includes('デスクトップ移動'));
@@ -523,8 +523,8 @@ async function main() {
   assert(linkMenu.some((t) => t.includes('ボードから外す')), 'linked menu has ボードから外す');
   assert(linkMenu.some((t) => t.includes('ファイルをゴミ箱へ削除')),
     'linked menu has the explicit real-file delete');
-  assert(linkMenu.some((t) => t.includes('デスクトップへ移動')),
-    'linked menu has デスクトップへ移動 (v2.1: a real move, distinct from 外す)');
+  assert(linkMenu.some((t) => t.includes('戻し先フォルダへ移動')),
+    'linked menu has 戻し先フォルダへ移動 (v2.1: a real move, distinct from 外す)');
   await page.locator('#ctxMenu .ctx-item', { hasText: 'ボードから外す' })
     .dispatchEvent('mousedown');
   await waitFor(async () => {
