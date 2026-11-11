@@ -18,14 +18,16 @@ try{
  $source=$source.Replace('desktop-dpi-ui-ci.json','formal-unknown-dpi-ui-ci.json')
  $hook=@'
  # BEGIN owned Settings exposure
+ . (Join-Path $PSScriptRoot 'packaged-terminal-window-ci.ps1')
+ try{$terminalState=Suspend-RunnerTerminal;$report.terminalExposure=$terminalState.evidence}catch{$report.terminalExposure=$script:RunnerTerminalEvidence;throw}
  . (Join-Path $PSScriptRoot 'packaged-settings-window-ci.ps1')
- try{$settingsState=Suspend-OwnedSettings $settings $combo}catch{$report.settingsExposure=$script:OwnedSettingsEvidence;throw}
+ try{$settingsState=Suspend-OwnedSettings $settings $combo}catch{$report.settingsExposure=$script:OwnedSettingsEvidence;try{Resume-RunnerTerminal $terminalState}finally{$terminalState.owner.Dispose()};throw}
  $report.settingsExposure=@{pid=$settingsState.pid;started=$settingsState.birth;hwnd=$settingsState.hwnd;original=[int]$settingsState.original;ancestors=$settingsState.ancestors;minimized=$true}
  # END owned Settings exposure
  $native=New-Object Diagnostics.Process;$native.StartInfo.FileName='node.exe';$native.StartInfo.Arguments='"'+(Join-Path $PSScriptRoot 'packaged-unknown-reuse-ci.js')+'" "'+[Environment]::GetFolderPath('Desktop')+'"';$native.StartInfo.UseShellExecute=$false;$native.StartInfo.CreateNoWindow=$true;$native.StartInfo.WorkingDirectory=Split-Path $PSScriptRoot -Parent;$native.StartInfo.EnvironmentVariables['OKIBA_UNKNOWN_EXPECTED_SCALE']='150';$native.StartInfo.EnvironmentVariables['OKIBA_UNKNOWN_CASES']='success,no-fit'
  try{$null=$native.Start();$nativeStarted=$true;if(-not $native.WaitForExit(600000)){throw 'native-timeout-unresolved'};$native.WaitForExit();$native.Refresh();$report.nativeHasExited=$native.HasExited;$report.nativeExitCode=$native.ExitCode;$n=Get-Content (Join-Path $native.StartInfo.WorkingDirectory 'packaged-unknown-drag-evidence/result.json') -Raw|ConvertFrom-Json;$report.nativeEvidence=$n;$exitKnown=($native.HasExited -and $null -ne $report.nativeExitCode);$nativeVerified=($exitKnown -and $n.cleanupVerified -eq $true -and -not $n.cleanupError -and ($n.passed -eq $true -or $n.failureRecoveryVerified -eq $true) -and $n.actualScale -eq 150 -and $n.noFitVerified -eq $true);if(-not $nativeVerified){throw 'native-cleanup-unverified'};if($report.nativeExitCode -ne 0 -or -not $n.passed){$report.status='native-failed-recovery-verified';throw 'native-test-failed-but-recovery-verified'};$report.status='single-150-empty-native-verified'}finally{$native.Dispose()
  # BEGIN owned Settings restoration
- try{Resume-OwnedSettings $settingsState;$report.settingsExposure.restored=$settingsState.restored}finally{$settingsState.owner.Dispose()}
+ try{Resume-OwnedSettings $settingsState;$report.settingsExposure.restored=$settingsState.restored}finally{$settingsState.owner.Dispose();try{Resume-RunnerTerminal $terminalState}finally{$terminalState.owner.Dispose()}}
  # END owned Settings restoration
  }
 '@
