@@ -1,0 +1,10 @@
+'use strict';
+const assert=require('assert/strict'),{validateScope}=require('../lib/desktop-snap-lease-controller');
+const base={kind:'resident-archive-samevolume',desktop:'C:\\Desktop',items:[{path:'C:\\Board\\a.mp4',destination:'C:\\Desktop\\a.mp4',fileIdentity:'own'}],snapshot:{ok:true,identityVersion:1,autoArrange:false,snap:true,icons:[],areas:[{left:0,top:0,right:1000,bottom:1000,grid:{gx:0,gy:0,sx:100,sy:100}}]},targetAreaIndex:0,targets:[{path:'C:\\Desktop\\a.mp4',x:0,y:0}],metadataPaths:['C:\\Board\\.okiba-board.json']};
+let checks=0;const test=(s,want)=>{assert.equal(validateScope(s),want);checks++;};test(base,true);
+for(const path of ['C:\\Desktop\\nested\\a.mp4','C:\\Desktop','C:\\Desktop\\a.mp4'])test({...base,items:[{...base.items[0],path}]},false);
+test({...base,items:[{...base.items[0],destination:'C:\\Elsewhere\\a.mp4'}]},false);
+test({...base,items:[base.items[0],{...base.items[0],path:'C:\\Board\\b.mp4'}]},false);
+test({...base,kind:'unsupported'},false);
+test({...base,kind:'samepath-hidden',items:[{path:'C:\\Desktop\\a.mp4',destination:'C:\\Desktop\\a.mp4',hidden:true,fileIdentity:'own'}]},true);
+console.log('PASS resident scope '+checks+' checks; native final validation still required');

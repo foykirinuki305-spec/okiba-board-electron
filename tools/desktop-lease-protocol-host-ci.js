@@ -10,7 +10,7 @@ async function ensureClient(spec){
 }
 async function run(spec){
  await ensureClient(spec);
- let scope={kind:'samepath-hidden',desktop:spec.desktop,items:spec.selected.map(i=>({path:i.path,destination:i.path,hidden:true})),snapshot:spec.baseline,targetAreaIndex:spec.targetAreaIndex,targets:spec.targets,metadataPaths:spec.receipts.map(r=>r.path)};
+ let scope={kind:spec.kind||'samepath-hidden',desktop:spec.desktop,items:spec.selected.map(i=>({path:i.path,destination:i.destination||i.path,hidden:true})),snapshot:spec.baseline,targetAreaIndex:spec.targetAreaIndex,targets:spec.targets,metadataPaths:spec.receipts.map(r=>r.path)};
  scope=await client.prepareScope(scope);
  const commit=async(permit,receipts)=>{for(const r of receipts){const saved=spec.receipts.find(x=>x.path===r.path),tmp=r.path+'.write';const fd=fs.openSync(tmp,'wx');try{fs.writeFileSync(fd,saved.afterText);fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(tmp,r.path);}};
  const adapter=client.adapter(commit);const started=Date.now();
@@ -19,7 +19,7 @@ async function run(spec){
  }
  const p=await adapter.prepare(scope);if(!p.ok)throw Error(JSON.stringify(p));const token=p.token;
  let r=await adapter.revealAndPlace(token);if(!r.ok)throw Error(JSON.stringify(r));
- if(spec.commitCase==='kill-reveal'){send({phase:'revealed',token,watchdog:client.diagnostics()});return;}
+ if(spec.commitCase==='kill-reveal'){send({phase:'revealed',token,status:await client.status(),watchdog:client.diagnostics()});return;}
  r=await adapter.restoreAndVerify(token);if(!r.ok)throw Error(JSON.stringify(r));const g=await adapter.prepareCommit(token,spec.receipts);if(!g.ok)throw Error(JSON.stringify(g));
  if(spec.commitCase==='disconnect-alive'){client.disconnect();send({phase:'disconnected-live',token,watchdog:client.diagnostics()});return;}
  await commit(g.permit,spec.receipts);send({phase:'written-no-ack',token,watchdog:client.diagnostics()});

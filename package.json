@@ -46,7 +46,8 @@
         "from": "scripts",
         "to": "scripts",
         "filter": [
-          "**/*.ps1"
+          "**/*.ps1",
+          "resident-file-native.cs"
         ]
       }
     ]

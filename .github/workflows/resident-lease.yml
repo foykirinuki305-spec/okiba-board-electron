@@ -1,0 +1,51 @@
+name: resident-lease
+on:
+  push:
+    paths:
+      - 'scripts/resident-*'
+      - 'scripts/snap-lease.ps1'
+      - 'scripts/shell-helper.ps1'
+      - 'lib/desktop-lease-*'
+      - 'lib/desktop-snap-lease-controller.js'
+      - 'tools/resident-*'
+      - '.github/workflows/resident-lease.yml'
+  workflow_dispatch:
+jobs:
+  native-resident:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Scope and previous coordinator regression
+        shell: pwsh
+        run: |
+          node tools/resident-scope-selftest.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/snap-lease-controller-selftest.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Native handle adapter in owned TEMP only
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/resident-files-native-selftest.ps1
+      - name: Visible source is rejected before native work
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/resident-visible-source-selftest.ps1
+      - name: Partial stage locator in owned TEMP only
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/resident-lease-locator-selftest.ps1
+      - name: Hosted native Desktop lease (main remains disabled)
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -File tools/resident-lease-ci.ps1 2>&1 | Tee-Object -FilePath resident-lease-ci.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve verification and recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resident-lease-evidence
+          path: |
+            resident-lease-ci.json
+            resident-lease-ci.log
+            resident-lease-ci-journals/**

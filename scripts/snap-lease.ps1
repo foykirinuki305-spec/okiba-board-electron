@@ -1,4 +1,4 @@
-﻿# Dedicated watchdog lease commands. No main.js call site is enabled.
+# Dedicated watchdog lease commands. No main.js call site is enabled.
 $script:SnapLease=$null
 $script:LeasePhase='idle'
 $script:LeasePerf=$null
@@ -82,6 +82,7 @@ function Lease-Require([string]$token){
  return $script:SnapLease
 }
 function Lease-ValidateRecovery($r,$current){
+ if($r.kind -ceq 'resident-archive-samevolume'){Resident-Validate $r $current;return}
  if($r.snapshot.identityVersion -ne 1){throw 'lease-invalid-identity-version'}
  if($r.version -ne 1 -or [string]::IsNullOrEmpty($r.token) -or -not $r.snapshot.ok -or @($r.records).Count -lt 1 -or @($r.records).Count -gt 1000 -or @($r.targets).Count -ne @($r.records).Count){throw 'lease-invalid-recovery'}
  if(([uint32]$r.originalFlags -band 5) -ne 4 -or [uint32]$r.snapshot.folderFlags -ne [uint32]$r.originalFlags -or $r.snapshot.autoArrange -or -not $r.snapshot.snap){throw 'lease-invalid-original-flags'}
@@ -110,6 +111,7 @@ function Lease-Prepare($req){
  if($req.token -isnot [string] -or $req.token -notmatch '^[A-Za-z0-9_-]{16,128}$'){throw 'lease-invalid-token'}
  $owner=[OkibaLeaseOwner]::Read();if($owner.state -ne 'alive'){throw 'lease-owner-not-alive'}
  $scope=$req.scope
+ if($scope.kind -ceq 'resident-archive-samevolume'){return Resident-Prepare $req $owner}
  if($scope.kind -ne 'samepath-hidden' -or @($scope.items).Count -lt 1 -or @($scope.items).Count -gt 1000){throw 'lease-invalid-scope'}
  $current=Lease-Snapshot
  if(-not $scope.snapshot.ok -or (Strict-GeometryKey $scope.snapshot) -cne (Strict-GeometryKey $current) -or (Strict-IconsKey $scope.snapshot) -cne (Strict-IconsKey $current)){throw 'lease-baseline-changed'}
@@ -160,6 +162,7 @@ function Lease-RevealAttributeBatch($r,[uint32]$off){
  }
 }
 function Lease-RevealPlace([string]$token){
+ $resident=Lease-Require $token;if($resident.kind -ceq 'resident-archive-samevolume'){return Resident-RevealPlace $resident}
  $script:LeasePhase='reveal-preflight'
  $r=Lease-Require $token;if(([OkibaLeaseOwner]::Read()).state -ne 'alive'){throw 'lease-owner-not-alive'};$s=Lease-Snapshot;Lease-ValidateRecovery $r $s
  if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){throw 'lease-not-initial-flags'}
@@ -197,6 +200,7 @@ function Lease-AdoptRestoration($r,$current,[string]$state){
  Lease-MarkRestored $r
 }
 function Lease-RestoreVerify([string]$token){
+ $resident=Lease-Require $token;if($resident.kind -ceq 'resident-archive-samevolume'){$null=Resident-All $resident 'moved'}
  $script:LeasePhase='restore-preflight'
  $r=Lease-Require $token;$s=Measure-LeaseStep 'restoreCheck' {Lease-Snapshot};$null=Lease-Guard $r $s $true;Lease-AllGrid $r.snapshot $s
  foreach($record in $r.records){if((Lease-CheckRecord $record).hidden){throw 'lease-target-hidden'}}
@@ -216,6 +220,7 @@ function Lease-RestoreVerify([string]$token){
  return @{ok=$true;snapRestored=$true;oldUnchanged=$true;targetsExact=$true;restoreMode='changed-and-settled'}
 }
 function Lease-Rollback([string]$token){
+ $resident=Lease-Require $token;if($resident.kind -ceq 'resident-archive-samevolume'){return Resident-Rollback $resident}
  $script:LeasePhase='rollback-preflight'
  $r=Lease-Require $token;$s=Lease-Snapshot;$null=Lease-Guard $r $s
  foreach($record in $r.records){$null=Lease-CheckRecord $record}
@@ -229,6 +234,7 @@ function Lease-Rollback([string]$token){
  return @{ok=$true;snapRestored=$true;oldUnchanged=$true;selectedHidden=$true}
 }
 function Lease-Release([string]$token,[string]$expectedOutcome){
+ $resident=Lease-Require $token;if($resident.kind -ceq 'resident-archive-samevolume'){if($expectedOutcome -ceq 'source-restored'){return Resident-ReleaseSources $resident};if($expectedOutcome -cne 'visible'){throw 'resident-release-outcome-invalid'};$null=Resident-All $resident 'moved'}
  if($expectedOutcome -cne 'visible' -and $expectedOutcome -cne 'hidden'){throw 'lease-release-outcome-required'}
  $r=Lease-Require $token
  $visible=$expectedOutcome -ceq 'visible'
@@ -240,6 +246,7 @@ function Lease-Release([string]$token,[string]$expectedOutcome){
  if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags -or -not $s.snap){throw 'lease-still-disabled'}
  if(($visible -and $selected.Count -ne @($r.records).Count) -or (-not $visible -and $selected.Count -ne 0)){throw 'lease-release-visibility-changed'}
  Lease-AllGrid $r.snapshot $s
+ if($r.kind -ceq 'resident-archive-samevolume'){$null=Resident-All $r 'moved'}
  $script:SnapLease=$null
  return @{ok=$true;released=$true;expectedOutcome=$expectedOutcome;snapRestored=$true;oldUnchanged=$true;targetsExact=$visible;selectedHidden=(-not $visible)}
 }
@@ -278,3 +285,7 @@ function Invoke-SnapLeaseRequest($req){
   return $result
  }finally{$script:LeasePerf=$previous}
 }
+
+# Optional in samepath-only test copies; required when requesting the new kind.
+$residentModule=Join-Path $PSScriptRoot 'resident-lease.ps1'
+if(Test-Path -LiteralPath $residentModule){. $residentModule}

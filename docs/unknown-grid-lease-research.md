@@ -34,3 +34,29 @@ Separate hosted-Windows-only job, leaving production and existing fault suites i
 Compare existing sweep/adaptive on identical fixtures. Record every requested/observed probe coordinate, old snapshots, native call count, arrival, settling, total calibration, full first return and cached return. Require exact final flags/old identity+xy, selected shape, metadata receipt, cleanup and each fault recovery. No Refresh, false CREATE/DELETE, approximate coordinates or omitted strict checks.
 
 Then test a genuinely disposable mixed-DPI environment with populated known 100% and empty 150% areas. Ordinary hosted runners cannot prove this configuration by claiming it. Do not install display drivers or modify the user's Desktop to manufacture evidence. Until such an isolated environment is available, state that mixed-DPI validation remains outstanding.
+
+
+## Native results and rejected wait-shortening experiment (2026-11-11)
+
+Known 100% single-display native run `9ae` passed all four comparisons and cleanup:
+
+- Dense: 58 observations, 52.061 s; adaptive fixed-settle: 24 observations, 21.372 s.
+- Reverse order: adaptive fixed-settle 21.326 s; dense 50.984 s.
+- All measured grids matched native reference spacing 78 x 98, origin residues 15, 2. Old icons, flags, probe file metadata/content and cleanup passed.
+
+This establishes adaptive observation-count reduction in that isolated configuration, not mixed-DPI support or integration with lease fault recovery.
+
+### Fast settling rejected
+
+Commit `ee07fa3`, CI run `42997708028`, artifact `calibration-adaptive-evidence-ee0/calibration-adaptive-ci.json`:
+
+- Dense completed in 48.688 s (58 samples).
+- Fixed-settle adaptive completed in 27.220 s (24 samples), including the extra delayed audit added for this comparison.
+- Fast adaptive failed on an x-axis candidate request `(365,359)`. At 237.5893 ms, two consecutive strict snapshots accepted the probe at `(365,359)`. After the audit (286.2491 ms later, including its wait and strict read), the same Shell identity was at the real snapped position `(327,394)`.
+- The six old OS icons stayed unchanged and cleanup was verified. Overall research result is FAIL, correctly caught by `delayed-readback-mismatch`.
+
+The failure was **not stale old coordinates**: Windows temporarily exposed the newly requested free position through multiple strict snapshots before asynchronously snapping it. Requiring a change from the previous position, and retaining the internal 40 ms double snapshot, did not establish final stability. During candidate discovery, that intermediate coordinate can also be compatible with a wrong candidate grid. Two equal reads are therefore not enough.
+
+Do not adopt fast settling, remove the delayed audit, or reinterpret cleanup success as algorithm success. Keep the fixed-settle 24-observation variant (approximately 21-27 s in these runs) as the current research candidate. Its improvement comes from fewer requests while retaining the established settle protocol, not from weakening that protocol. The fixed strategy still needs genuine 150% mixed-DPI and lease recovery tests; it is not a general guarantee against all Windows scheduling delays.
+
+No additional wait reduction is justified by these measurements. Before another optimization, profile native pre-snapshot, repeated Shell session setup, validation and JSON/IPC separately while leaving the wait/stability protocol unchanged. Session reuse is only a possible future investigation, not a demonstrated improvement. Preserve the failed fast experiment as negative evidence; do not retry it on the user's Desktop or integrate it into production.
