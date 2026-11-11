@@ -52,6 +52,12 @@ async function main() {
   ok(p.peek('peek.mp4',100)==='thumb-3' && notices===2,'peek background version refresh');
   const negative=make({thumbnail:async()=>({isEmpty:()=>true}),fileIcon:async()=>{throw Error('no icon');}});
   ok(await negative.get('bad.mp4')===null,'all native failures safe fallback');
+  let linkIconCalls=0;
+  const linkCache=make({fileIcon:async()=>{linkIconCalls++;return image('shortcut-icon');}});
+  await linkCache.get('app.lnk'); await linkCache.get('app.lnk');
+  ok(linkIconCalls===1,'shortcut successful icon reused briefly');
+  clock+=15001; await linkCache.get('app.lnk');
+  ok(linkIconCalls===2,'shortcut target icon refreshed despite unchanged link metadata');
   console.log(`preview-selftest: ${checks} checks passed`);
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});

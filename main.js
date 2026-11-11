@@ -80,10 +80,17 @@ async function runInAppSelfTest() {
 
 // -------------------------------------------------------------- thumbnails
 const { createPreviewService } = require('./lib/previews');
+const { createFileIconResolver } = require('./lib/shortcut-preview');
+const fileIconFor = createFileIconResolver({
+  readShortcutLink: (fullPath) => shell.readShortcutLink(fullPath),
+  getFileIcon: (fullPath, options) => app.getFileIcon(fullPath, options),
+  stat: (fullPath) => fs.promises.stat(fullPath),
+  loadIcon: (fullPath) => nativeImage.createFromPath(fullPath),
+});
 const previewService = createPreviewService({
   stat: (fullPath) => fs.promises.stat(fullPath),
   thumbnail: (fullPath, options) => nativeImage.createThumbnailFromPath(fullPath, options),
-  fileIcon: (fullPath, options) => app.getFileIcon(fullPath, options),
+  fileIcon: fileIconFor,
   isMedia: (fullPath) => ['image', 'video'].includes(kindOf(path.basename(fullPath), false)),
 });
 function thumbnailFor(fullPath, px) { return previewService.get(fullPath, px); }
