@@ -20,5 +20,12 @@ const assert=require('assert/strict'),{stableSnapshot}=require('./stable-snapsho
  for(const invalid of [{...evidence,terminalConfirmed:false},{...evidence,phase:'active'},{...evidence,record:null}]){await assert.rejects(run([com('0x80004005'),good(1),good(1)],()=>{},invalid));checks++;}
  for(const result of [{...com('0x80004005').result,reason:'lease-operation-failed'},{...com('0x80004005').result,detail:'Other native operation'}]){await assert.rejects(run([{ok:true,result}],()=>{},evidence));checks++;}
  await assert.rejects(run([{ok:false,reason:'timeout'}],()=>{},evidence));checks++;
+ const countChange={ok:true,result:{ok:false,reason:'desktop-changing',errorType:'System.InvalidOperationException',hresult:'0x80131509',innerDetail:'item-count-changed',detail:'Exception calling "ReadShellBatch" with "1" argument(s): "item-count-changed"'}};
+ await assert.rejects(run([countChange,good(1),good(1)]));checks++;
+ assert.equal((await run([countChange,good(1),good(1)],()=>{},evidence)).n,1);checks++;
+ await assert.rejects(run([countChange],()=>{},evidence),/bounded/);checks++;
+ await assert.rejects(run([good(1),countChange,good(2),good(3)],()=>{},evidence),/bounded/);checks++;
+ await assert.rejects(run([countChange,good(1)],()=>{throw Error('old changed')},evidence),/old changed/);checks++;
+ for(const patch of [{innerDetail:'unexpected'},{hresult:'0x80004005'},{reason:'lease-operation-failed'},{detail:'Other operation'},{errorType:'System.Exception'}]){await assert.rejects(run([{ok:true,result:{...countChange.result,...patch}}],()=>{},evidence));checks++;}
  console.log('stable snapshot CI '+checks+' PASS');
 })().catch(e=>{console.error(e);process.exitCode=1});

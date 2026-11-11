@@ -24,6 +24,7 @@ function build(root,destination){
  fs.copyFileSync(path.join(root,'tools/unknown-grid-lease-flow-ci.js'),path.join(destination,'lib/unknown-grid-lease-flow-ci.js'));
  fs.copyFileSync(path.join(root,'tools/unknown-grid-success-flow-ci.js'),path.join(destination,'lib/unknown-grid-success-flow-ci.js'));
  fs.copyFileSync(path.join(root,'tools/unknown-grid-lease-native-ci.ps1'),path.join(destination,'scripts/unknown-grid-lease-ci.ps1'));
+ fs.copyFileSync(path.join(root,'tools/unknown-grid-fixture-cleanup-ci.ps1'),path.join(destination,'scripts/unknown-grid-fixture-cleanup-ci.ps1'));
  fs.copyFileSync(path.join(root,'tools/unknown-grid-success-native-ci.ps1'),path.join(destination,'scripts/unknown-grid-success-native-ci.ps1'));
  for(const name of ['unknown-grid-success-model-ci.js','unknown-grid-success-validator-ci.js','unknown-grid-json-wire-ci.js'])fs.copyFileSync(path.join(root,'tools',name),path.join(destination,'scripts',name));
  let native=fs.readFileSync(path.join(destination,'scripts/snap-lease.ps1'),'utf8');

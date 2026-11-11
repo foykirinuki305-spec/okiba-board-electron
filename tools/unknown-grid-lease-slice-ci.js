@@ -36,7 +36,16 @@ async function main(){
    const metadata=path.join(caseDir,'board.json');fs.writeFileSync(metadata,'{"unchanged":true}');const metadataBefore=fs.readFileSync(metadata);
    const scope={version:2,kind:'samepath-hidden-unknown-grid-ci',desktop,snapshot:before,targetAreaIndex:0,plan,items:[{path:dest,destination:dest,hidden:true,fileIdentity:attrs.identity}],metadataPaths:[metadata]};
    const owner=fork(path.join(root,'tools/unknown-grid-lease-host-ci.js'),[],{windowsHide:true,stdio:['ignore','ignore','ignore','ipc'],env:{...process.env,OKIBA_UNKNOWN_GRID_CI:'1'}});children.push(owner);
-   let response,deathProcesses;try{const pending=receive(owner);owner.send({cmd:'run',spec:{copy,scope,scenario,journalDir,hideFaultMarker:path.join(caseDir,'hide-fault.json')}});response=await pending;note('owner-response',{scenario,response});assert.notEqual(response.phase,'error',response.error);
+   let response,deathProcesses,recoveredCase=false;try{const pending=receive(owner);owner.send({cmd:'run',spec:{copy,scope,scenario,journalDir,hideFaultMarker:path.join(caseDir,'hide-fault.json')}});response=await pending;note('owner-response',{scenario,response});
+    if(response.phase==='error'){
+     report.primaryError=response.error;
+     if(response.recovery?.ok&&response.recovery.state==='aborted'&&response.closed?.ok){
+      await stop(owner);const j=await terminal(journalDir);note('error-recovery-terminal',j);const after=await stable('error-recovered');assert.equal(after.icons.length,before.icons.length);
+      const n=await req('readHiddenFile',{path:dest});for(const k of ['identity','attributes','hidden','size','mtime'])assert.equal(n[k],attrs[k]);assert.equal(crypto.createHash('sha256').update(fs.readFileSync(dest)).digest('hex'),hash);assert(fs.readFileSync(metadata).equals(metadataBefore));recoveredCase=true;report.failureRecoveryVerified=true;
+     }
+     throw Error(response.error);
+    }
+    assert.notEqual(response.phase,'error',response.error);
     if(response.phase==='kill-owner'){
      const pid=response.watchdog.pid;assert(Number.isInteger(pid)&&pid>0);
      const script='$p=[Diagnostics.Process]::GetProcessById([int]$env:OKIBA_CHILD_PID);$null=$p.Handle;$p.StartTime.ToUniversalTime().Ticks.ToString()';
@@ -51,8 +60,8 @@ async function main(){
      catch(e){note('owner-death-exit-error',{scenario,message:e.message,stdout:e.stdout,stderr:e.stderr});throw e;}
     }
     const after=await stable('after-case');assert.equal(after.icons.length,before.icons.length);assert.deepEqual(after.icons.map(i=>[i.identity,i.x,i.y]).sort(),before.icons.map(i=>[i.identity,i.x,i.y]).sort());const current=await req('readHiddenFile',{path:dest});for(const k of ['identity','attributes','hidden','size','mtime'])assert.equal(current[k],attrs[k]);assert.equal(crypto.createHash('sha256').update(fs.readFileSync(dest)).digest('hex'),hash);assert(fs.readFileSync(metadata).equals(metadataBefore));
-    if(owner.connected){const closing=receive(owner,20000);owner.send({cmd:'close'});assert((await closing).result.ok);await stop(owner);}
-   }catch(e){unsafe=true;throw e;}
+    if(owner.connected){const closing=receive(owner,90000);owner.send({cmd:'close'});assert((await closing).result.ok);await stop(owner);}
+   }catch(e){if(!report.primaryError)report.primaryError=e.stack;if(!recoveredCase)unsafe=true;throw e;}
   }
   report.passed=true;
  }finally{
@@ -67,4 +76,4 @@ async function main(){
   const cleanupRoot=ownedTempDirectory(temp);fs.rmSync(cleanupRoot,{recursive:true,force:true});
  }
 }
-main().catch(e=>{report.passed=false;report.error=e.stack;fs.writeFileSync(path.join(root,'unknown-grid-lease-slice-ci.json'),JSON.stringify(report,null,2));console.error(e);process.exitCode=1;});
+main().catch(e=>{report.passed=false;report.error=report.primaryError||e.stack;fs.writeFileSync(path.join(root,'unknown-grid-lease-slice-ci.json'),JSON.stringify(report,null,2));console.error(e);process.exitCode=1;});

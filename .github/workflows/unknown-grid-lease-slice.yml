@@ -23,6 +23,12 @@ jobs:
       - name: Pure native phase and terminal guards
         shell: pwsh
         run: ./tools/unknown-grid-lease-native-guards-selftest.ps1
+      - name: Pure bounded recovery and owned cleanup guards
+        shell: pwsh
+        run: |
+          node tools/unknown-grid-recovery-policy-selftest.js
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          ./tools/unknown-grid-fixture-cleanup-selftest.ps1
       - name: Native probe sample abort slice only
         shell: pwsh
         run: |

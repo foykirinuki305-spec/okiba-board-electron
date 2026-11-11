@@ -1,10 +1,11 @@
 'use strict';
 if(process.platform!=='win32'||process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Windows'||process.env.RUNNER_ENVIRONMENT!=='github-hosted')throw Error('Hosted Windows CI only');
 const fs=require('fs'),path=require('path'),os=require('os'),crypto=require('crypto'),assert=require('assert/strict'),{fork}=require('child_process');const {build,ownedTempDirectory}=require('./unknown-grid-lease-copy-ci');const {createShellHelperClient}=require('../lib/shellhelper');const {planCalibration}=require('../lib/desktop-calibration');const {sameSnapshot}=require('../lib/safe-desktop');
+const {retryableSnapshotRead}=require('./unknown-grid-recovery-policy-ci');
 const root=path.resolve(__dirname,'..'),desktop=path.resolve(process.argv[2]),report={passed:false,cleanupVerified:false,scope:'CI-only N3 sparse success and no-fit abort; known 100%, no mixed-DPI proof',events:[]};const sleep=ms=>new Promise(r=>setTimeout(r,ms));const note=(phase,data)=>{report.events.push({phase,data});console.log(phase+' '+JSON.stringify(data));};const hash=p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 async function main(){const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-unknown-ci-')),copy=path.join(temp,'okiba-unknown-ci-copy');fs.mkdirSync(copy);build(root,copy);let unsafe=false,baseline;const owned=[],children=[];
- const observer=createShellHelperClient({command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(root,'scripts/shell-helper.ps1')],timeoutMs:15000});
- const request=async(cmd,data={})=>{const r=await observer.request(cmd,data,{timeoutMs:15000});assert(r.ok,JSON.stringify(r));return r.result;};
+ const observer=createShellHelperClient({command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(copy,'scripts/shell-helper.ps1')],env:{...process.env,OKIBA_SNAP_LEASE:'1',OKIBA_UNKNOWN_GRID_CI:'1'},timeoutMs:15000});
+ const request=async(cmd,data={})=>{const r=await observer.request(cmd,data,{timeoutMs:cmd==='leaseUnknownFixtureHideCleanup'?30000:15000});assert(r.ok,JSON.stringify(r));return r.result;};
  async function stable(phase){let previous;const deadline=Date.now()+15000;do{const s=await request('desktopSnapshot');if(s.ok){if(baseline){assert.equal(s.folderFlags,baseline.folderFlags);for(const old of baseline.icons){const i=s.icons.find(i=>i.identity===old.identity);assert(i&&i.x===old.x&&i.y===old.y,'old changed');}}if(previous&&sameSnapshot(previous,s)){note(phase,s);return s;}previous=s;}else{assert.equal(s.reason,'desktop-changing');previous=null;}await sleep(100);}while(Date.now()<deadline);throw Error('snapshot deadline');}
  const receive=(child,timeout=120000)=>new Promise((resolve,reject)=>{const timer=setTimeout(()=>{child.off('message',on);reject(Error('owner timeout'));},timeout);function on(m){clearTimeout(timer);child.off('message',on);resolve(m);}child.on('message',on);});
  const stop=async child=>{if(child.exitCode!==null||child.signalCode!==null)return;const ended=new Promise(r=>child.once('exit',r));child.kill();await Promise.race([ended,sleep(5000)]);assert(child.exitCode!==null||child.signalCode!==null);};
@@ -33,7 +34,14 @@ async function main(){const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-unk
    else assert.equal(fs.readFileSync(metadata,'utf8'),'{"unchanged":true}');
    for(const item of selected){const n=await request('readHiddenFile',{path:item.path});for(const key of ['identity','size','mtime'])assert.equal(n[key],item.attrs[key]);assert.equal(n.hidden,scenario!=='success');assert.equal(n.attributes,scenario==='success'?item.attrs.attributes&~2:item.attrs.attributes);assert.equal(hash(item.path),item.hash);}
    const closing=receive(owner,90000);owner.send({cmd:'close'});assert((await closing).result.ok);await stop(owner);
-   // Completed close confirms helper stopped. Remove only this case's own files.
+   // Owning watchdog/helper are confirmed stopped. Hide these exact owned files
+   // with truthful ATTRIBUTES notification, then verify complete absence before unlink.
+   if(scenario==='success'){
+    let hidden;const attempts=[];const deadline=Date.now()+20000;
+    for(let n=0;n<3;n++){hidden=await request('leaseUnknownFixtureHideCleanup',{snapshot:before,records:selected.map(item=>({...item.attrs,path:item.path}))});attempts.push(hidden);if(hidden.ok)break;if(!retryableSnapshotRead(hidden)||Date.now()>=deadline)break;await sleep(150);}
+    note('owned-cleanup-hide',{attempts});assert(hidden?.ok&&hidden.selectedHidden&&hidden.oldUnchanged&&hidden.flagsUnchanged,JSON.stringify(hidden));
+    const absent=await stable('cleanup-hidden');assert.deepEqual(absent.icons.map(i=>[i.identity,i.x,i.y]).sort(),baseline.icons.map(i=>[i.identity,i.x,i.y]).sort());
+   }
    for(const item of selected){assert.equal(path.dirname(item.path),desktop);assert(path.basename(item.path).startsWith('OkibaUnknown-'));fs.unlinkSync(item.path);}
    const cleanup=await stable('case-cleanup');assert.deepEqual(cleanup.icons.map(i=>[i.identity,i.x,i.y]).sort(),baseline.icons.map(i=>[i.identity,i.x,i.y]).sort());
   }catch(e){if(!report.primaryError)report.primaryError=e.stack;if(!recoveredCase)unsafe=true;throw e;}

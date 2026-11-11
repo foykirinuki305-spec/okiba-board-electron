@@ -67,6 +67,7 @@ function Unknown-RestoreAndVerify($r){
 }
 function Invoke-UnknownLeaseCI($req){
  Unknown-CIOnly
+ if($req.cmd -ceq 'leaseUnknownFixtureHideCleanup'){return Unknown-FixtureHideCleanup $req}
  if($req.cmd -ceq 'leaseUnknownPrepare'){return Unknown-Prepare $req}
  if($req.cmd -ceq 'leaseUnknownAdopt'){
   if($null -ne $script:SnapLease){throw 'lease-already-active'};$r=$req.recovery;$o=[OkibaLeaseOwner]::Read()
@@ -117,3 +118,5 @@ function Invoke-UnknownLeaseCI($req){
 }
 
 . (Join-Path $PSScriptRoot 'unknown-grid-success-native-ci.ps1')
+
+. (Join-Path $PSScriptRoot 'unknown-grid-fixture-cleanup-ci.ps1')

@@ -32,6 +32,12 @@ jobs:
           node tools/unknown-grid-lease-flow-selftest.js
           if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
           ./tools/unknown-grid-lease-native-guards-selftest.ps1
+      - name: Pure bounded recovery and owned cleanup guards
+        shell: pwsh
+        run: |
+          node tools/unknown-grid-recovery-policy-selftest.js
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          ./tools/unknown-grid-fixture-cleanup-selftest.ps1
       - name: PowerShell 5.1 JSON bytes and Japanese roundtrip (no Desktop)
         shell: powershell
         run: ./tools/unknown-grid-json-wire-native-selftest.ps1
