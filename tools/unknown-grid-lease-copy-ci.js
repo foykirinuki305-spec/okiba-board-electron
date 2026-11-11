@@ -18,6 +18,19 @@ function ownedTempDirectory(destination,{empty=false,io=fs,paths=path,temp=os.tm
  if(empty)assert.equal(io.readdirSync(canonical).length,0,'empty owned temp only');
  return canonical;
 }
+// Research compatibility is confined to the disposable copy. Product files are untouched.
+function stripFormalUnknown(s){
+ for(const label of ['flow integration','dispatch']){
+  const start='// BEGIN formal unknown '+label,end='// END formal unknown '+label;
+  assert.equal(s.split(start).length-1,1);assert.equal(s.split(end).length-1,1);
+  const a=s.indexOf(start),b=s.indexOf(end,a);assert(b>a);s=s.slice(0,a)+s.slice(b+end.length);
+ }
+ s=replaceOnce(s,"if(active?.mode==='unknown-grid')return formalUnknownFlow.abort(active.token);",'');
+ s=replaceOnce(s,"if(active?.mode==='unknown-grid')return formalUnknownSuccess.resolve(active.token);",'');
+ s=replaceOnce(s,"await direct(active.mode==='unknown-grid'?'leaseUnknownAdopt':'leaseAdopt',{recovery:active.recovery,...(active.mode==='unknown-grid'?{resolutionMode:active.permit?'resolve-only':'abort-only'}:{}),restorationState:","await direct('leaseAdopt',{recovery:active.recovery,restorationState:");
+ s=replaceOnce(s,'unknownHelperEnv(mixedHelperEnv(process.env,config.helper.env,config.allowMixed),config.allowUnknownGrid)','mixedHelperEnv(process.env,config.helper.env,config.allowMixed)');
+ return s;
+}
 function build(root,destination){
  root=path.resolve(root);destination=ownedTempDirectory(destination,{empty:true});
  for(const name of ['lib','scripts'])fs.cpSync(path.join(root,name),path.join(destination,name),{recursive:true});
@@ -28,11 +41,12 @@ function build(root,destination){
  fs.copyFileSync(path.join(root,'tools/unknown-grid-success-native-ci.ps1'),path.join(destination,'scripts/unknown-grid-success-native-ci.ps1'));
  for(const name of ['unknown-grid-success-model-ci.js','unknown-grid-success-validator-ci.js','unknown-grid-json-wire-ci.js'])fs.copyFileSync(path.join(root,'tools',name),path.join(destination,'scripts',name));
  let native=fs.readFileSync(path.join(destination,'scripts/snap-lease.ps1'),'utf8');
- native=replaceOnce(native,'  switch($req.cmd){',"  if($req.cmd -like 'leaseUnknown*'){return Invoke-UnknownLeaseCI $req}\n  switch($req.cmd){");
+ for(const line of ["  if($req.cmd -ceq 'leaseConfigureUnknownValidator'){return Unknown-ConfigureValidator $req}","  if($env:OKIBA_UNKNOWN_GRID_LEASE -ceq '1' -and $req.cmd -like 'leaseUnknown*'){return Invoke-UnknownLease $req}","if($env:OKIBA_UNKNOWN_GRID_LEASE -ceq '1'){. (Join-Path $PSScriptRoot 'unknown-grid-lease.ps1')}"])native=replaceOnce(native,line,'');
+ native=replaceOnce(native,'  switch($req.cmd){' ,"  if($req.cmd -like 'leaseUnknown*'){return Invoke-UnknownLeaseCI $req}\n  switch($req.cmd){");
  native+='\n. (Join-Path $PSScriptRoot \'unknown-grid-lease-ci.ps1\')\n';fs.writeFileSync(path.join(destination,'scripts/snap-lease.ps1'),native);
  let client=fs.readFileSync(path.join(destination,'lib/desktop-lease-client.js'),'utf8');
- client=replaceOnce(client,'return {ready,prepareScope:',"return {unknown:(method,...args)=>invoke('unknown-'+method,args),ready,prepareScope:");fs.writeFileSync(path.join(destination,'lib/desktop-lease-client.js'),client);
- let watchdog=fs.readFileSync(path.join(destination,'lib/desktop-lease-watchdog.js'),'utf8');
+ assert.equal(client.split("unknown:(method,...args)=>invoke('unknown-'+method,args)").length-1,1);fs.writeFileSync(path.join(destination,'lib/desktop-lease-client.js'),client);
+ let watchdog=stripFormalUnknown(fs.readFileSync(path.join(destination,'lib/desktop-lease-watchdog.js'),'utf8'));
  watchdog=replaceOnce(watchdog,'async function dispatch(method,args=[]){',`
 const unknownFlow=require('./unknown-grid-lease-flow-ci').createUnknownFlow({
  get:()=>active,set:a=>{a.owner=owner;active=a;},ownerState,native,save,lockOwned:()=>globalLock.owned(),
@@ -53,4 +67,4 @@ async function dispatch(method,args=[]){`);
  fs.writeFileSync(path.join(destination,'lib/desktop-lease-watchdog.js'),watchdog);
  return {root:destination,helper:path.join(destination,'scripts/shell-helper.ps1'),client:path.join(destination,'lib/desktop-lease-client.js'),scope:'probe/sample/abort prototype only; no unknown success commit support'};
 }
-module.exports={build,ownedTempDirectory};
+module.exports={build,ownedTempDirectory,stripFormalUnknown};

@@ -1,7 +1,7 @@
 'use strict';
 const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert/strict');
 const receipts=require('../lib/desktop-commit-receipt'),controller=require('../lib/desktop-snap-lease-controller');
-const src=fs.readFileSync(path.join(__dirname,'../lib/desktop-lease-watchdog.js'),'utf8');const resolveBody=src.slice(src.indexOf('async function resolve(){'),src.indexOf('async function dispatch('));
+const src=fs.readFileSync(path.join(__dirname,'../lib/desktop-lease-watchdog.js'),'utf8');const resolveBody=src.slice(src.indexOf('async function resolve(){'),src.indexOf('async function dispatch(')).split('// BEGIN formal unknown flow integration')[0];
 const main=fs.readFileSync(path.join(__dirname,'../main.js'),'utf8').split('// BEGIN tested-main-lease-verification')[1].split('// END tested-main-lease-verification')[0];
 let n=0;const check=x=>{assert.ok(x);n++;};
 const after=receipts.hash('after'),before=receipts.hash('before'),r=[{path:'C:\\board.json',beforeHash:before,afterHash:after}];

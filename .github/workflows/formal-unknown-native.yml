@@ -1,0 +1,48 @@
+name: formal-unknown-native
+on:
+  push:
+    paths:
+      - 'tools/formal-unknown-*'
+      - 'lib/desktop-unknown-*'
+      - 'scripts/unknown-grid-*'
+      - 'scripts/snap-lease.ps1'
+      - 'scripts/shell-helper.ps1'
+      - 'lib/desktop-lease-*'
+      - 'package.json'
+      - '.github/workflows/formal-unknown-native.yml'
+  workflow_dispatch:
+jobs:
+  isolated:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Pure byte-identical product copy
+        shell: pwsh
+        run: node tools/formal-unknown-copy-selftest.js
+      - name: Formal disabled-by-default and bundle contract
+        shell: powershell
+        run: |
+          node tools/desktop-unknown-native-module-selftest.js
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          ./tools/desktop-unknown-bundle-selftest.ps1
+      - name: Formal native success, duplicate and no-fit
+        shell: pwsh
+        run: |
+          node tools/formal-unknown-success-ci.js ([Environment]::GetFolderPath('Desktop'))
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+      - name: Formal explicit abort and owner-death boundaries
+        shell: pwsh
+        run: |
+          node tools/formal-unknown-abort-ci.js ([Environment]::GetFolderPath('Desktop'))
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: formal-unknown-native-evidence
+          path: |
+            formal-unknown-*-ci.json
+            formal-unknown-*-journals/**

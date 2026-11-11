@@ -273,6 +273,8 @@ function Invoke-SnapLeaseRequestCore($req){
  try{
   $script:LeasePhase=[string]$req.cmd;$script:LeaseBatchFailure=$null
   if($env:OKIBA_SNAP_LEASE -ne '1'){throw 'lease-dedicated-helper-required'}
+  if($req.cmd -ceq 'leaseConfigureUnknownValidator'){return Unknown-ConfigureValidator $req}
+  if($env:OKIBA_UNKNOWN_GRID_LEASE -ceq '1' -and $req.cmd -like 'leaseUnknown*'){return Invoke-UnknownLease $req}
   switch($req.cmd){
    'leaseHelperIdentity' {return @{ok=$true;pid=$PID;started=([Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().Ticks.ToString());sessionId=[Diagnostics.Process]::GetCurrentProcess().SessionId;desktop=[Environment]::GetFolderPath('DesktopDirectory');localAppData=[Environment]::GetFolderPath('LocalApplicationData')}}
    'leaseOwnerPin' {if($null -ne $script:SnapLease){throw 'lease-already-active'};return [OkibaLeaseOwner]::Pin([int]$req.pid,[string]$req.started)}
@@ -315,3 +317,5 @@ if($env:OKIBA_MIXED_LEASE -ceq '1'){
  if(-not (Test-Path -LiteralPath $mixedModule -PathType Leaf)){throw 'mixed-module-missing'}
  . $mixedModule
 }
+
+if($env:OKIBA_UNKNOWN_GRID_LEASE -ceq '1'){. (Join-Path $PSScriptRoot 'unknown-grid-lease.ps1')}

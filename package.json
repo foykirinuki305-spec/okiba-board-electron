@@ -50,6 +50,15 @@
           "resident-file-native.cs",
           "mixed-rename-notify.cs"
         ]
+      },
+      {
+        "from": "lib",
+        "to": "unknown-validator",
+        "filter": [
+          "desktop-unknown-grid-model.js",
+          "desktop-unknown-grid-validator.js",
+          "desktop-unknown-grid-json-wire.js"
+        ]
       }
     ]
   },
@@ -65,7 +74,7 @@
   "scripts": {
     "test:lease-gui": "node tests/lease-gui.e2e.js",
     "build": "electron-builder --win --publish never",
-    "selftest": "node tools/selftest.js && node tools/preview-selftest.js && node tools/shortcut-preview-selftest.js && node tools/safe-desktop-selftest.js && node tools/cross-volume-selftest.js && node tools/desktop-rollback-selftest.js && node tools/dragcoords-selftest.js && node tools/desktop-calibration-selftest.js && node tools/desktop-calibration-cache-selftest.js && node tools/lease-metadata-selftest.js && node tools/main-lease-integration-selftest.js && node tools/desktop-preview-policy-selftest.js && node tools/lease-pending-selftest.js && node tools/desktop-lease-preflight-selftest.js && node tools/home-fields-selftest.js && node tools/desktop-resident-selection-selftest.js && node tools/desktop-mixed-selection-selftest.js && node tools/desktop-mixed-dispatch-selftest.js && node tools/desktop-commit-gate-selftest.js && node tools/shellhelper-envelope-selftest.js",
+    "selftest": "node tools/selftest.js && node tools/preview-selftest.js && node tools/shortcut-preview-selftest.js && node tools/safe-desktop-selftest.js && node tools/cross-volume-selftest.js && node tools/desktop-rollback-selftest.js && node tools/dragcoords-selftest.js && node tools/desktop-calibration-selftest.js && node tools/desktop-calibration-cache-selftest.js && node tools/lease-metadata-selftest.js && node tools/main-lease-integration-selftest.js && node tools/desktop-preview-policy-selftest.js && node tools/lease-pending-selftest.js && node tools/desktop-lease-preflight-selftest.js && node tools/home-fields-selftest.js && node tools/desktop-resident-selection-selftest.js && node tools/desktop-mixed-selection-selftest.js && node tools/desktop-mixed-dispatch-selftest.js && node tools/desktop-unknown-flow-selftest.js && node tools/desktop-commit-gate-selftest.js && node tools/shellhelper-envelope-selftest.js",
     "test:gui": "node tests/gui.e2e.js",
     "start": "electron ."
   },

@@ -1,0 +1,157 @@
+function Unknown-ValidatorBundle([string]$root){
+ $asar=Join-Path $root 'app.asar'
+ if((Split-Path $root -Leaf) -ieq 'resources' -or (Test-Path -LiteralPath $asar)){
+  if(-not (Test-Path -LiteralPath $asar -PathType Leaf)){throw 'unknown-packaged-app-missing'}
+  $bundle=Join-Path $root 'unknown-validator'
+ }else{
+  $manifest=Join-Path $root 'package.json'
+  if(-not (Test-Path -LiteralPath $manifest -PathType Leaf)){throw 'unknown-dev-origin-missing'}
+  $package=Get-Content -LiteralPath $manifest -Raw -Encoding UTF8|ConvertFrom-Json
+  if($package.name -cne 'okiba-board'){throw 'unknown-dev-origin-invalid'}
+  $bundle=Join-Path $root 'lib'
+ }
+ foreach($file in @('desktop-unknown-grid-validator.js','desktop-unknown-grid-model.js','desktop-unknown-grid-json-wire.js')){
+  if(-not (Test-Path -LiteralPath (Join-Path $bundle $file) -PathType Leaf)){throw 'unknown-validator-bundle-missing'}
+ }
+ return [IO.Path]::GetFullPath((Join-Path $bundle 'desktop-unknown-grid-validator.js'))
+}
+# Optional unknown-grid support; native safety checks remain authoritative.
+function Unknown-ConfigureValidator($req){
+ Unknown-Enabled
+ if($null -ne $script:SnapLease){throw 'unknown-validator-active-lease'}
+ $exe=[string]$req.exe
+ if(-not [IO.Path]::IsPathRooted($exe) -or -not [IO.File]::Exists($exe)){throw 'unknown-validator-executable'}
+ $proc=[Diagnostics.Process]::GetProcessById([int]$req.pid)
+ try{
+  $null=$proc.Handle
+  if($proc.HasExited -or $proc.StartTime.ToUniversalTime().Ticks.ToString() -cne [string]$req.started -or [IO.Path]::GetFullPath($proc.MainModule.FileName) -ine [IO.Path]::GetFullPath($exe)){throw 'unknown-validator-process-mismatch'}
+ }finally{$proc.Dispose()}
+ $scriptFile=Unknown-ValidatorBundle (Split-Path $PSScriptRoot -Parent)
+ $next=@{exe=[IO.Path]::GetFullPath($exe);pid=[int]$req.pid;started=[string]$req.started;script=[IO.Path]::GetFullPath($scriptFile)}
+ if($null -ne $script:UnknownValidator -and ($script:UnknownValidator.exe -ine $next.exe -or $script:UnknownValidator.pid -ne $next.pid -or $script:UnknownValidator.started -cne $next.started)){throw 'unknown-validator-already-configured'}
+ $script:UnknownValidator=$next;return @{ok=$true}
+}
+function Unknown-ValidatorConfig {
+ Unknown-Enabled
+ if($null -eq $script:UnknownValidator){throw 'unknown-validator-not-configured'}
+ $v=$script:UnknownValidator;$proc=[Diagnostics.Process]::GetProcessById($v.pid)
+ try{$null=$proc.Handle;if($proc.HasExited -or $proc.StartTime.ToUniversalTime().Ticks.ToString() -cne $v.started -or [IO.Path]::GetFullPath($proc.MainModule.FileName) -ine $v.exe){throw 'unknown-validator-process-changed'}}finally{$proc.Dispose()}
+ return $v
+}
+function Unknown-Enabled {
+ if($env:OKIBA_UNKNOWN_GRID_LEASE -cne '1'){throw 'unknown-grid-disabled'}
+}
+# Exact stage expectation. Intent states are accepted only during abort-only adoption,
+# and only if the requested flag is already observed; the pre-change state is ambiguous.
+function Unknown-AssertFlags($r,$s){
+ $expected=[uint32]$r.originalFlags
+ if($r.flagState -ceq 'off'){$expected=$expected -band (-bnot 4)}
+ elseif($r.flagState -cne 'on'){throw 'unknown-flag-state-uncertain'}
+ if([uint32]$s.folderFlags -ne $expected){throw 'unknown-phase-flags-changed'}
+}
+function Unknown-TerminalHidden($r){
+ foreach($record in $r.records){$current=Lease-CheckRecord $record;if(-not $current.hidden -or [uint32]$current.attributes -ne [uint32]$record.attributes){throw 'unknown-terminal-hidden-changed'}}
+}
+function Unknown-Current($r){
+ $s=Lease-Snapshot;Unknown-AssertFlags $r $s;$null=Lease-Guard $r $s
+ if($r.version -ne 2 -or $r.kind -cne 'samepath-hidden-unknown-grid'){throw 'unknown-invalid-recovery'}
+ if(@($r.records).Count -lt 1 -or @($r.records).Count -gt 1000 -or ([uint32]$r.originalFlags -band 5) -ne 4){throw 'unknown-records-or-flags-invalid'}
+ $desktop=Lease-Path ([Environment]::GetFolderPath('DesktopDirectory'))
+ foreach($record in $r.records){$p=Lease-Path $record.path;if((Lease-Path ([IO.Path]::GetDirectoryName($p))) -ine $desktop -or ($record.attributes -band 2) -eq 0){throw 'unknown-recovery-not-owned'};$null=Lease-CheckRecord $record}
+ Lease-AllGrid $r.snapshot $r.snapshot
+ return $s
+}
+function Unknown-Live($r){$o=[OkibaLeaseOwner]::Read();if($o.state -ne 'alive' -or $o.pid -ne $r.owner.pid -or $o.started -cne $r.owner.started){throw 'unknown-owner-not-alive'}}
+function Unknown-Patch($r,$p,[bool]$inner=$false){
+ $patch=$r.plan.patch;$mx=0;$my=0;if($inner){$mx=$r.plan.maxSpacing.x;$my=$r.plan.maxSpacing.y}
+ if(-not(Strict-PointValid $p) -or $p.x -lt $patch.left+$mx -or $p.x -gt $patch.right-$mx -or $p.y -lt $patch.top+$my -or $p.y -gt $patch.bottom-$my){throw 'unknown-outside-patch'}
+}
+function Unknown-Prepare($req){
+ if($null -ne $script:SnapLease){throw 'lease-already-active'}
+ if($req.token -isnot [string] -or $req.token -notmatch '^[a-f0-9]{32}$'){throw 'unknown-token-invalid'}
+ $q=$req.scope;if($q.version -ne 2 -or $q.kind -cne 'samepath-hidden-unknown-grid' -or @($q.items).Count -lt 1 -or @($q.items).Count -gt 1000 -or $null -ne $q.targets){throw 'unknown-scope-invalid'}
+ $owner=[OkibaLeaseOwner]::Read();if($owner.state -ne 'alive'){throw 'unknown-owner-not-alive'}
+ $s=Lease-Snapshot;if((Strict-GeometryKey $q.snapshot) -cne (Strict-GeometryKey $s) -or (Strict-IconsKey $q.snapshot) -cne (Strict-IconsKey $s)){throw 'unknown-baseline-changed'}
+ if(($s.folderFlags -band 5) -ne 4 -or $s.autoArrange -or -not $s.snap){throw 'unknown-initial-flags'}
+ $desktop=Lease-Path ([Environment]::GetFolderPath('DesktopDirectory'));$records=@();$paths=@{}
+ foreach($i in $q.items){$p=Lease-Path $i.path;if($p -ine (Lease-Path $i.destination) -or (Lease-Path ([IO.Path]::GetDirectoryName($p))) -ine $desktop -or $paths.ContainsKey($p)){throw 'unknown-invalid-item'};$paths[$p]=$true;$record=Lease-ReadRecord $p;if(-not $record.hidden -or $record.identity -cne $i.fileIdentity){throw 'unknown-file-changed'};$records+=,$record}
+ $index=[int]$q.targetAreaIndex;if($index -lt 0 -or $index -ge @($s.areas).Count -or $q.plan.areaIndex -ne $index -or $q.plan.probeId -ine $records[0].path){throw 'unknown-area-probe-invalid'}
+ $area=$s.areas[$index];$patch=$q.plan.patch;$mx=$q.plan.maxSpacing.x;$my=$q.plan.maxSpacing.y
+ if($mx -lt 8 -or $my -lt 8 -or $mx -gt 512 -or $my -gt 512 -or $patch.left -lt $area.left -or $patch.right -gt $area.right -or $patch.top -lt $area.top -or $patch.bottom -gt $area.bottom){throw 'unknown-patch-invalid'}
+ foreach($i in $s.icons){if($i.x -ge $patch.left-$mx -and $i.x -le $patch.right+$mx -and $i.y -ge $patch.top-$my -and $i.y -le $patch.bottom+$my){throw 'unknown-patch-occupied'}}
+ $r=@{version=2;kind=$q.kind;token=$req.token;snapshot=$s;originalFlags=[uint32]$s.folderFlags;records=$records;targets=@();targetAreaIndex=$index;plan=$q.plan;phase='unknown-prepared';flagState='on';owner=@{pid=$owner.pid;started=$owner.started}}
+ Unknown-SuccessInit $r $q;$null=Unknown-Current $r;$selected=Lease-Guard $r $s;if($selected.Count -ne 0){throw 'unknown-initial-visible'};$script:SnapLease=$r
+ return @{ok=$true;recovery=$r}
+}
+function Unknown-ProbeVisible($r){
+ $deadline=[DateTime]::UtcNow.AddSeconds(6)
+ do{$s=Unknown-Current $r;$selected=Lease-Guard $r $s;if($selected.Count -eq 1 -and $selected.ContainsKey((Lease-Path $r.records[0].path))){return @{snapshot=$s;probe=$selected[(Lease-Path $r.records[0].path)]}};if($selected.Count -gt 1){throw 'unknown-extra-selected-visible'};Start-Sleep -Milliseconds 100}while([DateTime]::UtcNow -lt $deadline)
+ throw 'unknown-probe-arrival-timeout'
+}
+function Unknown-HideAndVerify($r){
+ $s=Unknown-Current $r
+ foreach($record in $r.records){$null=Unknown-Current $r;Lease-SetHidden $record $true}
+ $s=Lease-WaitVisibility $r $false;Unknown-AssertFlags $r $s;Lease-AllGrid $r.snapshot $s
+ Unknown-TerminalHidden $r;$r.phase='abort-hidden';return @{ok=$true;selectedHidden=$true;oldUnchanged=$true;recovery=$r}
+}
+function Unknown-RestoreAndVerify($r){
+ if($r.phase -cne 'abort-hidden'){throw 'unknown-restore-before-hide'}
+ $s=Unknown-Current $r;Unknown-TerminalHidden $r
+ if((Lease-Guard $r $s).Count -ne 0){throw 'unknown-restore-selected-visible'};Lease-AllGrid $r.snapshot $s
+ if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){Lease-SetSnap $r $s $true};$r.flagState='on'
+ Start-Sleep -Milliseconds 250;$s=Unknown-Current $r;$selected=Lease-Guard $r $s
+ if($selected.Count -ne 0 -or [uint32]$s.folderFlags -ne [uint32]$r.originalFlags){throw 'unknown-abort-unverified'}
+ Unknown-TerminalHidden $r;$r.phase='aborted';return @{ok=$true;snapRestored=$true;selectedHidden=$true;oldUnchanged=$true;recovery=$r}
+}
+function Invoke-UnknownLease($req){
+ Unknown-Enabled
+ if($req.cmd -ceq 'leaseUnknownPrepare'){return Unknown-Prepare $req}
+ if($req.cmd -ceq 'leaseUnknownAdopt'){
+  if($null -ne $script:SnapLease){throw 'lease-already-active'};$r=$req.recovery;$o=[OkibaLeaseOwner]::Read()
+  if($o.state -eq 'unknown' -or $o.pid -ne $r.owner.pid -or $o.started -cne $r.owner.started){throw 'unknown-adopt-owner-mismatch'}
+  # The durable intent cannot establish that a pre-change flag is still ours.
+  # Accept only its post-change value; other values fail closed without mutation.
+  switch -CaseSensitive ($r.flagState){'off-intent'{$r.flagState='off'}'on-intent'{$r.flagState='on'}'restore-on-intent'{$r.flagState='on'}}
+  $current=Unknown-Current $r;if($null -ne $r.success -and $null -ne $r.success.resolved){$null=Unknown-ValidateSuccess $r};$r.phase=if($req.resolutionMode -ceq 'resolve-only'){'resolve-only'}else{'abort-only'};$script:SnapLease=$r;return @{ok=$true;abortOnly=$true}
+ }
+ $r=Lease-Require $req.token
+ if($req.cmd -ceq 'leaseUnknownHideAndVerify'){return Unknown-HideAndVerify $r}
+ if($req.cmd -ceq 'leaseUnknownRestoreAndVerify'){return Unknown-RestoreAndVerify $r}
+ if($req.cmd -ceq 'leaseUnknownRelease'){
+  if($r.phase -cne 'aborted'){throw 'unknown-release-before-abort'};$s=Unknown-Current $r
+  if((Lease-Guard $r $s).Count -ne 0 -or $s.folderFlags -ne $r.originalFlags){throw 'unknown-release-unverified'}
+  Unknown-TerminalHidden $r;$script:SnapLease=$null;return @{ok=$true;released=$true}
+ }
+ if($req.cmd -in @('leaseUnknownResolveTargets','leaseUnknownRevealResolvedAndPlace','leaseUnknownRestoreResolvedAndVerify','leaseUnknownVerifyResolvedVisible','leaseUnknownReleaseVisible')){return Invoke-UnknownSuccess $req $r}
+ Unknown-Live $r;if($r.phase -ceq 'abort-only'){throw 'unknown-adopted-abort-only'}
+ switch($req.cmd){
+  'leaseUnknownRevealProbe' {
+   if($r.phase -cne 'unknown-prepared'){throw 'unknown-phase-invalid'};$s=Unknown-Current $r;Lease-SetSnap $r $s $false;$r.flagState='off'
+   $r.phase='probe-revealing';Lease-SetHidden $r.records[0] $false $true;$found=Unknown-ProbeVisible $r;$i=$found.probe
+   $x=[int][Math]::Floor(($r.plan.patch.left+$r.plan.patch.right)/2);$y=[int][Math]::Floor(($r.plan.patch.top+$r.plan.patch.bottom)/2);Unknown-Patch $r @{x=$x;y=$y} $true
+   [OkibaFolderView]::PositionLeaseItems([string[]]@($i.identity),[string[]]@($r.records[0].path),[int[]]@($i.x),[int[]]@($i.y),[int[]]@($x),[int[]]@($y),[uint32]$found.snapshot.folderFlags,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted)
+   Start-Sleep -Milliseconds 180;$found=Unknown-ProbeVisible $r;if($found.probe.x -ne $x -or $found.probe.y -ne $y){throw 'unknown-probe-position-inexact'};$r.phase='probe-visible-off'
+   return @{ok=$true;recovery=$r;snapshot=$found.snapshot}
+  }
+  'leaseUnknownBeginCalibration' {
+   if($r.phase -cne 'probe-visible-off'){throw 'unknown-phase-invalid'};$found=Unknown-ProbeVisible $r;Unknown-Patch $r $found.probe $false
+   Lease-AllGrid $r.snapshot $r.snapshot;$s=$found.snapshot
+   [OkibaFolderView]::SetLeaseSnap([uint32]$s.folderFlags,$true,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted,[string[]]@($s.icons|ForEach-Object{$_.identity}),[int[]]@($s.icons|ForEach-Object{$_.x}),[int[]]@($s.icons|ForEach-Object{$_.y}))
+   $r.flagState='on';$clock=[Diagnostics.Stopwatch]::StartNew();$probe=@{path=$r.records[0].path;name=[IO.Path]::GetFileName($r.records[0].path)}
+   $after=Wait-CalibrationSettled $r.snapshot $probe $r.plan.patch $clock;if(-not $after.ok){throw ('unknown-probe-snap-failed:'+ [string]$after.reason)}
+   Unknown-AssertFlags $r $after.current;$r.phase='calibrating';return @{ok=$true;recovery=$r;snapshot=$after.current;probe=$after.new[0]}
+  }
+  'leaseUnknownCalibrationSample' {
+   if($r.phase -cne 'calibrating'){throw 'unknown-phase-invalid'};Unknown-Patch $r $req.point $true;$found=Unknown-ProbeVisible $r;$i=$found.probe
+   if($null -ne $req.previous -and ($i.x -ne $req.previous.x -or $i.y -ne $req.previous.y)){throw 'unknown-probe-changed'}
+   if($found.snapshot.folderFlags -ne $r.originalFlags){throw 'unknown-calibration-flags'}
+   [OkibaFolderView]::PositionNewItem([int]$i.index,$r.records[0].path,[int]$i.x,[int]$i.y,[int]$req.point.x,[int]$req.point.y,[string]$i.identity)
+   $clock=[Diagnostics.Stopwatch]::StartNew();$probe=@{path=$r.records[0].path;name=[IO.Path]::GetFileName($r.records[0].path)}
+   $after=Wait-CalibrationSettled $r.snapshot $probe $r.plan.patch $clock;if(-not $after.ok){throw 'unknown-sample-not-settled'}
+   Unknown-AssertFlags $r $after.current;$sample=Unknown-RecordSample $r $req $after.new[0];return @{ok=$true;recovery=$r;sample=$sample;snapshot=$after.current;probe=$after.new[0];elapsedMs=$clock.Elapsed.TotalMilliseconds}
+  }
+  default {throw 'unknown-command-unsupported'}
+ }
+}
+
+. (Join-Path $PSScriptRoot 'unknown-grid-success.ps1')
