@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿$ErrorActionPreference='Stop'
 $source=Get-Content (Join-Path $PSScriptRoot '../scripts/shell-helper.ps1') -Raw
 $t=$null;$e=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$t,[ref]$e)
 foreach($name in @('Strict-PointValid','Strict-Overlap')){$f=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true);Invoke-Expression $f.Extent.Text}
@@ -29,5 +29,6 @@ $x=Clone-Data $r;$x.targets[0].x=201;Reject {Lease-ValidateRecovery $x $s} 'leas
 $x=Clone-Data $r;$x.snapshot.icons[0].path=$x.records[0].path;Reject {Lease-ValidateRecovery $x $s} 'lease-selected-baseline-visible'
 $x=Clone-Data $r;$x.snapshot.areas[0].grid=$null;Reject {Lease-ValidateRecovery $x $s} 'lease-off-grid-icon'
 $env:OKIBA_SNAP_LEASE=$null;$reply=Invoke-SnapLeaseRequest @{cmd='leasePrepare'};Pass (-not $reply.ok -and $reply.detail -eq 'lease-dedicated-helper-required') 'dedicated helper required'
+Pass ($reply.perf.inclusive -and $reply.perf.metrics.total.count -eq 1) 'failure includes observer perf'
 Write-Host ('snap lease pure: '+$n+' passed; no desktop mutations')
 

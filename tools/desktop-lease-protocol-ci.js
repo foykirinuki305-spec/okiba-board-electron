@@ -114,7 +114,7 @@ async function main(){
     const response=ownerMessage(ownerChild);ownerChild.send({cmd:'run',spec});const message=await response;lastMessage=message;note('protocol-owner',{name,...message});
     let expected;
     if(commitCase==='success'){assert(message.result.ok);assert.equal(message.status.helper.spawns,1,'normal transactions must reuse one warm helper');expected='released';}
-    else if(commitCase==='helper-hang'){assert(!message.result.ok);assert.equal(message.result.resolution?.state,'aborted');assert(message.status.helper.spawns>=2);expected='aborted';}
+    else if(commitCase==='helper-hang'){assert(!message.result.ok);assert.equal(message.result.resolution?.state,'aborted');const h=message.status.helper;assert(h.cumulativeRestartCount>=1);assert(h.history.length>=2);const old=h.history[h.history.length-2],fresh=h.history[h.history.length-1];assert(old.stoppedConfirmed&&old.stopCause==='restart');assert.equal(old.pid,old.spawnPid);assert.equal(fresh.pid,fresh.spawnPid);assert(old.pid!==fresh.pid||old.started!==fresh.started,'native helper PID/birth must differ after confirmed termination');expected='aborted';}
     else{
      if(commitCase==='disconnect-alive'){assert.equal(message.phase,'disconnected-live');await sleep(2500);const live=await stable('owner-alive-no-rollback',before);assert.equal(live.icons.length,before.icons.length+selected.length);assert(live.snap);}
      await killOwner(ownerChild);expected=commitCase==='ack-lost'?'released':'aborted';

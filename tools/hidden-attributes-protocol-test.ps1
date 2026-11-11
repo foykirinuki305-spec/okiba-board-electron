@@ -25,6 +25,7 @@ function Request($cmd,$argsObject){
 }
 try {
  [void]$process.Start();$ready=Read-Line;Assert $ready.ready 'helper ready'
+ $helperId=Request 'leaseHelperIdentity' @{};Assert ($helperId.ok -and $helperId.pid -eq $process.Id -and $helperId.started -and $helperId.perf.inclusive -and $helperId.perf.metrics.total.count -eq 1) 'helper generation and inclusive perf'
  $owner=Request 'leaseOwnerPin' @{pid=$PID;started=([Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().Ticks.ToString())};Assert ($owner.ok -and $owner.state -eq 'alive') 'dedicated lease owner pinned read-only'
  $owner=Request 'leaseOwnerState' @{};Assert ($owner.ok -and $owner.state -eq 'alive') 'dedicated owner read-only state'
  $jp=([string][char]0x65e5)+[char]0x672c+[char]0x8a9e+' space.txt'

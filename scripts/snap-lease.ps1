@@ -1,14 +1,28 @@
 ﻿# Dedicated watchdog lease commands. No main.js call site is enabled.
 $script:SnapLease=$null
 $script:LeasePhase='idle'
+$script:LeasePerf=$null
+function Add-LeasePerf([string]$name,$clock){
+ if($null -eq $script:LeasePerf){return}
+ if(-not $script:LeasePerf.ContainsKey($name)){$script:LeasePerf[$name]=@{count=0;ms=0.0}}
+ $script:LeasePerf[$name].count++;$script:LeasePerf[$name].ms+=$clock.Elapsed.TotalMilliseconds
+}
+function Measure-LeaseStep([string]$name,[scriptblock]$work){
+ $clock=[Diagnostics.Stopwatch]::StartNew()
+ try{return (& $work)}finally{Add-LeasePerf $name $clock}
+}
+
 function Lease-PhysicalKey($s) {
  return (@($s.explorerPid,$s.explorerStarted,$s.listviewHwnd,[int]$s.origin.x,[int]$s.origin.y,$s.viewDpi,$s.sx,$s.sy,@($s.areas|ForEach-Object{@($_.left,$_.top,$_.right,$_.bottom,$_.scale,[int]$_.monitorOrigin.x,[int]$_.monitorOrigin.y)}))|ConvertTo-Json -Depth 10 -Compress)
 }
 function Lease-Path([string]$p){return [IO.Path]::GetFullPath($p).TrimEnd('\')}
 function Lease-Snapshot {
+ $metricClock=[Diagnostics.Stopwatch]::StartNew()
+ try{
  $deadline=[DateTime]::UtcNow.AddSeconds(8)
  do{$s=Get-StrictDesktopSnapshot;if($s.ok){return $s};if($s.reason -ne 'desktop-changing'){throw ('lease-snapshot-'+$s.reason)};Start-Sleep -Milliseconds 50}while([DateTime]::UtcNow -lt $deadline)
  throw 'lease-snapshot-timeout'
+ }finally{Add-LeasePerf 'snapshot' $metricClock}
 }
 function Lease-AllGrid($baseline,$current) {
  foreach($i in $current.icons){
@@ -43,19 +57,22 @@ function Lease-ReadRecord([string]$path) {
  return @{path=$path;identity=$n.identity;size=$n.size;mtime=$n.mtime;attributes=$n.attributes;hidden=$n.hidden}
 }
 function Lease-CheckRecord($record) {
+ $metricClock=[Diagnostics.Stopwatch]::StartNew()
+ try{
  $n=Lease-ReadRecord $record.path
  if($n.identity -cne $record.identity -or $n.size -cne $record.size -or $n.mtime -cne $record.mtime -or (($n.attributes -bxor $record.attributes) -band (-bnot 2)) -ne 0){throw 'lease-selected-file-changed'}
  return $n
+ }finally{Add-LeasePerf 'metadatafilechecks' $metricClock}
 }
 function Lease-SetHidden($record,[bool]$hidden){
  $n=Lease-CheckRecord $record
- $null=[OkibaFileAttributes]::SetRecorded($record.path,$record.identity,$n.hidden,$hidden,$record.size,$record.mtime,[uint32]$record.attributes)
+ Measure-LeaseStep 'attributes' {$null=[OkibaFileAttributes]::SetRecorded($record.path,$record.identity,$n.hidden,$hidden,$record.size,$record.mtime,[uint32]$record.attributes)}
 }
 function Lease-SetSnap($r,$current,[bool]$enabled){
  $script:LeasePhase=if($enabled){'native-snap-enable'}else{'native-snap-disable'}
  $null=Lease-Guard $r $current
  if($enabled){Lease-AllGrid $r.snapshot $current}
- [OkibaFolderView]::SetLeaseSnap([uint32]$current.folderFlags,$enabled,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted,[string[]]@($current.icons.identity),[int[]]@($current.icons.x),[int[]]@($current.icons.y))
+ Measure-LeaseStep $(if($enabled){'restoreNative'}else{'disable'}) {[OkibaFolderView]::SetLeaseSnap([uint32]$current.folderFlags,$enabled,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted,[string[]]@($current.icons.identity),[int[]]@($current.icons.x),[int[]]@($current.icons.y))}
 }
 function Lease-Require([string]$token){
  if($null -eq $script:SnapLease -or $script:SnapLease.token -cne $token){throw 'lease-token-invalid'}
@@ -125,27 +142,27 @@ function Lease-RevealPlace([string]$token){
  Lease-SetSnap $r $s $false
  $off=[uint32]$r.originalFlags -band ([uint32]::MaxValue -bxor 4)
  $script:LeasePhase='reveal-attributes'
- foreach($record in $r.records){$s=Lease-Snapshot;$null=Lease-Guard $r $s;if([uint32]$s.folderFlags -ne $off){throw 'lease-flags-changed'};Lease-SetHidden $record $false}
+ foreach($record in $r.records){$s=Measure-LeaseStep 'perRecordSnapshot' {Lease-Snapshot};$null=Lease-Guard $r $s;if([uint32]$s.folderFlags -ne $off){throw 'lease-flags-changed'};Lease-SetHidden $record $false}
  $script:LeasePhase='reveal-arrival'
- $s=Lease-WaitVisibility $r $true;$selected=Lease-Guard $r $s
+ $s=Measure-LeaseStep 'arrival' {Lease-WaitVisibility $r $true};$selected=Lease-Guard $r $s
  if([uint32]$s.folderFlags -ne $off){throw 'lease-flags-changed'}
  $ids=@();$paths=@();$xs=@();$ys=@();$tx=@();$ty=@()
  foreach($t in $r.targets){$i=$selected[(Lease-Path $t.path)];$ids+=$i.identity;$paths+=$t.path;$xs+=$i.x;$ys+=$i.y;$tx+=$t.x;$ty+=$t.y}
  $script:LeasePhase='native-place'
- [OkibaFolderView]::PositionLeaseItems([string[]]$ids,[string[]]$paths,[int[]]$xs,[int[]]$ys,[int[]]$tx,[int[]]$ty,$off,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted)
+ Measure-LeaseStep 'nativePosition' {[OkibaFolderView]::PositionLeaseItems([string[]]$ids,[string[]]$paths,[int[]]$xs,[int[]]$ys,[int[]]$tx,[int[]]$ty,$off,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted)}
  $script:LeasePhase='after-place'
- Start-Sleep -Milliseconds 180
- $s=Lease-Snapshot;$null=Lease-Guard $r $s $true
+ Measure-LeaseStep 'settle' {Start-Sleep -Milliseconds 180}
+ $s=Measure-LeaseStep 'afterguard' {Lease-Snapshot};Measure-LeaseStep 'exactGuard' {$null=Lease-Guard $r $s $true}
  if([uint32]$s.folderFlags -ne $off){throw 'lease-flags-changed'}
  return @{ok=$true;oldUnchanged=$true;targetsExact=$true;snapRestored=$false}
 }
 function Lease-RestoreVerify([string]$token){
  $script:LeasePhase='restore-preflight'
- $r=Lease-Require $token;$s=Lease-Snapshot;$null=Lease-Guard $r $s $true;Lease-AllGrid $r.snapshot $s
+ $r=Lease-Require $token;$s=Measure-LeaseStep 'restoreCheck' {Lease-Snapshot};$null=Lease-Guard $r $s $true;Lease-AllGrid $r.snapshot $s
  foreach($record in $r.records){if((Lease-CheckRecord $record).hidden){throw 'lease-target-hidden'}}
  if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){Lease-SetSnap $r $s $true}
- Start-Sleep -Milliseconds 250
- $s=Lease-Snapshot;$null=Lease-Guard $r $s $true
+ Measure-LeaseStep 'restoreSettle' {Start-Sleep -Milliseconds 250}
+ $s=Measure-LeaseStep 'afterguard' {Lease-Snapshot};Measure-LeaseStep 'exactGuard' {$null=Lease-Guard $r $s $true}
  if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags -or -not $s.snap){throw 'lease-restore-unverified'}
  return @{ok=$true;snapRestored=$true;oldUnchanged=$true;targetsExact=$true}
 }
@@ -153,23 +170,24 @@ function Lease-Rollback([string]$token){
  $script:LeasePhase='rollback-preflight'
  $r=Lease-Require $token;$s=Lease-Snapshot;$null=Lease-Guard $r $s
  foreach($record in $r.records){$null=Lease-CheckRecord $record}
- foreach($record in $r.records){$s=Lease-Snapshot;$null=Lease-Guard $r $s;Lease-SetHidden $record $true}
- $s=Lease-WaitVisibility $r $false;Lease-AllGrid $r.snapshot $s
+ foreach($record in $r.records){$s=Measure-LeaseStep 'perRecordSnapshot' {Lease-Snapshot};$null=Lease-Guard $r $s;Lease-SetHidden $record $true}
+ $s=Measure-LeaseStep 'rollbackVisibility' {Lease-WaitVisibility $r $false};Lease-AllGrid $r.snapshot $s
  if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){Lease-SetSnap $r $s $true}
- Start-Sleep -Milliseconds 250
+ Measure-LeaseStep 'restoreSettle' {Start-Sleep -Milliseconds 250}
  $s=Lease-Snapshot;$selected=Lease-Guard $r $s
  if($selected.Count -ne 0 -or [uint32]$s.folderFlags -ne [uint32]$r.originalFlags){throw 'lease-rollback-unverified'}
  return @{ok=$true;snapRestored=$true;oldUnchanged=$true;selectedHidden=$true}
 }
-function Invoke-SnapLeaseRequest($req){
+function Invoke-SnapLeaseRequestCore($req){
  try{
   $script:LeasePhase=[string]$req.cmd
   if($env:OKIBA_SNAP_LEASE -ne '1'){throw 'lease-dedicated-helper-required'}
   switch($req.cmd){
+   'leaseHelperIdentity' {return @{ok=$true;pid=$PID;started=([Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().Ticks.ToString())}}
    'leaseOwnerPin' {if($null -ne $script:SnapLease){throw 'lease-already-active'};return [OkibaLeaseOwner]::Pin([int]$req.pid,[string]$req.started)}
    'leaseOwnerState' {return [OkibaLeaseOwner]::Read()}
    'leaseReadFiles' {if(@($req.paths).Count -lt 1 -or @($req.paths).Count -gt 1000){throw 'lease-invalid-path-count'};$records=@($req.paths|ForEach-Object {Lease-ReadRecord $_});return @{ok=$true;records=$records}}
-   'leasePrepare' {return Lease-Prepare $req}
+   'leasePrepare' {return Measure-LeaseStep 'prepare' {Lease-Prepare $req}}
    'leaseRevealPlace' {return Lease-RevealPlace $req.token}
    'leaseRestoreVerify' {return Lease-RestoreVerify $req.token}
    'leaseRollback' {return Lease-Rollback $req.token}
@@ -182,4 +200,16 @@ function Invoke-SnapLeaseRequest($req){
   $detail=[regex]::Replace([string]$inner.Message,'[^\x20-\x7E]','?')
   return @{ok=$false;reason='lease-operation-failed';detail=$detail;phase=$script:LeasePhase;errorType=$inner.GetType().FullName;hresult=('0x{0:X8}' -f $inner.HResult);line=$_.InvocationInfo.ScriptLineNumber}
  }
+}
+
+function Invoke-SnapLeaseRequest($req){
+ $previous=$script:LeasePerf;$script:LeasePerf=@{};$clock=[Diagnostics.Stopwatch]::StartNew()
+ try{
+  $result=Invoke-SnapLeaseRequestCore $req
+  Add-LeasePerf 'total' $clock
+  foreach($m in $script:LeasePerf.Values){$m.ms=[Math]::Round($m.ms,2)}
+  $perf=@{inclusive=$true;metrics=$script:LeasePerf}
+  if($result -is [Collections.IDictionary]){$result.perf=$perf}else{$result|Add-Member -NotePropertyName perf -NotePropertyValue $perf -Force}
+  return $result
+ }finally{$script:LeasePerf=$previous}
 }
