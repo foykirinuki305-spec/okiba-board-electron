@@ -200,6 +200,32 @@ public static class OkibaDesk {
     }
   }
 
+  public static bool IsSnapToGrid(IntPtr hwnd) {
+    // LVM_GETEXTENDEDLISTVIEWSTYLE, LVS_EX_SNAPTOGRID (not GWL_EXSTYLE).
+    return (((long)SendMessage(hwnd, LVM_FIRST + 55, IntPtr.Zero, IntPtr.Zero)) & 0x00080000L) != 0;
+  }
+  public static int[] ReadGridOrigin(Reader reader, int count, int sx, int sy, int[] excluded) {
+    var skip = new HashSet<int>(excluded);
+    var xs = new Dictionary<int, int>();
+    var ys = new Dictionary<int, int>();
+    int bestX = 0, bestY = 0, votesX = 0, votesY = 0, sampled = 0;
+    // Infer from already settled icons, not the newly arriving target group.
+    for (int i = 0; i < count && sampled < 32; i++) {
+      if (skip.Contains(i)) continue;
+      int[] pos = reader.GetPosition(i);
+      if (pos == null || pos[0] < 0 || pos[1] < 0) continue;
+      sampled++;
+      int x = pos[0] % sx, y = pos[1] % sy, n;
+      xs.TryGetValue(x, out n); xs[x] = ++n;
+      if (n > votesX) { votesX = n; bestX = x; }
+      ys.TryGetValue(y, out n); ys[y] = ++n;
+      if (n > votesY) { votesY = n; bestY = y; }
+    }
+    if (sampled == 0 && excluded.Length > 0)
+      return ReadGridOrigin(reader, count, sx, sy, new int[0]);
+    return new int[] { bestX, bestY };
+  }
+
   public static int GetItemCount(IntPtr hwnd) {
     return (int)SendMessage(hwnd, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero);
   }
@@ -455,6 +481,18 @@ function Position-Icons([int]$X, [int]$Y, [string[]]$Names) {
       return $result
     }
 
+    if ([OkibaDesk]::IsSnapToGrid($lv)) {
+      $grid = [OkibaDesk]::ReadGridOrigin($reader, $count, $sx, $sy, [int[]]@($found.Slots.Values))
+      $gx = [Math]::Min($maxX, $grid[0])
+      $gy = [Math]::Min($maxY, $grid[1])
+      $maxX = $gx + [Math]::Floor(($maxX - $gx) / $sx) * $sx
+      $maxY = $gy + [Math]::Floor(($maxY - $gy) / $sy) * $sy
+      # Explicit floor(+0.5) agrees with JS for both sides of the origin.
+      $ax = [int][Math]::Max($gx, [Math]::Min($maxX, $gx + [Math]::Floor(($anchorX - $sx / 2 - $gx) / $sx + 0.5) * $sx))
+      $ay = [int][Math]::Max($gy, [Math]::Min($maxY, $gy + [Math]::Floor(($anchorY - $sy / 2 - $gy) / $sy + 0.5) * $sy))
+      $rowsPerCol = [int][Math]::Max(1, [Math]::Floor(($maxY - $ay) / $sy) + 1)
+    }
+
     # Batch placement: one settle per pass, not per icon. Retry only
     # mismatches; preserve the proven <= spacing tolerance for grid snapping.
     $pending = @{}
@@ -502,6 +540,8 @@ function Position-Icons([int]$X, [int]$Y, [string[]]$Names) {
     # accumulate historical per-item successes. Repair mismatches in bounded
     # rounds, then re-read the whole group after the last repair.
     for ($round = 0; $round -le 3; $round++) {
+      # Let Explorer complete late grid alignment before the final snapshot.
+      Start-Sleep -Milliseconds 40
       $verified = 0
       $mismatches = @{}
       foreach ($idx in @($targets.Keys)) {

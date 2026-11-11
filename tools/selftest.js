@@ -420,6 +420,28 @@ function iconposMain() {
       'layout: fills a column, wraps to the next');
   }
 
+  // ---------- snap-grid: actual final grid row, not raw client height ----------
+  {
+    const opts = { anchor:{x:420,y:100}, spacingX:78, spacingY:98,
+      clientWidth:1024, clientHeight:768, count:10, gridOrigin:{x:15,y:2} };
+    const positions = ip.layoutIconPositions(opts);
+    ok(positions.length === 10 && positions.every(p => p.x >= 15 && p.y >= 2 && p.x+78 <= 1024 && p.y+98 <= 768),
+      'snap layout: ten CI icons stay completely inside desktop');
+    ok(positions[0].x === 405 && positions[0].y === 100 && positions[5].x === 405 && positions[5].y === 590 && positions[6].x === 483 && positions[6].y === 100,
+      'snap layout: six safe rows then wrap (CI 1024x768 regression)');
+    ok(positions.every(p => (p.x-15)%78 === 0 && (p.y-2)%98 === 0),
+      'snap layout: every target is on the observed grid');
+    const edge = ip.layoutIconPositions({...opts, anchor:{x:5000,y:5000},count:1});
+    ok(edge[0].x === 873 && edge[0].y === 590,
+      'snap layout: right/bottom clamp to final complete grid cell');
+    const top = ip.layoutIconPositions({...opts, anchor:{x:-100,y:-100},count:1});
+    ok(top[0].x === 15 && top[0].y === 2, 'snap layout: top/left clamps to first grid cell');
+    const legacy = ip.layoutIconPositions({...opts,gridOrigin:null});
+    const omitted = {...opts}; delete omitted.gridOrigin;
+    ok(JSON.stringify(legacy) === JSON.stringify(ip.layoutIconPositions(omitted)) && legacy[0].x === 381 && legacy[0].y === 51 && legacy[6].y === 639 && legacy[7].x === 459,
+      'snap layout: absent/null grid keeps original seven-row free-position layout');
+  }
+
   // ---------- position output parsing ----------
   {
     const o1 = ip.parsePositionOutput('{"status":"ok","positioned":2}');

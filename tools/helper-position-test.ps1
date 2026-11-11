@@ -158,6 +158,28 @@ try {
   $clientOriginX = -$clientZero[0]; $clientOriginY = -$clientZero[1]
   Diag "desktop client geometry: size=$clientWidth,$clientHeight origin=$clientOriginX,$clientOriginY"
 
+  # Independent grid-origin estimate from up to 32 existing desktop items.
+  # Only the raw interop reader is shared, not helper placement decisions.
+  $extendedStyle = [OkibaDesk]::SendMessage($metricLv, (0x1000 + 55), [IntPtr]::Zero, [IntPtr]::Zero).ToInt64()
+  $gridX = 'none'; $gridY = 'none'
+  if (($extendedStyle -band 0x80000) -ne 0) {
+    $xResidues = @(); $yResidues = @()
+    $reader = New-Object OkibaDesk+Reader -ArgumentList $metricLv
+    try {
+      for ($index = 0; $index -lt [Math]::Min(32, $metricCount); $index++) {
+        $point = $reader.GetPosition($index)
+        if ($null -ne $point) {
+          $xResidues += (($point[0] % $sx) + $sx) % $sx
+          $yResidues += (($point[1] % $sy) + $sy) % $sy
+        }
+      }
+    } finally { $reader.Dispose() }
+    if (-not $xResidues.Count) { Fail 'snap-grid origin could not be measured' }
+    $gridX = [int](($xResidues | Group-Object | Sort-Object @{Expression='Count';Descending=$true}, @{Expression={[int]$_.Name};Ascending=$true} | Select-Object -First 1).Name)
+    $gridY = [int](($yResidues | Group-Object | Sort-Object @{Expression='Count';Descending=$true}, @{Expression={[int]$_.Name};Ascending=$true} | Select-Object -First 1).Name)
+  }
+  Diag "independent snap-grid origin: $gridX,$gridY"
+
   # ---- 2. position it THROUGH THE HELPER at screen (420, 260) ----
   $targetX = 420; $targetY = 260
   $clientTarget = [OkibaDesk]::ToClient($metricLv, $targetX, $targetY)
@@ -286,7 +308,7 @@ public static class OkibaTestNotify {
     $batchDummies += $file
     Set-Content -LiteralPath $file -Value 'okibaboard batch test' -Encoding ASCII
   }
-  $batchLines = & node $driver --batch $sx $sy $clientWidth $clientHeight $clientOriginX $clientOriginY @batchNames
+  $batchLines = & node $driver --batch $sx $sy $clientWidth $clientHeight $clientOriginX $clientOriginY $gridX $gridY @batchNames
   $batchJson = $batchLines | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1
   if (-not $batchJson) { Fail 'batch helper produced no JSON' }
   Diag "batch helper (timings and cold readback): $batchJson"
@@ -302,7 +324,7 @@ public static class OkibaTestNotify {
     $batchDummies += $file
     Set-Content -LiteralPath $file -Value 'okibaboard ten icon regression' -Encoding ASCII
   }
-  $manyLines = & node $driver --batch-once $sx $sy $clientWidth $clientHeight $clientOriginX $clientOriginY @manyNames
+  $manyLines = & node $driver --batch-once $sx $sy $clientWidth $clientHeight $clientOriginX $clientOriginY $gridX $gridY @manyNames
   $manyJson = $manyLines | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1
   if (-not $manyJson) { Fail 'ten-icon helper produced no JSON' }
   Diag "ten-icon helper (timings and cold readback): $manyJson"

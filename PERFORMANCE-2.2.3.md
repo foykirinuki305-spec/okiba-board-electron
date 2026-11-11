@@ -35,3 +35,6 @@ Intake addLink-only measurements, four repetitions: one item 37-44ms, three 118-
 - The user PC was also encoding video in AviUtl, so speed measurements may include concurrent workload.
 - Original helper was subsequently checked with the same independent ten-item readback and also failed (reported ok internally despite one position outside tolerance). This case is not new to v2.2.3; the revised helper reports the remaining mismatch rather than claiming success.
 - All known test dummy files were cleaned up after stopping tests. The one existing shortcut with an initial recorded position (CrimeScript) was unchanged.
+
+## Grid boundary correction
+The isolated CI revealed why the old layout could wrap a bottom-row icon to another column after an apparent successful set. With snap-to-grid ON, the helper now samples the existing grid origin, snaps the anchor to complete cells and wraps before the last unsafe row. Non-snap layout and cold scripts remain unchanged. Geometry tests cover the CI 1024x768 case and boundary clamps; final readback waits for late alignment and checks all targets again.

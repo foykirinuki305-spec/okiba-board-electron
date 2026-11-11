@@ -35,8 +35,10 @@ async function coldRead(name) {
 // independent cold path after EACH placement. No speed assertion:
 // startup and stage durations are diagnostics, not flaky CI limits.
 async function batchTest(client, args, once = false) {
-  const [sxs, sys, widths, heights, originXs, originYs, ...names] = args;
+  const [sxs, sys, widths, heights, originXs, originYs, gridXs, gridYs, ...names] = args;
   const sx = Number(sxs), sy = Number(sys);
+  const gridOrigin = gridXs === 'none' || gridYs === 'none'
+    ? null : { x:Number(gridXs), y:Number(gridYs) };
   const rounds = [];
   const anchors = once ? [{x:420,y:100}] : [{x:420,y:100}, {x:650,y:100}];
   for (const anchor of anchors) {
@@ -49,7 +51,7 @@ async function batchTest(client, args, once = false) {
       throw new Error('batch incomplete: ' + JSON.stringify(result));
     }
     const clientAnchor = ip.screenToClient(anchor, { x:Number(originXs), y:Number(originYs) });
-    const expected = ip.layoutIconPositions({ anchor:clientAnchor, spacingX:sx, spacingY:sy,
+    const expected = ip.layoutIconPositions({ anchor:clientAnchor, spacingX:sx, spacingY:sy, gridOrigin,
       clientWidth:Number(widths), clientHeight:Number(heights), count:names.length });
     const reads = [];
     for (let i=0; i<names.length; i++) {
