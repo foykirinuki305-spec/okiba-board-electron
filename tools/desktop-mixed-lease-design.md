@@ -129,3 +129,15 @@ Each item uses `path`, `dest`, `isLink`, `crossVolume`, `isFile`, `reparse`, `li
 Mixed metadata is calculated from the supplied raw-before document, removing only exactly registered selected resident position keys and uniquely case-insensitively matched selected link entries. All other positions, links in their original order, nested unknown fields, and top-level unknown fields survive semantically. Whitespace is reserialized, not byte-preserved; callers must retain raw-before bytes for conflict checking and construct their receipt from exact output bytes. No metadata is written by these helpers. Missing resident positions, casefold aliases, duplicate/missing selected links, and resident/link ambiguity are rejected. There is no subgroup commit or fallback authorization.
 
 Local regression: new mixed selection 32 cases, unchanged resident selection 27 cases, mixed design prototype 21 cases passed. No native/desktop operation was performed.
+
+## Formal module staging (not enabled in main or preview)
+
+The formal kind is `mixed-hidden-resident`. Both Node validation/read dispatch and native dispatch require `OKIBA_MIXED_LEASE=1`; absence rejects the new kind. No UI/main/preview route selects it. Existing samepath/resident kinds retain their original behavior. Six existing native function bodies are hash-regressed: only early mixed dispatch is added, with RestoreVerify's exact former body extracted into a common Core.
+
+`scripts/mixed-lease.ps1` owns mixed preparation, recovery validation, one-group placement and mode-specific rollback/release. The native rename notification is separately packaged as `mixed-rename-notify.cs` and called only after completed-rename source/destination/identity/attribute/ancestor proof. No research trace file is written by the formal module.
+
+Watchdog preparation reads link and resident subsets using the existing two read-only commands, canonical-matches each returned record (never positional zipping), then restores original item order. This is only read acquisition; the whole original snapshot and single lease/receipt remain authoritative. Two abort paths now select `mixed-restored`. The main and preview remain unconnected.
+
+`mixed-lease-formal.yml` is prepared, not run locally. It executes the normal nine hosted cases through byte-identical formal controller/watchdog/snap/mixed/resident modules, rather than research dispatch patches. Only fixture driver generation, owned fixture setup command, and explicit fault injection in private per-case copies remain. The external ShowHidden tenth case is not part of the supported nine; its failed boundary evidence remains documented above.
+
+Local results: full package selftest passed including formal dispatch14; native disabled dispatch6, prehide6, unchanged original bodies6 passed; PS AST and C# compile passed without invocation. Hosted formal9 and packaged executable integration remain unverified.

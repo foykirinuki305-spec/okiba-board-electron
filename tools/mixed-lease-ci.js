@@ -3,7 +3,7 @@ if(process.platform!=='win32'||process.env.GITHUB_ACTIONS!=='true'||process.env.
 const assert=require('assert/strict'),fs=require('fs'),path=require('path'),os=require('os'),{spawnSync}=require('child_process');
 const root=path.resolve(__dirname,'..'),{buildMixedCopy}=require('./mixed-lease-copy-builder'),{generateMixedDriver}=require('./mixed-lease-driver-builder');
 const temp=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'okiba-mixed-runtime-'))),copy=path.join(temp,'runtime');let status=1;
-try{buildMixedCopy(copy);generateMixedDriver(copy,path.join(__dirname,'resident-lease-ci.js'));const r=spawnSync(process.execPath,[path.join(copy,'tools/mixed-driver-ci.js'),process.argv[2]],{stdio:'inherit',windowsHide:true,timeout:600000});status=r.status??1;if(r.error)console.error(r.error);}
+try{if(process.env.OKIBA_FORMAL_MIXED_CI==='1'){require('./mixed-lease-formal-copy').buildFormalMixedCopy(copy);}else{buildMixedCopy(copy);generateMixedDriver(copy,path.join(__dirname,'resident-lease-ci.js'));}const r=spawnSync(process.execPath,[path.join(copy,'tools/mixed-driver-ci.js'),process.argv[2]],{stdio:'inherit',windowsHide:true,timeout:600000});status=r.status??1;if(r.error)console.error(r.error);}
 finally{
  const trace=path.join(copy,'scripts/mixed-trace.jsonl');if(fs.existsSync(trace))fs.copyFileSync(trace,path.join(root,'mixed-trace.jsonl'));
  for(const name of ['mixed-lease-ci.json','mixed-lease-ci-journals','copy-manifest.json']){const f=path.join(copy,name);if(fs.existsSync(f))fs.cpSync(f,path.join(root,name),{recursive:true});}

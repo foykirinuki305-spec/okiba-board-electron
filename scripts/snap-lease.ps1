@@ -82,6 +82,9 @@ function Lease-Require([string]$token){
  return $script:SnapLease
 }
 function Lease-ValidateRecovery($r,$current){
+ # BEGIN mixed opt-in dispatch
+ if($r.kind -ceq 'mixed-hidden-resident'){if($env:OKIBA_MIXED_LEASE -cne '1'){throw 'mixed-lease-disabled'};Mixed-Validate $r $current;return}
+ # END mixed opt-in dispatch
  if($r.kind -ceq 'resident-archive-samevolume'){Resident-Validate $r $current;return}
  if($r.snapshot.identityVersion -ne 1){throw 'lease-invalid-identity-version'}
  if($r.version -ne 1 -or [string]::IsNullOrEmpty($r.token) -or -not $r.snapshot.ok -or @($r.records).Count -lt 1 -or @($r.records).Count -gt 1000 -or @($r.targets).Count -ne @($r.records).Count){throw 'lease-invalid-recovery'}
@@ -107,6 +110,9 @@ function Lease-ValidateRecovery($r,$current){
  $null=Lease-Guard $r $current
 }
 function Lease-Prepare($req){
+ # BEGIN mixed opt-in dispatch
+ if($req.scope.kind -ceq 'mixed-hidden-resident'){if($env:OKIBA_MIXED_LEASE -cne '1'){throw 'mixed-lease-disabled'};return Mixed-Prepare $req}
+ # END mixed opt-in dispatch
  if($null -ne $script:SnapLease){throw 'lease-already-active'}
  if($req.token -isnot [string] -or $req.token -notmatch '^[A-Za-z0-9_-]{16,128}$'){throw 'lease-invalid-token'}
  $owner=[OkibaLeaseOwner]::Read();if($owner.state -ne 'alive'){throw 'lease-owner-not-alive'}
@@ -162,6 +168,9 @@ function Lease-RevealAttributeBatch($r,[uint32]$off){
  }
 }
 function Lease-RevealPlace([string]$token){
+ # BEGIN mixed opt-in dispatch
+ if((Lease-Require $token).kind -ceq 'mixed-hidden-resident'){if($env:OKIBA_MIXED_LEASE -cne '1'){throw 'mixed-lease-disabled'};return Mixed-RevealPlace $token}
+ # END mixed opt-in dispatch
  $resident=Lease-Require $token;if($resident.kind -ceq 'resident-archive-samevolume'){return Resident-RevealPlace $resident}
  $script:LeasePhase='reveal-preflight'
  $r=Lease-Require $token;if(([OkibaLeaseOwner]::Read()).state -ne 'alive'){throw 'lease-owner-not-alive'};$s=Lease-Snapshot;Lease-ValidateRecovery $r $s
@@ -200,6 +209,10 @@ function Lease-AdoptRestoration($r,$current,[string]$state){
  Lease-MarkRestored $r
 }
 function Lease-RestoreVerify([string]$token){
+ if((Lease-Require $token).kind -ceq 'mixed-hidden-resident'){if($env:OKIBA_MIXED_LEASE -cne '1'){throw 'mixed-lease-disabled'};return Mixed-RestoreVerify $token}
+ return Lease-RestoreVerifyCore $token
+}
+function Lease-RestoreVerifyCore([string]$token){
  $resident=Lease-Require $token;if($resident.kind -ceq 'resident-archive-samevolume'){$null=Resident-All $resident 'moved'}
  $script:LeasePhase='restore-preflight'
  $r=Lease-Require $token;$s=Measure-LeaseStep 'restoreCheck' {Lease-Snapshot};$null=Lease-Guard $r $s $true;Lease-AllGrid $r.snapshot $s
@@ -220,6 +233,9 @@ function Lease-RestoreVerify([string]$token){
  return @{ok=$true;snapRestored=$true;oldUnchanged=$true;targetsExact=$true;restoreMode='changed-and-settled'}
 }
 function Lease-Rollback([string]$token){
+ # BEGIN mixed opt-in dispatch
+ if((Lease-Require $token).kind -ceq 'mixed-hidden-resident'){if($env:OKIBA_MIXED_LEASE -cne '1'){throw 'mixed-lease-disabled'};return Mixed-Rollback $token}
+ # END mixed opt-in dispatch
  $resident=Lease-Require $token;if($resident.kind -ceq 'resident-archive-samevolume'){return Resident-Rollback $resident}
  $script:LeasePhase='rollback-preflight'
  $r=Lease-Require $token;$s=Lease-Snapshot;$null=Lease-Guard $r $s
@@ -234,6 +250,9 @@ function Lease-Rollback([string]$token){
  return @{ok=$true;snapRestored=$true;oldUnchanged=$true;selectedHidden=$true}
 }
 function Lease-Release([string]$token,[string]$expectedOutcome){
+ # BEGIN mixed opt-in dispatch
+ if((Lease-Require $token).kind -ceq 'mixed-hidden-resident'){if($env:OKIBA_MIXED_LEASE -cne '1'){throw 'mixed-lease-disabled'};return Mixed-Release $token $expectedOutcome}
+ # END mixed opt-in dispatch
  $resident=Lease-Require $token;if($resident.kind -ceq 'resident-archive-samevolume'){if($expectedOutcome -ceq 'source-restored'){return Resident-ReleaseSources $resident};if($expectedOutcome -cne 'visible'){throw 'resident-release-outcome-invalid'};$null=Resident-All $resident 'moved'}
  if($expectedOutcome -cne 'visible' -and $expectedOutcome -cne 'hidden'){throw 'lease-release-outcome-required'}
  $r=Lease-Require $token
@@ -290,3 +309,9 @@ function Invoke-SnapLeaseRequest($req){
 # Optional in samepath-only test copies; required when requesting the new kind.
 $residentModule=Join-Path $PSScriptRoot 'resident-lease.ps1'
 if(Test-Path -LiteralPath $residentModule){. $residentModule}
+
+if($env:OKIBA_MIXED_LEASE -ceq '1'){
+ $mixedModule=Join-Path $PSScriptRoot 'mixed-lease.ps1'
+ if(-not (Test-Path -LiteralPath $mixedModule -PathType Leaf)){throw 'mixed-module-missing'}
+ . $mixedModule
+}

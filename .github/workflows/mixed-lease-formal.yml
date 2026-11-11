@@ -1,0 +1,89 @@
+name: mixed-lease-formal
+on:
+  push:
+    paths:
+      - 'scripts/mixed-*'
+      - 'scripts/resident-*'
+      - 'scripts/snap-lease.ps1'
+      - 'scripts/shell-helper.ps1'
+      - 'lib/desktop-lease-*'
+      - 'lib/durable-rename.js'
+      - 'tools/stable-snapshot-ci*'
+      - 'tools/show-hidden-*'
+      - 'tools/desktop-lease-protocol-host-ci.js'
+      - 'lib/desktop-snap-lease-controller.js'
+      - 'tools/mixed-*'
+      - 'tools/desktop-mixed-*'
+      - 'tools/resident-*'
+      - '.github/workflows/mixed-lease-formal.yml'
+  workflow_dispatch:
+jobs:
+  native-mixed-formal:
+    env:
+      OKIBA_FORMAL_MIXED_CI: '1'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Scope and previous coordinator regression
+        shell: pwsh
+        run: |
+          node tools/desktop-mixed-lease-prototype-selftest.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/desktop-mixed-dispatch-selftest.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/mixed-lease-formal-copy-selftest.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/desktop-resident-selection-selftest.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/stable-snapshot-ci-selftest.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/snap-lease-controller-selftest.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Formal module extraction and disabled gates
+        shell: pwsh
+        run: |
+          node tools/mixed-native-module-selftest.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/mixed-native-gates-selftest.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Native canonical file-record matching
+        shell: pwsh
+        run: node tools/resident-read-path-selftest.js
+      - name: Whole-group Hidden barrier before physical restore (pure)
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/mixed-prehide-selftest.ps1
+      - name: Truthful rename notification proof (no notification invoked)
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/mixed-rename-notify-selftest.ps1
+      - name: Native handle adapter in owned TEMP only
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/resident-files-native-selftest.ps1
+      - name: Visible source is rejected before native work
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/resident-visible-source-selftest.ps1
+      - name: Partial stage locator in owned TEMP only
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/resident-lease-locator-selftest.ps1
+      - name: ShowHidden fixture structure and permission gate
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/show-hidden-fixture-selftest.ps1
+      - name: Hosted native Desktop lease (main remains disabled)
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -File tools/mixed-lease-ci.ps1 2>&1 | Tee-Object -FilePath mixed-lease-ci.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve verification and recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mixed-lease-formal-evidence
+          path: |
+            mixed-lease-ci.json
+            mixed-lease-ci.log
+            mixed-lease-ci-journals/**
+            copy-manifest.json
+            mixed-trace.jsonl
