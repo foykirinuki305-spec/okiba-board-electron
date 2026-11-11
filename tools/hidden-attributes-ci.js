@@ -7,7 +7,8 @@ const {planDesktop,sameSnapshot}=require('../lib/safe-desktop');
 const {createAttribRunner}=require('../lib/links');
 const root=path.resolve(__dirname,'..'),desktop=path.resolve(process.argv[2]),attrs=createAttribRunner();
 const mode=process.argv[3]||'none';assert(['none','attributes'].includes(mode));
-const report={mode,scope:'RESEARCH ONLY: temporary snap OFF on GitHub-hosted single-monitor Windows, AUTOARRANGE always OFF; no production change, NOT mixed-DPI proof',passed:false,events:[]};
+const poll=process.argv[4]||'strict';assert(['strict','inventory'].includes(poll));
+const report={mode,poll,scope:'RESEARCH ONLY: temporary snap OFF on GitHub-hosted single-monitor Windows, AUTOARRANGE always OFF; no production change, NOT mixed-DPI proof',passed:false,events:[]};
 const note=(phase,data)=>{report.events.push({phase,data});console.log(phase+' '+JSON.stringify(data));};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const identityValid=s=>s.identityVersion===1&&s.icons.every(i=>typeof i.identity==='string'&&i.identity.length)&&new Set(s.icons.map(i=>i.identity)).size===s.icons.length;
@@ -50,14 +51,45 @@ async function main(){
  assert(stableStart>=0&&stableEnd>stableStart,'Diagnostic snapshot anchor missing');
  let stableSource=helperSource.slice(stableStart,stableEnd).replace("return @{ok=$false;reason='desktop-changing'}","return @{ok=$false;reason='desktop-changing';first=$a;second=$b;firstGeometry=(Strict-GeometryKey $a);secondGeometry=(Strict-GeometryKey $b)}").replace("return @{ok=$false;reason='snapshot-error'}","return @{ok=$false;reason='snapshot-error';detail=$_.Exception.Message}");
  helperSource=helperSource.slice(0,stableStart)+stableSource+helperSource.slice(stableEnd);
+ // Research-only read path; inventory is a readiness hint, NEVER permission to position.
+ helperSource=helperSource.replace("      'desktopSnapshot'     { $result = Get-StrictDesktopSnapshot }",String.raw`      'desktopSnapshot' {
+        $priorPerf=$script:DesktopPerf;$script:DesktopPerf=@{metrics=@{}}
+        try{$result=Get-StrictDesktopSnapshot;$result.researchPerf=@{inclusive=$true;metrics=$script:DesktopPerf.metrics}}finally{$script:DesktopPerf=$priorPerf}
+      }
+      'ciInventory' {
+        if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'CI only'}
+        $w=[Diagnostics.Stopwatch]::StartNew()
+        try{$rows=@([OkibaFolderView]::ReadShellBatch('ci-arrival-inventory'));$result=@{ok=$true;icons=@($rows|ForEach-Object{@{identity=$_.identity;path=$_.path;x=$_.x;y=$_.y}})}}catch{$result=Get-ShellSnapshotFailure $_.Exception}
+        $w.Stop();$result.nativeMs=$w.Elapsed.TotalMilliseconds
+      }`);
+ helperSource=helperSource.replace("@('ciUnhideAttributes'","@('ciInventory','ciUnhideAttributes'");
  const researchHelper=path.join(temp,'ci-only-snap-off-helper.ps1');fs.writeFileSync(researchHelper,helperSource,'utf8');
  const c=createShellHelperClient({command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',researchHelper],timeoutMs:100000});
  let unsafe=false,original;
  async function req(cmd,args={}){const r=await c.request(cmd,args,{timeoutMs:100000});if(!r.ok){unsafe=!await c.stopAndWait(10000);throw Error('helper transport '+JSON.stringify(r));}return r.result;}
  const transientSince=new Map();
- async function observe(phase,guard){const s=await req('desktopSnapshot');if(!s.ok){note(phase+'-snapshot-not-ok',{snapshot:s});const removable=(phase.startsWith('rehide-')||phase==='cleanup')&&s.reason==='shell-snapshot-error'&&/0x80070490/i.test(s.detail||'');if(s.reason!=='desktop-changing'&&!removable)throw Error('fatal snapshot '+JSON.stringify(s));const since=transientSince.get(phase)||Date.now();transientSince.set(phase,since);if(Date.now()-since>10000)throw Error('transient snapshot exceeded 10s '+JSON.stringify(s));}if(s.ok)transientSince.delete(phase);if(s.ok)assert(identityValid(s),'Missing or duplicate Shell identity during '+phase);if(s.ok&&guard){const diff=differences(guard,s);if(diff.length){note(phase,{before:guard,after:s,differences:diff});throw Error('EXISTING ICON SHIFT during '+phase);}}return s;}
+ async function observe(phase,guard){const readStart=performance.now();const s=await req('desktopSnapshot');const readMs=performance.now()-readStart;const guardStart=performance.now();if(!s.ok){note(phase+'-snapshot-not-ok',{snapshot:s});const removable=(phase.startsWith('rehide-')||phase==='cleanup')&&s.reason==='shell-snapshot-error'&&/0x80070490/i.test(s.detail||'');if(s.reason!=='desktop-changing'&&!removable)throw Error('fatal snapshot '+JSON.stringify(s));const since=transientSince.get(phase)||Date.now();transientSince.set(phase,since);if(Date.now()-since>10000)throw Error('transient snapshot exceeded 10s '+JSON.stringify(s));}if(s.ok)transientSince.delete(phase);if(s.ok)assert(identityValid(s),'Missing or duplicate Shell identity during '+phase);if(s.ok&&guard){const diff=differences(guard,s);if(diff.length){note(phase,{before:guard,after:s,differences:diff});throw Error('EXISTING ICON SHIFT during '+phase);}}note('snapshot-cost',{phase,ok:s.ok,readMs,guardMs:performance.now()-guardStart,perf:s.researchPerf});return s;}
  async function stable(phase,guard){let previous;for(let n=0;n<80;n++){const s=await observe(phase,guard);if(s.ok&&previous&&sameSnapshot(previous,s))return s;previous=s.ok?s:null;await sleep(100);}throw Error('unstable '+phase);}
  async function visible(names,want,phase,guard){for(let n=0;n<100;n++){const s=await observe(phase,guard);if(s.ok&&names.every(name=>s.icons.some(i=>matchesFile(i,name))===want))return stable(phase,guard);await sleep(50);}throw Error('visibility timeout '+phase);}
+ async function arrivalMeasured(names,phase,guard){
+  const started=performance.now();let reads=0,readMs=0,sleepMs=0,firstVisibleMs=null;
+  for(let n=0;n<100;n++){
+   const begin=performance.now();const state=poll==='inventory'?await req('ciInventory'):await observe(phase,guard);const elapsed=performance.now()-begin;reads++;readMs+=elapsed;
+   note('arrival-poll',{phase,poll,n,ok:state.ok,readMs:elapsed,nativeMs:state.nativeMs,reason:state.reason});
+   if(!state.ok&&state.reason!=='desktop-changing')throw Error('fatal inventory '+JSON.stringify(state));
+   if(state.ok){assert(identityValid({...state,identityVersion:1}),'inventory identity invalid');if(names.every(name=>state.icons.some(i=>matchesFile(i,name)))){firstVisibleMs=performance.now()-started;break;}}
+   const pause=performance.now();await sleep(50);sleepMs+=performance.now()-pause;
+  }
+  assert.notEqual(firstVisibleMs,null,'arrival inventory timeout');
+  // Both arms use identical full strict verification after the readiness result.
+  const verifyStart=performance.now();const verified=await stable(phase+'-full-verification',guard);
+  assert(names.every(name=>verified.icons.some(i=>matchesFile(i,name))),'items disappeared before verification');
+  assert.equal(verified.folderFlags,guard.folderFlags&~4,'flags changed during arrival');
+  const geometry=s=>JSON.stringify([s.explorerPid,s.explorerStarted,s.listviewHwnd,s.autoArrange,s.shellAutoArrange,s.origin.x,s.origin.y,s.sx,s.sy,s.viewDpi,s.areas&&s.areas.map(a=>[a.left,a.top,a.right,a.bottom,a.scale,a.monitorOrigin.x,a.monitorOrigin.y])]);
+  assert.equal(geometry(verified),geometry(guard),'geometry changed during arrival');
+  note('arrival-breakdown',{phase,poll,firstVisibleMs,reads,readMs,sleepMs,fullStrictVerificationMs:performance.now()-verifyStart,totalMs:performance.now()-started});
+  return verified;
+ }
  async function move(from,to){assert(fs.existsSync(from),'Fixture source missing before move: '+from);const r=await req('moveNoReplace',{source:from,destination:to});assert(r.ok,JSON.stringify({result:r,source:from,destination:to,sourceExists:fs.existsSync(from),destinationExists:fs.existsSync(to)}));}
  async function position(before,items,plan,phase){note(phase+'-input',{baseline:before,items,plan});const r=await req('positionDesktopPlan',{snapshot:before,targets:plan.targets.map(t=>({...t,path:items.find(i=>i.name===t.name).dest})),buffer:plan.buffer});note(phase+'-result',{result:r});assert(r.ok,phase+' '+JSON.stringify(r));const s=await stable(phase,before);for(const t of plan.targets){const i=s.icons.find(i=>matchesFile(i,t.name));assert(i&&Math.abs(i.x-t.x)<=1&&Math.abs(i.y-t.y)<=1,phase+' target not exact');}return s;}
  try{
@@ -96,7 +128,7 @@ async function main(){
     const arrivalStart=performance.now();const nativeStart=performance.now();
     const native=await req('ciUnhideAttributes',{paths:selected.map(i=>i.dest),notify:mode==='attributes'});assert(native.ok,'native unhide/notification failed');
     const nativeRoundTripMs=performance.now()-nativeStart;
-    const arrival=await visible(selected.map(i=>i.name),true,'snap-off-arrival-'+cycle,before);
+    const arrival=await arrivalMeasured(selected.map(i=>i.name),'snap-off-arrival-'+cycle,before);
     note('snap-off-arrival',{cycle,mode,unhideToArrivalMs:performance.now()-arrivalStart,nativeRoundTripMs,native,snapshot:arrival,differences:differences(before,arrival)});
     const batch=p.targets.map(t=>{const icon=arrival.icons.find(i=>matchesFile(i,t.name));assert(icon);return {identity:icon.identity,path:selected.find(i=>i.name===t.name).dest,oldX:icon.x,oldY:icon.y,x:t.x,y:t.y};});
     const placed=await req('ciSnapPosition',{items:batch});assert(placed.ok);
@@ -118,8 +150,8 @@ async function main(){
   else {report.passed=false;report.cleanupError='helper not stopped; cleanup withheld';}
   if(!unsafe&&original){try{for(let n=0;n<60;n++){const s=await observe('cleanup',original);if(s.ok&&s.icons.length===original.icons.length){note('cleanup',{originalIconsUnchanged:true});break;}if(n===59)throw Error('fixture icons remain after cleanup');await sleep(100);}}finally{if(!await c.stopAndWait(10000))unsafe=true;}}
   if(!unsafe){const p=path.resolve(temp);assert(p.startsWith(fs.realpathSync.native(os.tmpdir())+path.sep)&&path.basename(p).startsWith('okiba-dense-ci-'));fs.rmSync(p,{recursive:true,force:true});}
-  fs.writeFileSync(path.join(root,'hidden-attributes-'+mode+'-ci.json'),JSON.stringify(report,null,2));
+  fs.writeFileSync(path.join(root,'hidden-attributes-'+mode+'-'+poll+'-ci.json'),JSON.stringify(report,null,2));
   if(unsafe)throw Error(report.cleanupError);
  }
 }
-main().catch(e=>{report.passed=false;report.error=e.stack;fs.writeFileSync(path.join(root,'hidden-attributes-'+mode+'-ci.json'),JSON.stringify(report,null,2));console.error(e);process.exitCode=1;});
+main().catch(e=>{report.passed=false;report.error=e.stack;fs.writeFileSync(path.join(root,'hidden-attributes-'+mode+'-'+poll+'-ci.json'),JSON.stringify(report,null,2));console.error(e);process.exitCode=1;});

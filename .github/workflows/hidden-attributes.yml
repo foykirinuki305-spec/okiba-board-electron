@@ -14,6 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         mode: [none, attributes]
+        poll: [strict, inventory]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,13 +23,13 @@ jobs:
       - name: Dense hidden native unhide ATTRIBUTES comparison
         shell: pwsh
         run: |
-          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/hidden-attributes-ci.ps1 -Mode '${{ matrix.mode }}' 2>&1 | Tee-Object -FilePath hidden-attributes-${{ matrix.mode }}-ci.log
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/hidden-attributes-ci.ps1 -Mode '${{ matrix.mode }}' -Poll '${{ matrix.poll }}' 2>&1 | Tee-Object -FilePath hidden-attributes-${{ matrix.mode }}-${{ matrix.poll }}-ci.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Preserve timings and safety evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hidden-attributes-${{ matrix.mode }}-evidence
+          name: hidden-attributes-${{ matrix.mode }}-${{ matrix.poll }}-evidence
           path: |
-            hidden-attributes-${{ matrix.mode }}-ci.json
-            hidden-attributes-${{ matrix.mode }}-ci.log
+            hidden-attributes-${{ matrix.mode }}-${{ matrix.poll }}-ci.json
+            hidden-attributes-${{ matrix.mode }}-${{ matrix.poll }}-ci.log
