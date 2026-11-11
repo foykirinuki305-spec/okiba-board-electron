@@ -28,10 +28,13 @@ async function main(){
   const refused=await request('moveNoReplace',{source:collisionSource,destination:collisionDest});
   assert(!refused.ok,'atomic move must reject an existing destination');assert.equal(fs.readFileSync(collisionSource,'utf8'),'original source');assert.equal(fs.readFileSync(collisionDest,'utf8'),'existing destination');
   note('PASS native atomic move refuses destination collision without overwriting either file');
+  const initialOS=await stable();const initialKeys=new Map(initialOS.icons.map(i=>[i.identity,i]));
   const guardName=tag+'-existing.txt',guard=path.join(desktop,guardName);owned.push(guard);fs.writeFileSync(guard,'sentinel');
-  let before;for(let n=0;n<50;n++){before=await snap();if(before.ok&&before.icons.some(i=>matches(i.label,guardName)))break;await sleep(200);}
-  before=await stable();assert(before.ok&&!before.autoArrange&&before.snap,'need readable manual grid desktop');
-  const sentinel=before.icons.find(i=>matches(i.label,guardName));assert(sentinel,'sentinel absent');
+  await run('powershell.exe',['-NoProfile','-NonInteractive','-Command','& ([scriptblock]::Create([IO.File]::ReadAllText($env:OKIBA_CI_NOTIFY_SCRIPT))) -Path $env:OKIBA_CI_NOTIFY_PATH'],{windowsHide:true,timeout:30000,env:{...process.env,OKIBA_CI_NOTIFY_SCRIPT:path.join(ROOT,'tools','fixture-notify-ci.ps1'),OKIBA_CI_NOTIFY_PATH:guard}});
+  const protectInitial=s=>{if(!s.ok)return;const seen=new Set();for(const i of s.icons){const old=initialKeys.get(i.identity);if(old){assert.equal(i.x,old.x,'sentinel arrival moved an original icon horizontally');assert.equal(i.y,old.y,'sentinel arrival moved an original icon vertically');seen.add(i.identity);}else assert(typeof i.path==='string'&&path.resolve(i.path).toLowerCase()===guard.toLowerCase(),'unknown extra icon during sentinel arrival');}assert.equal(seen.size,initialKeys.size,'sentinel arrival removed an original identity');};
+  let before;for(let n=0;n<50;n++){before=await snap();protectInitial(before);if(before.ok&&before.icons.some(i=>matches(i.label,guardName)))break;await sleep(200);}
+  before=await stable();protectInitial(before);assert(before.ok&&!before.autoArrange&&before.snap,'need readable manual grid desktop');
+  const sentinel=before.icons.find(i=>matches(i.label,guardName));if(!sentinel)note('SENTINEL DIAGNOSTIC '+JSON.stringify({guard,exists:fs.existsSync(guard),size:fs.existsSync(guard)?fs.statSync(guard).size:null,snapshot:before,pathHits:before.icons.filter(i=>typeof i.path==='string'&&path.resolve(i.path).toLowerCase()===guard.toLowerCase())}));assert(sentinel,'sentinel absent');
   const guardCold=await cold(guardName);assert.equal(guardCold.status,'ok');
   const offsets=[[0,0],[0,1],[1,1]];
   const names=[tag+'-A.txt',tag+' B.txt',tag+' 日本語.txt'];
