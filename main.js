@@ -719,6 +719,27 @@ function registerIpc() {
     return {moveNoReplace:atomicDesktopMove,stagingParents,stagingExcludedRoots:[BASE,desktop].filter(Boolean)};
   }
 
+  // BEGIN tested-desktop-rollback
+  async function rollbackDesktopFile(item, io) {
+    const isOriginal=p=>{const st=io.stat(p);return st.dev===item.identity.dev&&st.ino===item.identity.ino;};
+    if(item.renamed) {
+      if(!isOriginal(item.dest))throw Error('destination-changed');
+      if(io.exists(item.path))throw Error('original-path-occupied');
+      try {await io.move(item.dest,item.path);}
+      catch(e) {
+        if(e.unsafe)throw e;
+        // A stopped helper may have completed the move but lost its response.
+        if(!io.exists(item.path)||io.exists(item.dest)||!isOriginal(item.path))throw e;
+      }
+      item.renamed=false;item.recoveryPath=item.path;
+    }
+    if(item.visibilityChanged) {
+      if(!isOriginal(item.path))throw Error('source-changed-before-attribute-restore');
+      const a=await io.setHidden(item.path,item.hidden);if(!a?.ok)throw Error('attributes-restore-failed');
+    }
+  }
+  // END tested-desktop-rollback
+
   async function safeDesktopMove(payload,target) {
     if(desktopUnsafe)return desktopBlocked('helper-not-stopped');
     if(desktopBusy) return desktopBlocked('busy');
@@ -805,14 +826,8 @@ function registerIpc() {
           }
         },
         async rollback(item) {
-          if(item.crossTx){try{await item.crossTx.rollback();}catch(e){item.recoveryPath=item.crossTx.recoveryPaths.join(" / ");throw e;}item.recoveryPath=item.path;if(item.visibilityChanged){const a=await attrib.setHidden(item.path,item.hidden);if(!a?.ok)throw Error('attributes-restore-failed');}return;}
-          const current=item.renamed?item.dest:item.path;
-          if(item.renamed) {
-            const st=fs.statSync(current);if(st.dev!==item.identity.dev||st.ino!==item.identity.ino)throw Error('destination-changed');
-            if(fs.existsSync(item.path))throw Error('original-path-occupied');
-            await atomicDesktopMove(current,item.path);item.renamed=false;item.recoveryPath=item.path;
-          }
-          if(item.visibilityChanged){const a=await attrib.setHidden(item.path,item.hidden);if(!a?.ok)throw Error('attributes-restore-failed');}
+          if(item.crossTx){try{await item.crossTx.rollback();}catch(e){item.recoveryPath=item.crossTx.recoveryPaths.join(" / ");throw e;}item.recoveryPath=item.path;}
+          await rollbackDesktopFile(item,{stat:fs.statSync,exists:fs.existsSync,move:atomicDesktopMove,setHidden:attrib.setHidden});
         }
       }});
       if(!tx.ok){try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop '+JSON.stringify(tx)+'\n');}catch(_){}return desktopBlocked(tx.reason,tx.recovery);}

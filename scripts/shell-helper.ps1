@@ -387,6 +387,33 @@ public static class OkibaFolderView {
   [PreserveSig] int SetCurrentFolderFlags(uint mask,uint flags);
   [PreserveSig] int GetCurrentFolderFlags(out uint flags);
  }
+ [ComImport,Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+ interface IShellItem {
+  [PreserveSig] int BindToHandler(IntPtr context,ref Guid handler,ref Guid iid,out IntPtr result);
+  [PreserveSig] int GetParent(out IntPtr parent);
+  [PreserveSig] int GetDisplayName(uint type,out IntPtr name);
+  [PreserveSig] int GetAttributes(uint mask,out uint attributes);
+  [PreserveSig] int Compare(IntPtr other,uint hint,out int order);
+ }
+ [DllImport("shell32.dll",PreserveSig=true)]
+ static extern int SHCreateItemWithParent(IntPtr parentPidl,IntPtr parentFolder,IntPtr child,ref Guid iid,out IntPtr item);
+ static string GetItemFilePath(IFolderView2 view,IntPtr child) {
+  Guid folderId=new Guid("000214e6-0000-0000-c000-000000000046"),itemId=typeof(IShellItem).GUID;
+  IntPtr folder=IntPtr.Zero,item=IntPtr.Zero,name=IntPtr.Zero;
+  object obj=null;
+  try {
+   Marshal.ThrowExceptionForHR(view.GetFolder(ref folderId,out folder));
+   Marshal.ThrowExceptionForHR(SHCreateItemWithParent(IntPtr.Zero,folder,child,ref itemId,out item));
+   obj=Marshal.GetObjectForIUnknown(item);
+   Marshal.ThrowExceptionForHR(((IShellItem)obj).GetDisplayName(0x80058000,out name)); // SIGDN_FILESYSPATH
+   return Marshal.PtrToStringUni(name);
+  } finally {
+   if(name!=IntPtr.Zero)Marshal.FreeCoTaskMem(name);
+   if(obj!=null&&Marshal.IsComObject(obj))Marshal.ReleaseComObject(obj);
+   if(item!=IntPtr.Zero)Marshal.Release(item);
+   if(folder!=IntPtr.Zero)Marshal.Release(folder);
+  }
+ }
  sealed class Session:IDisposable {
   object windows,dispatch,browser,view;
   public IFolderView2 Folder {get{return (IFolderView2)view;}}
@@ -419,6 +446,32 @@ public static class OkibaFolderView {
   if(hr!=0&&hr!=1){Marshal.ThrowExceptionForHR(hr);throw new InvalidOperationException("unknown-autoarrange-state");}
   return new long[]{flags,hr==0?1:0};
  }}
+ // Strict path only: persist placement through the Shell view, not merely
+ // its underlying ListView. PIDL identity and old coordinates must match.
+ public static void PositionNewItem(int index,string expectedPath,int oldX,int oldY,int x,int y) {
+  using(var s=new Session()) {
+   uint flags;Marshal.ThrowExceptionForHR(s.Folder.GetCurrentFolderFlags(out flags));
+   if(s.Folder.GetAutoArrange()!=1||(flags&1)!=0||(flags&4)==0)throw new InvalidOperationException("unsafe-shell-state");
+   IntPtr child=IntPtr.Zero,point=IntPtr.Zero,array=IntPtr.Zero;
+   try {
+    Marshal.ThrowExceptionForHR(s.Folder.Item(index,out child));
+    if(child==IntPtr.Zero)throw new InvalidOperationException("missing-shell-item");
+    string actual=GetItemFilePath(s.Folder,child);
+    if(String.IsNullOrEmpty(actual)||!String.Equals(System.IO.Path.GetFullPath(actual),System.IO.Path.GetFullPath(expectedPath),StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("shell-item-path-mismatch");
+    point=Marshal.AllocCoTaskMem(8);
+    Marshal.ThrowExceptionForHR(s.Folder.GetItemPosition(child,point));
+    if(Marshal.ReadInt32(point,0)!=oldX||Marshal.ReadInt32(point,4)!=oldY)throw new InvalidOperationException("shell-item-position-changed");
+    Marshal.WriteInt32(point,0,x);Marshal.WriteInt32(point,4,y);
+    array=Marshal.AllocCoTaskMem(IntPtr.Size);Marshal.WriteIntPtr(array,child);
+    // ShObjIdl_core.h SVSI_POSITIONITEM = 0x80. No selection/focus flags.
+    Marshal.ThrowExceptionForHR(s.Folder.SelectAndPositionItems(1,array,point,0x80));
+   } finally {
+    if(array!=IntPtr.Zero)Marshal.FreeCoTaskMem(array);
+    if(point!=IntPtr.Zero)Marshal.FreeCoTaskMem(point);
+    if(child!=IntPtr.Zero)Marshal.FreeCoTaskMem(child);
+   }
+  }
+ }
  // Never exposed through the normal helper protocol. Hosted CI only.
  public static void SetFlagsForCI(uint mask,uint flags){
   if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true"||Environment.GetEnvironmentVariable("RUNNER_OS")!="Windows"||Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT")!="github-hosted")throw new InvalidOperationException("folder-flags-setter-is-CI-only");
@@ -870,7 +923,7 @@ function Position-DesktopPlan($baseline,$targets,$buffer) {
         $label=$guard.GetText($index);$pos=$guard.GetPosition($index)
         if([OkibaDesk]::GetItemCount($lv) -ne @($fresh.current.icons).Count -or $label -cne $fresh.new[$chosen].label -or $null -eq $pos -or $pos[0] -ne $fresh.new[$chosen].x -or $pos[1] -ne $fresh.new[$chosen].y) {return @{ok=$false;reason='desktop-changed-before-write'}}
         if($operation.ElapsedMilliseconds -ge 50000){return @{ok=$false;reason='position-deadline'}}
-        [OkibaDesk]::SetItemPosition($lv,$index,[int]$destination.x,[int]$destination.y)
+        [OkibaFolderView]::PositionNewItem($index,[string]$targets[$chosen].path,[int]$pos[0],[int]$pos[1],[int]$destination.x,[int]$destination.y)
       } finally {$guard.Dispose()}
       Start-Sleep -Milliseconds 180
       $after=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) $targets
@@ -881,7 +934,7 @@ function Position-DesktopPlan($baseline,$targets,$buffer) {
       $state=$after
     }
     return @{ok=$false;reason='position-step-limit'}
-  } catch { return @{ok=$false;reason='position-error'} }
+  } catch { return @{ok=$false;reason='position-error';detail=$_.Exception.Message} }
 }
 
 # ---- cursorState (v2.2.2: drag pre-resolution witness) -------------
