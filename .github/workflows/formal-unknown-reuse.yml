@@ -1,0 +1,44 @@
+name: formal-unknown-session-reuse
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/formal-unknown-reuse*'
+      - 'lib/desktop-unknown-*'
+      - 'lib/desktop-lease-*'
+      - 'scripts/unknown-grid-*'
+      - 'scripts/shell-helper.ps1'
+      - 'scripts/snap-lease.ps1'
+      - 'package.json'
+      - '.github/workflows/formal-unknown-reuse.yml'
+jobs:
+  isolated:
+    strategy:
+      fail-fast: false
+      matrix:
+        scale: [100, 150]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Pure reuse fixture contract
+        run: node tools/formal-unknown-reuse-selftest.js
+      - name: Native reuse at 100 percent
+        if: matrix.scale == 100
+        shell: powershell
+        run: node tools/formal-unknown-reuse-ci.js ([Environment]::GetFolderPath('Desktop'))
+      - name: Native reuse at actual empty 150 percent
+        if: matrix.scale == 150
+        shell: powershell
+        run: ./tools/formal-unknown-reuse-dpi-ci.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: formal-unknown-reuse-${{ matrix.scale }}
+          path: |
+            formal-unknown-reuse-ci.json
+            formal-unknown-reuse-journals/**
+            formal-unknown-dpi-*.json

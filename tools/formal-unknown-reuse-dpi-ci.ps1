@@ -1,0 +1,33 @@
+$ErrorActionPreference='Stop'
+if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'hosted only'}
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$root=Split-Path $PSScriptRoot -Parent;$fixture=Join-Path $PSScriptRoot 'formal-unknown-dpi-empty-fixture-ci.js';$uiAttempted=$false;$originalRecycle=$null;$safeRestore=$true
+function FindNamed($name,$type){return @([Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)|Where-Object{$_.Current.Name -eq $name -and $_.Current.ControlType -eq $type})}
+function OpenIcons {
+ Start-Process explorer.exe -ArgumentList 'ms-settings:themes' -WindowStyle Hidden;Start-Sleep -Seconds 3
+ $links=@(FindNamed 'Desktop icon settings' ([Windows.Automation.ControlType]::Hyperlink));if($links.Count -ne 1){$links=@(FindNamed 'Desktop icon settings' ([Windows.Automation.ControlType]::Button))};if($links.Count -ne 1){throw 'desktop-icons-link-unknown'};$links[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke();Start-Sleep -Milliseconds 500
+ $boxes=@(FindNamed 'Recycle Bin' ([Windows.Automation.ControlType]::CheckBox));if($boxes.Count -ne 1){throw 'recycle-checkbox-unknown'};return $boxes[0]
+}
+function ApplyIcons($box,$wanted){$p=$box.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern);if([int]$p.Current.ToggleState -ne $wanted){$p.Toggle()};if([int]$p.Current.ToggleState -ne $wanted){throw 'recycle-toggle-unverified'};$parent=[Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($box);while($parent -and $parent.Current.ControlType -ne [Windows.Automation.ControlType]::Window){$parent=[Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($parent)};if(-not $parent){throw 'icon-dialog-unknown'};$buttons=@($parent.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)|Where-Object{$_.Current.Name -eq 'OK' -and $_.Current.ControlType -eq [Windows.Automation.ControlType]::Button});if($buttons.Count -ne 1){throw 'icon-dialog-ok-unknown'};$buttons[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke();Start-Sleep -Milliseconds 700}
+try{
+ & node $fixture hide;if($LASTEXITCODE -ne 0){throw 'fixture-hide-failed'}
+ $box=OpenIcons;$originalRecycle=[int]$box.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Current.ToggleState;if($originalRecycle -notin @(0,1)){throw 'recycle-initial-state-unknown'};$uiAttempted=$true;@{phase='before-ui-hide';originalRecycle=$originalRecycle}|ConvertTo-Json|Set-Content (Join-Path $root 'formal-unknown-dpi-empty-ui.json');ApplyIcons $box 0
+ & node $fixture empty;if($LASTEXITCODE -ne 0){throw 'fixture-not-empty'}
+ $source=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'desktop-dpi-ui-ci.ps1'))
+ $source=$source.Replace('desktop-dpi-ui-ci.json','formal-unknown-dpi-ui-ci.json')
+ $hook=@'
+ $native=New-Object Diagnostics.Process;$native.StartInfo.FileName='node.exe';$native.StartInfo.Arguments='"'+(Join-Path $PSScriptRoot 'formal-unknown-reuse-ci.js')+'" "'+[Environment]::GetFolderPath('Desktop')+'"';$native.StartInfo.UseShellExecute=$false;$native.StartInfo.CreateNoWindow=$true;$native.StartInfo.WorkingDirectory=Split-Path $PSScriptRoot -Parent;$native.StartInfo.EnvironmentVariables['OKIBA_UNKNOWN_EXPECTED_SCALE']='150';$native.StartInfo.EnvironmentVariables['OKIBA_UNKNOWN_CASES']='success'
+ try{$null=$native.Start();$nativeStarted=$true;if(-not $native.WaitForExit(240000)){throw 'native-timeout-unresolved'};$native.WaitForExit();$native.Refresh();$report.nativeHasExited=$native.HasExited;$report.nativeExitCode=$native.ExitCode;$n=Get-Content (Join-Path $native.StartInfo.WorkingDirectory 'formal-unknown-reuse-ci.json') -Raw|ConvertFrom-Json;$report.nativeEvidence=$n;$exitKnown=($native.HasExited -and $null -ne $report.nativeExitCode);$nativeVerified=($exitKnown -and $n.cleanupVerified -eq $true -and -not $n.cleanupError -and ($n.passed -eq $true -or $n.failureRecoveryVerified -eq $true) -and $n.actualScale -eq 150 -and (($n.cases -join ',') -ceq 'success'));if(-not $nativeVerified){throw 'native-cleanup-unverified'};if($report.nativeExitCode -ne 0 -or -not $n.passed){$report.status='native-failed-recovery-verified';throw 'native-test-failed-but-recovery-verified'};$report.status='single-150-empty-native-verified'}finally{$native.Dispose()}
+'@
+ $anchor=" `$report.status='actual-150-spacing-readonly-verified'";if(-not $source.Contains($anchor)){throw 'dpi-hook-anchor-missing'};$source=$source.Replace($anchor,$hook);$source=$source.Replace('$PSScriptRoot',("'"+$PSScriptRoot.Replace("'","''")+"'"));$safeRestore=$false;& ([scriptblock]::Create($source))
+ $r=Get-Content (Join-Path $root 'formal-unknown-dpi-ui-ci.json') -Raw|ConvertFrom-Json;if($r.restoreSkippedDueToUnresolvedLease){$safeRestore=$false;throw 'lease-unresolved-no-fixture-restoration'};$safeRestore=$true;if($r.status -ne 'single-150-empty-native-verified'){throw ('native-proof-failed:'+ $r.reason)}
+}catch{$failureReason=$_.Exception.Message;@{originalFailure=$failureReason;detail=[string]$_;stack=$_.ScriptStackTrace}|ConvertTo-Json -Depth 8|Set-Content (Join-Path $root 'formal-unknown-dpi-empty-original-failure.json');throw}finally{
+ if($safeRestore){
+  $failures=@();
+  if($uiAttempted){try{$box=OpenIcons;ApplyIcons $box $originalRecycle;@{phase='ui-restored';originalRecycle=$originalRecycle}|ConvertTo-Json|Set-Content (Join-Path $root 'formal-unknown-dpi-empty-ui.json')}catch{$failures+=$_.Exception.Message}}
+  try{& node $fixture restore;if($LASTEXITCODE -ne 0){throw 'attribute-restore-failed'}}catch{$failures+=$_.Exception.Message}
+  try{& node $fixture verify;if($LASTEXITCODE -ne 0){throw 'fixture-final-difference'}}catch{$failures+=$_.Exception.Message}
+  @{scope='single150 empty only; initial fixture positions not protection proof';originalFailure=$failureReason;failures=$failures;fixtureRestored=($failures.Count -eq 0)}|ConvertTo-Json -Depth 8|Set-Content (Join-Path $root 'formal-unknown-dpi-empty-restore.json');if($failures.Count -and -not $failureReason){throw ($failures -join ';')}
+ }else{@{restoreSkippedDueToUnresolvedLease=$true;reason=$failureReason;state='native-or-invoked-script-termination-unverified'}|ConvertTo-Json|Set-Content (Join-Path $root 'formal-unknown-dpi-empty-restore.json')}
+}
