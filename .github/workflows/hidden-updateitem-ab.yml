@@ -1,0 +1,34 @@
+name: hidden-updateitem-ab
+on:
+  push:
+    paths:
+      - 'scripts/shell-helper.ps1'
+      - 'tools/hidden-updateitem-*'
+      - '.github/workflows/hidden-updateitem-ab.yml'
+  workflow_dispatch:
+jobs:
+  investigate:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [none, update]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Truthful attribute notification versus timing-matched control
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/hidden-updateitem-ab-ci.ps1 -Mode '${{ matrix.mode }}' 2>&1 | Tee-Object -FilePath hidden-updateitem-${{ matrix.mode }}-ci.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve positive and negative evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hidden-updateitem-${{ matrix.mode }}-evidence
+          path: |
+            hidden-updateitem-${{ matrix.mode }}-ci.json
+            hidden-updateitem-${{ matrix.mode }}-ci.log

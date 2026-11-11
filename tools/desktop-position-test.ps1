@@ -80,6 +80,8 @@ Diag "shell desktop folder: $desktop"
 $name = 'OkibaPosTest-' + [guid]::NewGuid().ToString('N').Substring(0, 10) + '.txt'
 $dummy = Join-Path $desktop $name
 Diag "dummy file: $dummy"
+. (Join-Path $PSScriptRoot 'desktop-fixture-guard.ps1')
+$fixtureBaseline=Start-FixtureGuard
 
 try {
   Set-Content -Path $dummy -Value 'okibaboard desktop position integration test' -Encoding ASCII
@@ -217,6 +219,9 @@ public static class OkibaTestWin {
       Diag 'restored the original desktop listview style'
     } catch {}
   }
-  try { Remove-Item $dummy -Force -ErrorAction SilentlyContinue } catch {}
-  Flush-Diag
+  try {
+    if([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($dummy)) -ine [IO.Path]::GetFullPath($desktop)){throw 'fixture cleanup path outside desktop'}
+    if(Test-Path -LiteralPath $dummy){Remove-Item -LiteralPath $dummy -Force -ErrorAction Stop}
+    Complete-FixtureGuard $fixtureBaseline ([string[]]@($dummy))
+  } finally { Flush-Diag }
 }

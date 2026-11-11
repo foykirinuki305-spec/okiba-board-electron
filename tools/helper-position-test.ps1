@@ -108,6 +108,8 @@ $name = 'OkibaHelperTest-' + [guid]::NewGuid().ToString('N').Substring(0, 10) + 
 $dummy = Join-Path $desktop $name
 $batchDummies = @()
 Diag "dummy file: $dummy"
+. (Join-Path $PSScriptRoot 'desktop-fixture-guard.ps1')
+$fixtureBaseline=Start-FixtureGuard
 
 try {
   Set-Content -Path $dummy -Value 'okibaboard helper position integration test' -Encoding ASCII
@@ -143,7 +145,7 @@ try {
   $helperSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\scripts\shell-helper.ps1') -Raw
   $blocks = [regex]::Matches($helperSource, "(?ms)^Add-Type -TypeDefinition @'\r?\n(.*?)^'@")
   if ($blocks.Count -lt 2) { Fail 'helper interop declarations missing' }
-  foreach ($block in $blocks) { Add-Type -TypeDefinition $block.Groups[1].Value -ErrorAction Stop }
+  if(-not ('OkibaFolderView' -as [type])){foreach ($block in $blocks) { Add-Type -TypeDefinition $block.Groups[1].Value -ErrorAction Stop }}
   $metricLv = [IntPtr]::Zero; $metricCount = -1
   foreach ($candidate in [OkibaDesk]::FindDesktopListViews()) {
     $count = [OkibaDesk]::GetItemCount($candidate)
@@ -344,8 +346,11 @@ public static class OkibaTestNotify {
       Diag 'restored the original desktop listview style'
     } catch {}
   }
-  foreach ($file in @($dummy) + $batchDummies) {
-    try { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue } catch {}
-  }
-  Flush-Diag
+  try {
+    foreach ($file in @($dummy) + $batchDummies) {
+      if([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($file)) -ine [IO.Path]::GetFullPath($desktop)){throw 'fixture cleanup path outside desktop'}
+      if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file -Force -ErrorAction Stop}
+    }
+    Complete-FixtureGuard $fixtureBaseline ([string[]](@($dummy)+$batchDummies))
+  } finally { Flush-Diag }
 }
