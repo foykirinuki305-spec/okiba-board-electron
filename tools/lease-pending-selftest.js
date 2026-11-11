@@ -1,0 +1,25 @@
+'use strict';
+const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert/strict');
+const receipts=require('../lib/desktop-commit-receipt'),controller=require('../lib/desktop-snap-lease-controller');
+const src=fs.readFileSync(path.join(__dirname,'../lib/desktop-lease-watchdog.js'),'utf8');const resolveBody=src.slice(src.indexOf('async function resolve(){'),src.indexOf('async function dispatch('));
+const main=fs.readFileSync(path.join(__dirname,'../main.js'),'utf8').split('// BEGIN tested-main-lease-verification')[1].split('// END tested-main-lease-verification')[0];
+let n=0;const check=x=>{assert.ok(x);n++;};
+const after=receipts.hash('after'),before=receipts.hash('before'),r=[{path:'C:\\board.json',beforeHash:before,afterHash:after}];
+const good={ok:true,state:'committed',snapRestored:true,oldUnchanged:true,targetsExact:true,leaseReleased:true};
+async function resolution(owner,current,fail=false){const calls=[];const ctx={active:{token:'t',permit:'p',receipts:r,scope:{metadataPaths:[r[0].path]}},terminal:()=>null,ownerState:async()=>({state:owner}),allHash:(rr,c,k)=>rr.every(x=>c.some(v=>x.path===v.path&&x[k]===v.hash)),receiptsNow:()=>[{path:r[0].path,hash:current}],finishVisible:async()=>{calls.push('verify-native-and-release');if(fail)throw Error('transient-native');return good;},classifyReceipt:receipts.classifyReceipt,save:()=>calls.push('save'),globalLock:{release:async()=>calls.push('global-release')},native:async cmd=>{calls.push(cmd);return {ok:true};},rollback:async()=>{throw Error('ordinary rollback forbidden');}};const fn=vm.runInNewContext(resolveBody+';resolve',ctx);return {calls,run:fn};}
+(async()=>{
+ for(const owner of ['alive','exited','unknown'])for(const h of [before,after,'foreign']){const f=await resolution(owner,h);const result=await f.run();if(h===after&&owner!=='unknown'){check(result.state==='committed');check(f.calls.includes('verify-native-and-release'));}else if(owner==='exited'&&h===before){check(f.calls.includes('leaseRollback'));}else{check(!f.calls.includes('leaseRollback'));check(!f.calls.includes('verify-native-and-release'));check(['pending','blocked'].includes(result.state));}}
+ const bad=await resolution('alive',after,true);await assert.rejects(bad.run,/transient-native/);n++;check(!bad.calls.includes('leaseRollback'));
+ let commits=0;const adapter={resolveCommit:async()=>good,commit:()=>commits++};const recovered=await controller.resumeLeaseVerification({adapter,context:{token:'t',permit:'p',receipts:r}});check(recovered.ok&&recovered.recovered&&commits===0);
+ const uncertain=await controller.resumeLeaseVerification({adapter:{resolveCommit:async()=>({state:'committed',snapRestored:true})},context:{token:'t',permit:'p'}});check(uncertain.pendingVerification&&uncertain.retrySafe===false);
+ for(const mode of ['later-success','permanent','aborted']){
+  const timers=[],events=[];let callback=0,attempts=0;
+  const ctx={desktopLeasePending:false,desktopLeaseVerification:null,leaseController:{resumeLeaseVerification:async()=>{attempts++;return mode==='later-success'&&attempts===2?{ok:true}:mode==='aborted'?{ok:false,verifiedAborted:true}:{ok:false,pendingVerification:true};}},win:{isDestroyed:()=>false,webContents:{send:(...v)=>events.push(v)}},setTimeout:fn=>{timers.push(fn);return {unref(){}};}};
+  const begin=vm.runInNewContext(main+';beginLeaseVerification',ctx);begin({result:{verificationContext:{token:'t'}},adapter:{},onCommitted:()=>callback++,diagnostic:()=>{}});check(ctx.desktopLeasePending===true);
+  while(timers.length)await timers.shift()();
+  if(mode==='later-success'){check(callback===1&&attempts===2&&!ctx.desktopLeasePending);check(events.some(e=>e[0]==='fs-changed'));}
+  else if(mode==='permanent'){check(callback===0&&attempts===3&&ctx.desktopLeasePending);check(events.some(e=>e[0]==='status'&&e[1].includes('確認できませんでした')));}
+  else check(callback===0&&attempts===1&&!ctx.desktopLeasePending);
+ }
+ console.log('lease pending '+n+' checks PASS');
+})().catch(e=>{console.error(e);process.exitCode=1});

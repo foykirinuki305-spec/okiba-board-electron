@@ -116,7 +116,12 @@ async function main(){
     if(commitCase==='success'){assert(message.result.ok);assert.equal(message.status.helper.spawns,1,'normal transactions must reuse one warm helper');expected='released';}
     else if(commitCase==='helper-hang'){assert(!message.result.ok);assert.equal(message.result.resolution?.state,'aborted');const h=message.status.helper;assert(h.cumulativeRestartCount>=1);assert(h.history.length>=2);const old=h.history[h.history.length-2],fresh=h.history[h.history.length-1];assert(old.stoppedConfirmed&&old.stopCause==='restart');assert.equal(old.pid,old.spawnPid);assert.equal(fresh.pid,fresh.spawnPid);assert(old.pid!==fresh.pid||old.started!==fresh.started,'native helper PID/birth must differ after confirmed termination');expected='aborted';}
     else{
-     if(commitCase==='disconnect-alive'){assert.equal(message.phase,'disconnected-live');await sleep(2500);const live=await stable('owner-alive-no-rollback',before);assert.equal(live.icons.length,before.icons.length+selected.length);assert(live.snap);}
+     if(commitCase==='disconnect-alive'){
+      assert.equal(message.phase,'disconnected-live');
+      // Real second watchdog, separate BASE/journal directory, same physical Desktop.
+      const contender=fork(path.join(root,'tools','desktop-lease-protocol-host-ci.js'),[],{windowsHide:true,stdio:['ignore','ignore','ignore','ipc']});children.push({child:contender,kind:'global-lock-contender'});
+      let blocked=false;try{const answer=ownerMessage(contender,30000);contender.send({cmd:'run',spec:{...spec,commitCase:'success',journalDir:path.join(caseDir,'different-BASE-journal')}});await answer;}catch(e){blocked=/unresolved-global-desktop-lease|desktop-lease-busy/.test(String(e));note('second-watchdog-blocked',{name,reason:String(e),blocked});}finally{await killOwner(contender);}assert(blocked,'a second BASE must be excluded by the global Desktop lease');
+      await sleep(2500);const live=await stable('owner-alive-no-rollback',before);assert.equal(live.icons.length,before.icons.length+selected.length);assert(live.snap);}
      await killOwner(ownerChild);expected=commitCase==='ack-lost'?'released':'aborted';
     }
     const terminal=await journalTerminal(journalDir);assert.equal(terminal.phase,expected);note('protocol-terminal',{name,phase:terminal.phase,helperExpected:commitCase});

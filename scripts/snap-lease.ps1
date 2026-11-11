@@ -56,11 +56,12 @@ function Lease-ReadRecord([string]$path) {
  if($n.directory){throw 'lease-directory-not-supported'}
  return @{path=$path;identity=$n.identity;size=$n.size;mtime=$n.mtime;attributes=$n.attributes;hidden=$n.hidden}
 }
+function Lease-OtherAttributes([uint32]$attributes){return ($attributes -band ([uint32]::MaxValue -bxor 130))}
 function Lease-CheckRecord($record) {
  $metricClock=[Diagnostics.Stopwatch]::StartNew()
  try{
  $n=Lease-ReadRecord $record.path
- if($n.identity -cne $record.identity -or $n.size -cne $record.size -or $n.mtime -cne $record.mtime -or (($n.attributes -bxor $record.attributes) -band (-bnot 2)) -ne 0){throw 'lease-selected-file-changed'}
+ if($n.identity -cne $record.identity -or $n.size -cne $record.size -or $n.mtime -cne $record.mtime -or (Lease-OtherAttributes $n.attributes) -ne (Lease-OtherAttributes $record.attributes)){throw 'lease-selected-file-changed'}
  return $n
  }finally{Add-LeasePerf 'metadatafilechecks' $metricClock}
 }
@@ -190,7 +191,7 @@ function Invoke-SnapLeaseRequestCore($req){
   $script:LeasePhase=[string]$req.cmd
   if($env:OKIBA_SNAP_LEASE -ne '1'){throw 'lease-dedicated-helper-required'}
   switch($req.cmd){
-   'leaseHelperIdentity' {return @{ok=$true;pid=$PID;started=([Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().Ticks.ToString())}}
+   'leaseHelperIdentity' {return @{ok=$true;pid=$PID;started=([Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().Ticks.ToString());sessionId=[Diagnostics.Process]::GetCurrentProcess().SessionId;desktop=[Environment]::GetFolderPath('DesktopDirectory');localAppData=[Environment]::GetFolderPath('LocalApplicationData')}}
    'leaseOwnerPin' {if($null -ne $script:SnapLease){throw 'lease-already-active'};return [OkibaLeaseOwner]::Pin([int]$req.pid,[string]$req.started)}
    'leaseOwnerState' {return [OkibaLeaseOwner]::Read()}
    'leaseReadFiles' {if(@($req.paths).Count -lt 1 -or @($req.paths).Count -gt 1000){throw 'lease-invalid-path-count'};$records=@($req.paths|ForEach-Object {Lease-ReadRecord $_});return @{ok=$true;records=$records}}

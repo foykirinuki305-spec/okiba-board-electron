@@ -126,7 +126,8 @@ public static class OkibaFileAttributes {
    var before=Capture(h);
    if(String.IsNullOrEmpty(expectedIdentity)||!String.Equals(before.identity,expectedIdentity,StringComparison.Ordinal))throw new InvalidOperationException("file-identity-changed");
    if(before.hidden!=expectedHidden)throw new InvalidOperationException("hidden-state-changed");
-   if(expectedSize!=null&&(before.size!=expectedSize||before.mtime!=expectedMtime||(before.attributes&~2u)!=(expectedOtherAttributes&~2u)))throw new InvalidOperationException("file-metadata-changed");
+   // NORMAL is a placeholder for no substantive attributes; Hidden-only -> NORMAL is legal.
+   if(expectedSize!=null&&(before.size!=expectedSize||before.mtime!=expectedMtime||(before.attributes&~130u)!=(expectedOtherAttributes&~130u)))throw new InvalidOperationException("file-metadata-changed");
    uint desired=hidden?(before.attributes|2u):(before.attributes&~2u);
    // NORMAL is valid only by itself; all substantive flags are retained.
    if((desired&~128u)!=0)desired&=~128u;else desired=128u;

@@ -35,6 +35,9 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "PowerShell script check failed for $f" }
           }
 
+      - name: Pending lease reconciliation and no repeated metadata commit
+        run: node tools/lease-pending-selftest.js
+
       - name: Opt-in main lease integration with in-memory adapters
         run: node tools/main-lease-integration-selftest.js
 

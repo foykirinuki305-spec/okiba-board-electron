@@ -47,7 +47,7 @@ function recordCalibration(req){if(!calibrationFake||!process.env.OKIBA_FAKE_COM
 
 // Opt-in lease protocol fake. It never calls Shell/attrib or changes real flags.
 const leaseFake=process.env.OKIBA_FAKE_LEASE==='1'&&process.env.OKIBA_TEST_HOOKS==='1';
-let fakeLease=null,fakeOwner=null,verifyCalls=0;
+let fakeLease=null,fakeOwner=null,verifyCalls=0,releaseCalls=0;
 const fakeHelperStarted=(621355968000000000n+BigInt(Date.now())*10000n).toString();
 const leasePath=require('path');
 function leaseOwned(p){const base=leasePath.resolve(process.env.OKIBA_FAKE_LEASE_ROOT||'');const q=leasePath.resolve(p);if(!process.env.OKIBA_FAKE_LEASE_ROOT||!q.toLowerCase().startsWith((base+leasePath.sep).toLowerCase()))throw Error('fake-scope-outside-temp');return q;}
@@ -60,25 +60,27 @@ function fakeLeaseCommand(req){
  const identity=p=>{const st=calibrationFs.statSync(leaseOwned(p));return st.dev+':'+st.ino;};
  const alive=()=>{try{process.kill(fakeOwner.pid,0);return 'alive';}catch{return 'exited';}};
  switch(req.cmd){
- case 'leaseHelperIdentity':return {ok:true,pid:process.pid,started:fakeHelperStarted};
+ case 'leaseHelperIdentity':{const desktop=leaseOwned(process.env.OKIBA_FAKE_LANDING||leasePath.join(process.env.OKIBA_FAKE_LEASE_ROOT,'desktop'));const localAppData=leaseOwned(leasePath.join(process.env.OKIBA_FAKE_LEASE_ROOT,'localAppData'));calibrationFs.mkdirSync(desktop,{recursive:true});calibrationFs.mkdirSync(localAppData,{recursive:true});return {ok:true,pid:process.pid,started:fakeHelperStarted,sessionId:0,desktop,localAppData};}
  case 'leaseOwnerPin':fakeOwner={pid:req.pid,started:req.started||(req.pid===process.ppid?'2':'1')};return {ok:true,...fakeOwner,state:alive()};
  case 'leaseOwnerState':return {ok:true,...fakeOwner,state:alive()};
  case 'leaseReadFiles':return {ok:true,records:req.paths.map(p=>({path:p,identity:identity(p)}))};
  case 'leasePrepare':
   for(const i of req.scope.items){if(identity(i.path)!==i.fileIdentity)throw Error('fake-source-changed');}
   for(const p of req.scope.metadataPaths)leaseOwned(p);
-  fakeLease={token:req.token,scope:req.scope,visible:false,snap:true};verifyCalls=0;return {ok:true,recovery:JSON.parse(JSON.stringify(fakeLease))};
+  fakeLease={token:req.token,scope:req.scope,visible:false,snap:true};verifyCalls=0;releaseCalls=0;return {ok:true,recovery:JSON.parse(JSON.stringify(fakeLease))};
  case 'leaseAdopt':fakeLease=req.recovery;return {ok:true};
  case 'leaseRevealPlace':
   if(fakeLease?.token!==req.token)throw Error('fake-token');fakeLease.visible=true;fakeLease.snap=false;
   if(mode==='reveal-fail')return {ok:false,reason:'injected-reveal-failure'};return {ok:true};
  case 'leaseRestoreVerify':
   if(fakeLease?.token!==req.token)throw Error('fake-token');verifyCalls++;fakeLease.snap=true;
-  if(mode==='pending'&&verifyCalls===3)return {ok:false,reason:'injected-postcommit-verification-failure'};
+  if(mode==='foreign-change'&&verifyCalls===3){const p=leaseOwned(fakeLease.scope.metadataPaths[0]);const j=JSON.parse(calibrationFs.readFileSync(p,'utf8'));j.future={...j.future,externalEdit:true};calibrationFs.writeFileSync(p,JSON.stringify(j));leaseLog('fake-foreign-edit');return {ok:false,reason:'injected-foreign-edit'};}
+  if((mode==='pending'&&verifyCalls>=3&&alive()==='alive')||(mode==='retry-native'&&verifyCalls>=3&&verifyCalls<=4)||(mode==='transient-native'&&verifyCalls===3))return {ok:false,reason:'injected-postcommit-verification-failure'};
   return {ok:true,snapRestored:true,oldUnchanged:true,targetsExact:true};
  case 'leaseRollback':
   if(fakeLease?.token!==req.token)throw Error('fake-token');fakeLease.visible=false;fakeLease.snap=true;return {ok:true};
  case 'leaseRelease':
+  if(mode==='release-fail'&&++releaseCalls===1)return {ok:false,reason:'injected-release-failure'};
   if(fakeLease?.token!==req.token)throw Error('fake-token');leaseLog('fake-terminal',{visible:fakeLease.visible,snap:fakeLease.snap});return {ok:true};
  default:return {ok:false,reason:'unsupported-fake-lease-command'};
  }

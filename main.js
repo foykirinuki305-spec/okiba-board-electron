@@ -693,9 +693,36 @@ function registerIpc() {
   const safeDesk = require('./lib/safe-desktop');
   const leaseController=require('./lib/desktop-snap-lease-controller');
   const leaseReceipt=require('./lib/desktop-commit-receipt');
-  let desktopLeaseClient=null,desktopLeasePending=false;
+  let desktopLeaseClient=null,desktopLeasePending=false,desktopLeaseVerification=null;
   function leaseOptIn(){return process.env.OKIBA_TEST_HOOKS==='1'&&process.env.OKIBA_TEST_SNAP_LEASE==='1';}
-  function pendingLeaseResult(reason){return {moved:[],destinations:[],skipped:[],failed:[],error:'配置処理の結果を確認中です。再実行せず確認を待ってください。',reason,pendingVerification:true,retrySafe:false,position:{status:'pending'}};}
+  function pendingLeaseResult(reason){return {moved:[],destinations:[],skipped:[],failed:[],error:'配置処理の完了をまだ確認できません。素材の再移動はせず、このまま確認結果をお待ちください。',reason,pendingVerification:true,retrySafe:false,position:{status:'pending'}};}
+  // BEGIN tested-main-lease-verification
+  function beginLeaseVerification({result,adapter,onCommitted,diagnostic}) {
+    desktopLeasePending=true;
+    const work={context:result.verificationContext,adapter,onCommitted,diagnostic,attempts:0,running:false,finished:false};
+    desktopLeaseVerification=work;
+    const notify=message=>{if(win&&!win.isDestroyed())win.webContents.send('status',message);};
+    const tick=async()=>{
+      if(work!==desktopLeaseVerification||work.running||work.finished)return;
+      work.running=true;work.attempts++;
+      try{
+        const checked=await leaseController.resumeLeaseVerification({adapter:work.adapter,context:work.context});
+        diagnostic('lease-pending-verification',{attempt:work.attempts,result:checked});
+        if(checked.ok||checked.verifiedAborted){
+          work.finished=true;
+          if(checked.ok){try{onCommitted();}catch(e){diagnostic('lease-recovered-history-warning',{reason:String(e.message||e)});}}
+          desktopLeasePending=false;desktopLeaseVerification=null;
+          if(win&&!win.isDestroyed())win.webContents.send('fs-changed');
+          notify(checked.ok?'配置処理の完了を確認しました。':'配置処理を中止し、元の状態に戻したことを確認しました。');
+          return;
+        }
+      }finally{work.running=false;}
+      if(work.attempts<3){const t=setTimeout(()=>tick().catch(e=>diagnostic('lease-verification-error',{reason:String(e.message||e)})),2000);t.unref?.();}
+      else notify('配置処理の完了を確認できませんでした。状態が未確認のため、素材を再移動しないでください。');
+    };
+    const t=setTimeout(()=>tick().catch(e=>diagnostic('lease-verification-error',{reason:String(e.message||e)})),2000);t.unref?.();
+  }
+  // END tested-main-lease-verification
   function leaseClient(){
     if(desktopLeaseClient)return desktopLeaseClient;
     const fake=process.env.OKIBA_TEST_HELPER==='fake';
@@ -905,9 +932,13 @@ function registerIpc() {
             replace:tmp=>fs.renameSync(tmp,meta),
             removeTemporary:tmp=>{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}
           }});
-          leaseTransaction=await leaseController.runLease({scope,receipts,adapter:client.adapter(commitFn)});
+          const leaseAdapter=client.adapter(commitFn);
+          leaseTransaction=await leaseController.runLease({scope,receipts,adapter:leaseAdapter});
           diagnostic('lease-transaction',{result:leaseTransaction});
-          if(leaseTransaction.pendingVerification||(!leaseTransaction.ok&&leaseTransaction.resolution?.state!=='aborted')){desktopLeasePending=true;return pendingLeaseResult(leaseTransaction.reason);}
+          if(leaseTransaction.pendingVerification||(!leaseTransaction.ok&&leaseTransaction.resolution?.state!=='aborted')){
+            beginLeaseVerification({result:leaseTransaction,adapter:leaseAdapter,diagnostic,onCommitted:()=>recordHistory(payload.boardName,{folder,positions:data.positions,links:data.links},planned.map(i=>({kind:'linked',destPath:i.dest,fileName:i.name,col:i.cell[0],row:i.cell[1]})),payload.groupId)});
+            return pendingLeaseResult(leaseTransaction.reason);
+          }
         }else diagnostic('lease-not-covered',{reason:calibrationPlan?'unknown-grid-calibration':'scope-not-supported',legacyArrivalRiskUnresolved:true});
       }
       const tx=leaseTransaction||await safeDesk.executeDesktop({items:planned,plan,snapshot:snap,adapter:{

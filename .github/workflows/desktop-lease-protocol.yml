@@ -19,6 +19,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - name: Independent global Desktop exclusion
+        shell: pwsh
+        run: node ./tools/desktop-lease-global-lock-selftest.js
       - name: Canonical lease geometry pure checks
         shell: pwsh
         run: pwsh -NoProfile -File ./tools/snap-lease-geometry-selftest.ps1
