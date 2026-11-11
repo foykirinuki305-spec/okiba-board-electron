@@ -14,6 +14,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - name: Pure adaptive response serialization regression
+        shell: pwsh
+        run: powershell -NoProfile -File tools/calibration-adaptive-serialization-selftest.ps1
       - name: Known 100 percent native Shell calibration comparison
         shell: pwsh
         run: |

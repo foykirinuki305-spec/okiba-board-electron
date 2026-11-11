@@ -1,6 +1,7 @@
 // Hosted-only research prototype. Production helper/calibration are not modified.
 'use strict';
 if(process.platform!=='win32'||process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Windows'||process.env.RUNNER_ENVIRONMENT!=='github-hosted')throw Error('Hosted Windows CI only');
+const {spawn}=require('child_process');
 const fs=require('fs'),path=require('path'),os=require('os'),assert=require('assert/strict'),crypto=require('crypto');
 const {createShellHelperClient}=require('../lib/shellhelper');
 const {planCalibration,inferCalibration}=require('../lib/desktop-calibration');
@@ -27,13 +28,16 @@ async function main(){
           $after=Wait-CalibrationSettled $baseline $probe $patch $clock
           $result=@{ok=$after.ok;guard=$after;elapsedMs=$clock.Elapsed.TotalMilliseconds}
         }
+        if($null -ne $result.guard.new){$wire=@{};foreach($key in $result.guard.new.Keys){$wire[[string]$key]=$result.guard.new[$key]};$result.guard.new=$wire}
       }
 `;
  const anchor="      'resolveDrop'         {";assert(src.includes(anchor));src=src.replace(anchor,command+anchor).replace("@('resolveDrop','cursorState'","@('ciCalibrationSample','resolveDrop','cursorState'");
+ const serializationCatch='  } catch { break }';assert(src.includes(serializationCatch));src=src.replace(serializationCatch,'  } catch { [Console]::Error.WriteLine("CI response serialization failed: "+$_.Exception.Message);break }');
  const helper=path.join(temp,'shell-helper.ps1');fs.writeFileSync(helper,src);fs.copyFileSync(path.join(root,'scripts/snap-lease.ps1'),path.join(temp,'snap-lease.ps1'));
- const c=createShellHelperClient({command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',helper],timeoutMs:100000});
+ let helperStderr='';const captureSpawn=(command,args,options)=>{const child=spawn(command,args,{...options,stdio:['pipe','pipe','pipe']});child.stderr.on('data',chunk=>{helperStderr=(helperStderr+chunk.toString()).slice(-16000);});return child;};
+ const c=createShellHelperClient({spawnFn:captureSpawn,command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',helper],timeoutMs:100000});
  let original,unsafe=false,created=false;
- async function req(cmd,payload={}){const r=await c.request(cmd,payload,{timeoutMs:100000});if(!r.ok){if(!await c.stopAndWait(10000))unsafe=true;throw Error('transport '+JSON.stringify(r));}return r.result;}
+ async function req(cmd,payload={}){const r=await c.request(cmd,payload,{timeoutMs:100000});if(!r.ok){if(!await c.stopAndWait(10000))unsafe=true;note('helper-failure',{cmd,result:r,stderr:helperStderr,stats:c.stats()});throw Error('transport '+JSON.stringify(r));}return r.result;}
  function guard(s){assert(s.ok);assert.equal(s.identityVersion,1);assert.equal(new Set(s.icons.map(i=>i.identity)).size,s.icons.length);if(original){for(const old of original.icons){const now=s.icons.find(i=>i.identity===old.identity);assert(now&&now.x===old.x&&now.y===old.y&&now.path===old.path,'old icon changed');}assert.equal(s.folderFlags,original.folderFlags);assert.equal(s.explorerPid,original.explorerPid);assert.equal(s.explorerStarted,original.explorerStarted);assert.equal(s.listviewHwnd,original.listviewHwnd);}}
  async function stable(phase){let previous;for(let n=0;n<60;n++){const s=await req('desktopSnapshot');note(phase,{snapshot:s});if(s.ok){guard(s);if(previous&&sameSnapshot(previous,s))return s;previous=s;}else{const cleanupTransient=phase==='cleanup'&&!fs.existsSync(dest)&&s.reason==='shell-snapshot-error'&&/ReadShellBatch/.test(s.detail||'')&&/E_FAIL|0x80004005|0x80070490/i.test(s.detail||'');assert(s.reason==='desktop-changing'||cleanupTransient,'fatal snapshot '+JSON.stringify(s));previous=null;}await sleep(100);}throw Error('unstable '+phase);}
  try{
@@ -52,7 +56,7 @@ async function main(){
     for(const axis of ['x','y']){
      const max=maxSpacing[axis];let candidates=[];for(let pitch=8;pitch<=max;pitch++)for(let origin=0;origin<pitch;origin++)candidates.push({s:pitch,o:origin});
      let fixedOther=null;
-     async function measure(value,pass){const q={...center,[axis]:value};assert(q.x>=plan.patch.left+maxSpacing.x&&q.x<=plan.patch.right-maxSpacing.x&&q.y>=plan.patch.top+maxSpacing.y&&q.y<=plan.patch.bottom-maxSpacing.y,'outside reserved request margin');const result=await req('ciCalibrationSample',{snapshot:unknown,probe:{path:dest,name},plan,point:q});note('adaptive-sample',{axis,pass,request:q,result});assert(result.ok,JSON.stringify(result));guard(result.guard.current);const observed=result.guard.new['0'];assert(observed);const other=axis==='x'?'y':'x';if(fixedOther===null)fixedOther=observed[other];else assert.equal(observed[other],fixedOther,'cross-axis movement');samples.push({axis,pass,request:q,observed:{x:observed.x,y:observed.y},elapsedMs:result.elapsedMs});return observed[axis];}
+     async function measure(value,pass){const q={...center,[axis]:value};assert(q.x>=plan.patch.left+maxSpacing.x&&q.x<=plan.patch.right-maxSpacing.x&&q.y>=plan.patch.top+maxSpacing.y&&q.y<=plan.patch.bottom-maxSpacing.y,'outside reserved request margin');note('adaptive-request',{axis,pass,request:q});const result=await req('ciCalibrationSample',{snapshot:unknown,probe:{path:dest,name},plan,point:q});note('adaptive-sample',{axis,pass,request:q,result});assert(result.ok,JSON.stringify(result));guard(result.guard.current);const observed=result.guard.new['0'];assert(observed);const other=axis==='x'?'y':'x';if(fixedOther===null)fixedOther=observed[other];else assert.equal(observed[other],fixedOther,'cross-axis movement');samples.push({axis,pass,request:q,observed:{x:observed.x,y:observed.y},elapsedMs:result.elapsedMs});return observed[axis];}
      for(let n=0;n<12&&candidates.length>1;n++){
       let best=center[axis],score=Infinity;const choices=n===0?[best]:Array.from({length:25},(_,i)=>center[axis]+Math.round((i-12)*max/8));
       for(const q of choices){const counts=new Map();for(const g of candidates){const v=snap(q,g);counts.set(v,(counts.get(v)||0)+1);}const worst=Math.max(...counts.values());if(worst<score){score=worst;best=q;}}
