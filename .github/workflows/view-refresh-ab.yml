@@ -1,0 +1,33 @@
+name: view-refresh-ab
+on:
+  push:
+    paths:
+      - 'tools/view-refresh-*'
+      - '.github/workflows/view-refresh-ab.yml'
+  workflow_dispatch:
+jobs:
+  measure:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [none, refresh]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Matched warm IShellView Refresh arrival benchmark
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/view-refresh-ab-ci.ps1 -Mode '${{ matrix.mode }}' 2>&1 | Tee-Object -FilePath view-refresh-${{ matrix.mode }}-ci.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve timings and safety evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: view-refresh-${{ matrix.mode }}-evidence
+          path: |
+            view-refresh-${{ matrix.mode }}-ci.json
+            view-refresh-${{ matrix.mode }}-ci.log
