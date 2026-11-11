@@ -1,0 +1,45 @@
+name: desktop-lease-warm
+on:
+  push:
+    paths:
+      - 'tools/desktop-lease-warm-*'
+      - '.github/workflows/desktop-lease-warm.yml'
+  workflow_dispatch:
+jobs:
+  measure:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: per-record
+            ref: e9816673520d0e2f9af54928be3f952474db5286
+          - name: batch
+            ref: 5a5b01be442613ec8ebdbeda967253e1fc997d37
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: study
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          path: baseline
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Repeated warm N3 and N6 success comparison
+        shell: pwsh
+        working-directory: study
+        run: |
+          $source=(Resolve-Path ../baseline).Path
+          & pwsh -NoProfile -File ./tools/desktop-lease-warm-ci.ps1 -SourceRoot $source -SourceRef '${{ matrix.ref }}' 2>&1 | Tee-Object desktop-lease-warm-ci.log
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-lease-warm-${{ matrix.name }}-evidence
+          path: |
+            study/desktop-lease-warm-ci.json
+            study/desktop-lease-warm-ci.log
+            study/desktop-lease-warm-journals/**
