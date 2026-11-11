@@ -8,6 +8,8 @@ on:
       - 'lib/desktop-legacy-*'
       - 'lib/desktop-lease-*'
       - 'lib/durable-rename.js'
+      - 'lib/shellhelper.js'
+      - 'tools/shellhelper-envelope-selftest.js'
       - 'tools/durable-rename-*'
       - 'tools/desktop-commit-gate-selftest.js'
       - 'scripts/snap-lease.ps1'
@@ -24,6 +26,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - name: Reserved helper envelope regression
+        shell: pwsh
+        run: node tools/shellhelper-envelope-selftest.js
       - name: Durable commit permission gate regression
         shell: pwsh
         run: node tools/desktop-commit-gate-selftest.js
