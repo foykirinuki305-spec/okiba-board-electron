@@ -1,4 +1,12 @@
-﻿ // CI-only experiment: non-visible items are NOT guaranteed by the API contract.
+﻿ [DllImport("shell32.dll")] static extern void SHGetSettings(out uint state,uint mask);
+ [DllImport("shell32.dll",CharSet=CharSet.Unicode)] static extern void SHChangeNotify(uint change,uint flags,string item,IntPtr other);
+ public static bool ShowHiddenForCIRead(){uint state;SHGetSettings(out state,1);return (state&1)!=0;}
+ public static void NotifyActualChangeForCI(string path,bool deleted){
+  if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true"||Environment.GetEnvironmentVariable("RUNNER_OS")!="Windows"||Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT")!="github-hosted")throw new InvalidOperationException("CI only");
+  if(deleted&&System.IO.File.Exists(path))throw new InvalidOperationException("File still exists");
+  SHChangeNotify(deleted?4u:0x2000u,0x1005u,path,IntPtr.Zero);
+ }
+ // CI-only experiment: non-visible items are NOT guaranteed by the API contract.
  [ComImport,Guid("000214e6-0000-0000-c000-000000000046"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
  interface IShellFolderParse {
   [PreserveSig] int ParseDisplayName(IntPtr hwnd,IntPtr bind,[MarshalAs(UnmanagedType.LPWStr)]string name,ref uint eaten,out IntPtr pidl,ref uint attributes);
@@ -21,12 +29,14 @@
     obj=Marshal.GetObjectForIUnknown(folder);uint eaten=0,attributes=0;
     int parse=((IShellFolderParse)obj).ParseDisplayName(IntPtr.Zero,IntPtr.Zero,System.IO.Path.GetFileName(path),ref eaten,out child,ref attributes);
     Marshal.ThrowExceptionForHR(parse);
+    if(child==IntPtr.Zero)throw new InvalidOperationException("ParseDisplayName returned no PIDL");
     string actual=GetItemFilePath(s.Folder,child);
     if(!String.Equals(System.IO.Path.GetFullPath(actual),System.IO.Path.GetFullPath(path),StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Hidden PIDL path mismatch");
-    point=Marshal.AllocCoTaskMem(8);Marshal.WriteInt32(point,0,0);Marshal.WriteInt32(point,4,0);
+    point=Marshal.AllocCoTaskMem(8);Marshal.WriteInt32(point,0,Int32.MinValue);Marshal.WriteInt32(point,4,Int32.MinValue);
     int before=s.Folder.GetItemPosition(child,point);int bx=Marshal.ReadInt32(point,0),by=Marshal.ReadInt32(point,4);
     Marshal.WriteInt32(point,0,x);Marshal.WriteInt32(point,4,y);array=Marshal.AllocCoTaskMem(IntPtr.Size);Marshal.WriteIntPtr(array,child);
     int set=mode==1?((ILegacyFolderView)s.Folder).SetItemPos(child,point):s.Folder.SelectAndPositionItems(1,array,point,0x80);
+    Marshal.WriteInt32(point,0,Int32.MinValue);Marshal.WriteInt32(point,4,Int32.MinValue);
     int after=s.Folder.GetItemPosition(child,point);int ax=Marshal.ReadInt32(point,0),ay=Marshal.ReadInt32(point,4);
     return new int[]{parse,before,bx,by,set,after,ax,ay};
    }finally{

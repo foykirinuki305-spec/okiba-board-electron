@@ -11,7 +11,7 @@ const {createAttribRunner}=require('../lib/links');
 const run=promisify(execFile),desktop=path.resolve(process.argv[2]),ROOT=path.resolve(__dirname,'..');
 const log=[];function note(s){log.push(s);console.log(s)}
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-const signature=s=>s.icons.map(i=>JSON.stringify([i.label,i.x,i.y])).sort();
+const signature=s=>{assert.equal(s.identityVersion,1);assert(s.icons.every(i=>typeof i.identity==='string'&&i.identity));assert.equal(new Set(s.icons.map(i=>i.identity)).size,s.icons.length);return s.icons.map(i=>JSON.stringify([i.identity,i.x,i.y])).sort();};
 function matches(label,name){return label===name||label===path.parse(name).name;}
 async function main(){
  const tag='OkibaSafe-'+crypto.randomBytes(6).toString('hex');
@@ -51,16 +51,16 @@ async function main(){
   const valid=planDesktop({snapshot:before,items,automatic:true});assert(valid.ok,'runner has no safe sparse group space');
   const started=Date.now();const result=await executeDesktop({items,plan:valid,snapshot:before,adapter});note('3-file strict transaction elapsed_ms='+ (Date.now()-started));assert(result.ok,'strict placement failed '+JSON.stringify(result));assert.equal(committed,1);
   const after=await stable();const previous=after.icons.filter(i=>!names.some(n=>matches(i.label,n)));
-  assert.deepEqual(previous.map(i=>JSON.stringify([i.label,i.x,i.y])).sort(),signature(before),'existing icons changed');
+  assert.deepEqual(previous.map(i=>JSON.stringify([i.identity,i.x,i.y])).sort(),signature(before),'existing icons changed');
   for(const t of valid.targets){const read=await cold(t.name);assert.equal(read.status,'ok');assert(Math.abs(read.x-t.x)<=1&&Math.abs(read.y-t.y)<=1,'not exact planned grid cell: '+JSON.stringify({target:t,read}));}
   const guardAfter=await cold(guardName);assert.equal(guardAfter.x,guardCold.x);assert.equal(guardAfter.y,guardCold.y);
   for(const [i,item]of items.entries()){assert(!fs.existsSync(item.path));assert.equal(fs.readFileSync(item.dest,'utf8'),'source-'+i);}
   note('PASS sparse group: all original icons unchanged; independent cold reads equal exact planned grid cells; relative layout preserved');
   const batchBefore=await stable();
   const existingDiff=(baseline,current)=>baseline.icons.map(old=>{
-    const matchesNow=(current.icons||[]).filter(i=>i.label===old.label);
+    const matchesNow=(current.icons||[]).filter(i=>i.identity===old.identity);
     const kind=matches(old.label,guardName)?'guard':names.some(n=>matches(old.label,n))?'previous-3-files':'original-OS-icon';
-    return {label:old.label,kind,before:{x:old.x,y:old.y},after:matchesNow.map(i=>({x:i.x,y:i.y})),unchanged:matchesNow.some(i=>i.x===old.x&&i.y===old.y)};
+    return {identity:old.identity,label:old.label,kind,before:{x:old.x,y:old.y},after:matchesNow.map(i=>({x:i.x,y:i.y})),unchanged:matchesNow.some(i=>i.x===old.x&&i.y===old.y)};
   }).filter(i=>!i.unchanged);
   note('10-file before create '+JSON.stringify({snapshot:batchBefore,diffSinceFirstBatch:existingDiff(after,batchBefore)}));
   const batch=Array.from({length:10},(_,i)=>{const name=tag+'-batch'+i+'.txt';return {name,path:path.join(temp,name),dest:path.join(desktop,name),offset:[Math.floor(i/5),i%5]};});
@@ -75,7 +75,7 @@ async function main(){
   }}});
   note('10-file strict transaction elapsed_ms='+(Date.now()-batchStart));assert(batchResult.ok,'10-file placement failed '+JSON.stringify(batchResult));
   const batchAfter=await stable();
-  assert.deepEqual(batchAfter.icons.filter(i=>!batch.some(t=>matches(i.label,t.name))).map(i=>JSON.stringify([i.label,i.x,i.y])).sort(),signature(batchBefore),'10-file transaction moved an existing icon');
+  assert.deepEqual(batchAfter.icons.filter(i=>!batch.some(t=>matches(i.label,t.name))).map(i=>JSON.stringify([i.identity,i.x,i.y])).sort(),signature(batchBefore),'10-file transaction moved an existing icon');
   for(const t of batchPlan.targets){const icon=batchAfter.icons.find(i=>matches(i.label,t.name));assert(icon&&Math.abs(icon.x-t.x)<=1&&Math.abs(icon.y-t.y)<=1,'10-file target not exact');}
   note('PASS 10-file group: every old icon unchanged and every target exact');
   // The primary product path: linked Desktop files stay at the same path,
@@ -90,7 +90,7 @@ async function main(){
   const mixedPosition=async(s,p,its)=>{
     const result=await request('positionDesktopPlan',{snapshot:s,targets:p.targets.map(t=>({...t,path:its.find(i=>i.name===t.name).dest})),buffer:p.buffer});
     if(!result.ok&&!result.unsafe){const current=await snap();note('hidden-path failure '+JSON.stringify({result,before:s,current,plan:p,diff:existingDiff(s,current)}));}
-    if(result.ok){const current=await stable();assert.deepEqual(current.icons.filter(i=>!its.some(t=>matches(i.label,t.name))).map(i=>JSON.stringify([i.label,i.x,i.y])).sort(),signature(s),'existing icons changed while hidden items were visible');for(const t of p.targets){const found=current.icons.find(i=>matches(i.label,t.name));assert(found&&Math.abs(found.x-t.x)<=1&&Math.abs(found.y-t.y)<=1,'mixed position not exact before commit');}}
+    if(result.ok){const current=await stable();assert.deepEqual(current.icons.filter(i=>!its.some(t=>matches(i.label,t.name))).map(i=>JSON.stringify([i.identity,i.x,i.y])).sort(),signature(s),'existing icons changed while hidden items were visible');for(const t of p.targets){const found=current.icons.find(i=>matches(i.label,t.name));assert(found&&Math.abs(found.x-t.x)<=1&&Math.abs(found.y-t.y)<=1,'mixed position not exact before commit');}}
     return result;
   };
   const seeded=await executeDesktop({items:seed,plan:seedPlan,snapshot:seedBefore,adapter:{...adapter,position:(s,p)=>mixedPosition(s,p,seed)}});assert(seeded.ok,'hidden seed positioning failed '+JSON.stringify(seeded));

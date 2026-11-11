@@ -16,6 +16,8 @@ try {
   $actual=[OkibaFolderView]::ReadState()
   if($actual.Length -lt 2 -or ($actual[0] -band 5) -ne 4 -or $actual[1] -ne 0){throw 'Shell FolderView did not enter manual arrangement with snap-to-grid; raw ListView bits are insufficient.'}
   Write-Host ('Authoritative Shell state verified: flags='+$actual[0]+' autoArrange='+$actual[1])
+  & (Join-Path $PSScriptRoot 'desktop-wave-selftest.ps1')
+  & (Join-Path $PSScriptRoot 'desktop-batch-ci.ps1')
   & node (Join-Path $PSScriptRoot 'safe-desktop-test.js') ([Environment]::GetFolderPath('Desktop'))
   $exitCode=$LASTEXITCODE
 } finally {

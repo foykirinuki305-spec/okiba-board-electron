@@ -54,6 +54,21 @@ check('monitor grid change invalidates preflight',()=>{const a=multi(),b=clone(a
 check('automatic skips unknown area and uses known area',()=>{const s=multi();s.areas[0].grid=null;const p=plan(s,items([[0,0],[0,1]]),null,true);assert(p.ok);assert(p.targets.every(t=>t.x>=1920&&t.x<3840));});
 
 for(const key of ['viewDpi','folderFlags','shellAutoArrange','explorerPid','explorerStarted','listviewHwnd'])check(key+' change invalidates snapshot before moving',()=>{const a=snapshot(),b=clone(a);a[key]=1;b[key]=2;assert(!sameSnapshot(a,b));});
+check('same labels swapping stable identities invalidate snapshot',()=>{const a={...snapshot(),identityVersion:1,icons:[{identity:'a',label:'same',x:0,y:0},{identity:'b',label:'same',x:100,y:0}]},b=clone(a);b.icons[0].identity='b';b.icons[1].identity='a';assert(!sameSnapshot(a,b));});
+check('identity stable label-only change does not move an icon',()=>{const a={...snapshot(),identityVersion:1,icons:[{identity:'a',label:'old',x:0,y:0}]},b=clone(a);b.icons[0].label='new';assert(sameSnapshot(a,b));});
+check('production snapshot missing identity is blocked',()=>{const s={...snapshot(),identityVersion:1};assert(!plan(s).ok);assert(!sameSnapshot(s,clone(s)));});
+check('production duplicate identities are blocked',()=>{const s={...snapshot(),identityVersion:1,icons:[{identity:'a',label:'x',x:0,y:0},{identity:'a',label:'y',x:100,y:0}]};assert(!plan(s).ok);assert(!sameSnapshot(s,clone(s)));});
+check('mixed identity snapshot cannot downgrade to label comparison',()=>{const a={...snapshot(),icons:[{identity:'a',label:'x',x:0,y:0}]},b=clone(a);delete b.icons[0].identity;assert(!sameSnapshot(a,b));});
+
+const pathSnapshot=()=>({...snapshot(),identityVersion:1,icons:[{identity:'existing',label:'shared',path:'C:\\Desktop\\shared.txt',x:0,y:0}]});
+const pathItem=(dest)=>[{path:'C:\\board\\shared.pdf',dest,name:'shared.pdf',offset:[0,0]}];
+check('same visible stem on different filesystem items is permitted',()=>assert(plan(pathSnapshot(),pathItem('C:\\Desktop\\shared.pdf')).ok));
+check('same actual destination is blocked despite a different display label',()=>{const s=pathSnapshot();s.icons[0].label='different';assert.equal(plan(s,pathItem('C:\\Desktop\\shared.txt')).reason,'destination-already-visible');});
+check('destination comparison normalizes case and dot segments',()=>assert(!plan(pathSnapshot(),pathItem('c:/desktop/./SHARED.txt')).ok));
+check('source path does not cause a false destination collision',()=>{const s=pathSnapshot();s.icons[0].path='C:\\board\\shared.pdf';assert(plan(s,pathItem('C:\\Desktop\\shared.pdf')).ok);});
+check('virtual item display label does not collide with new file',()=>{const s=pathSnapshot();s.icons[0].path=null;s.icons[0].label='shared.pdf';assert(plan(s,pathItem('C:\\Desktop\\shared.pdf')).ok);});
+check('normalized duplicate destinations are blocked',()=>assert(!plan(pathSnapshot(),[{path:'C:\\a',dest:'C:\\Desktop\\new',name:'a',offset:[0,0]},{path:'C:\\b',dest:'c:/desktop/NEW',name:'b',offset:[1,0]}]).ok));
+
 async function transactions() {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-safe-unit-'));
   try {

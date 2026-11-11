@@ -470,6 +470,76 @@ public static class OkibaFolderView {
   }
  }
  // [0] FOLDERFLAGS, [1] GetAutoArrange (0=OFF,1=ON).
+// Strict snapshots use Shell PIDL identities, never label-only fallback.
+ [ComImport,Guid("000214f2-0000-0000-c000-000000000046"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+ interface IEnumIDListRead {
+  [PreserveSig] int Next(uint count,IntPtr array,out uint fetched);
+  [PreserveSig] int Skip(uint count);
+  [PreserveSig] int Reset();
+  [PreserveSig] int Clone(out IntPtr copy);
+ }
+ [DllImport("shell32.dll")] static extern uint ILGetSize(IntPtr pidl);
+ static readonly System.Collections.Generic.Dictionary<string,string> ReadNameCache=new System.Collections.Generic.Dictionary<string,string>(StringComparer.Ordinal);
+ static readonly System.Collections.Generic.Dictionary<string,string> ReadPathCache=new System.Collections.Generic.Dictionary<string,string>(StringComparer.Ordinal);
+ static string ReadCacheGeneration=null;
+ public static void ClearReadNameCache(){ReadNameCache.Clear();ReadPathCache.Clear();}
+ public sealed class ShellReadRow {public string label;public int x;public int y;public string identity;public string path;public int index;}
+ static string PidlKey(IntPtr p){uint size=ILGetSize(p);if(size<2||size>65536)throw new InvalidOperationException("bad-pidl-size");byte[] bytes=new byte[size];Marshal.Copy(p,bytes,0,(int)size);return Convert.ToBase64String(bytes);}
+ static IntPtr[] EnumerateRead(IFolderView2 view){
+  Guid iid=typeof(IEnumIDListRead).GUID;IntPtr ptr=IntPtr.Zero,array=IntPtr.Zero;object obj=null;
+  var result=new System.Collections.Generic.List<IntPtr>();
+  try {
+   Marshal.ThrowExceptionForHR(view.Items(0x80000002u,ref iid,out ptr));obj=Marshal.GetObjectForIUnknown(ptr);array=Marshal.AllocCoTaskMem(256*IntPtr.Size);
+   while(true){uint fetched;int hr=((IEnumIDListRead)obj).Next(256,array,out fetched);Marshal.ThrowExceptionForHR(hr);if(fetched>256)throw new InvalidOperationException("bad-enum-count");for(int i=0;i<fetched;i++)result.Add(Marshal.ReadIntPtr(array,i*IntPtr.Size));if(result.Count>10000)throw new InvalidOperationException("too-many-items");if(hr==1||fetched==0)break;}
+   return result.ToArray();
+  }catch{foreach(var p in result)Marshal.FreeCoTaskMem(p);throw;}
+  finally{if(array!=IntPtr.Zero)Marshal.FreeCoTaskMem(array);if(obj!=null&&Marshal.IsComObject(obj))Marshal.ReleaseComObject(obj);if(ptr!=IntPtr.Zero)Marshal.Release(ptr);}
+ }
+ static IntPtr FindChildByIdentity(IFolderView2 view,string identity){
+  IntPtr[] children=EnumerateRead(view);IntPtr found=IntPtr.Zero;
+  try {
+   foreach(var child in children)if(String.Equals(PidlKey(child),identity,StringComparison.Ordinal)){
+    if(found!=IntPtr.Zero)throw new InvalidOperationException("duplicate-shell-identity");found=child;
+   }
+   if(found==IntPtr.Zero)throw new InvalidOperationException("shell-item-identity-missing");
+   return found;
+  }catch{found=IntPtr.Zero;throw;}
+  finally{foreach(var child in children)if(child!=found)Marshal.FreeCoTaskMem(child);}
+ }
+ public static int[] ReadIdentityPosition(string identity){
+  using(var s=new Session()){
+   IntPtr child=IntPtr.Zero,point=IntPtr.Zero;
+   try{child=FindChildByIdentity(s.Folder,identity);point=Marshal.AllocCoTaskMem(8);Marshal.ThrowExceptionForHR(s.Folder.GetItemPosition(child,point));return new int[]{Marshal.ReadInt32(point,0),Marshal.ReadInt32(point,4)};}
+   finally{if(point!=IntPtr.Zero)Marshal.FreeCoTaskMem(point);if(child!=IntPtr.Zero)Marshal.FreeCoTaskMem(child);}
+  }
+ }
+ static string ReadDisplayLabel(IFolderView2 view,IntPtr child){
+  Guid fid=new Guid("000214e6-0000-0000-c000-000000000046"),iid=typeof(IShellItem).GUID;IntPtr folder=IntPtr.Zero,item=IntPtr.Zero,name=IntPtr.Zero;object obj=null;
+  try{Marshal.ThrowExceptionForHR(view.GetFolder(ref fid,out folder));Marshal.ThrowExceptionForHR(SHCreateItemWithParent(IntPtr.Zero,folder,child,ref iid,out item));obj=Marshal.GetObjectForIUnknown(item);Marshal.ThrowExceptionForHR(((IShellItem)obj).GetDisplayName(0,out name));return Marshal.PtrToStringUni(name);}
+  finally{if(name!=IntPtr.Zero)Marshal.FreeCoTaskMem(name);if(obj!=null&&Marshal.IsComObject(obj))Marshal.ReleaseComObject(obj);if(item!=IntPtr.Zero)Marshal.Release(item);if(folder!=IntPtr.Zero)Marshal.Release(folder);}
+ }
+ public static ShellReadRow[] ReadShellBatch(string generation=""){
+  // Explorer/view restart and display-name preference changes invalidate names.
+  string context=generation+"|"+Convert.ToString(Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced","HideFileExt",null));
+  if(!String.Equals(context,ReadCacheGeneration,StringComparison.Ordinal)){ClearReadNameCache();ReadCacheGeneration=context;}
+  using(var s=new Session()){
+   IntPtr[] first=null,second=null;IntPtr point=IntPtr.Zero;
+   try {
+    first=EnumerateRead(s.Folder);var seen=new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);var rows=new ShellReadRow[first.Length];point=Marshal.AllocCoTaskMem(8);
+    for(int i=0;i<first.Length;i++){
+     string key=PidlKey(first[i]),label; if(!seen.Add(key))throw new InvalidOperationException("duplicate-shell-identity");
+     if(!ReadNameCache.TryGetValue(key,out label)){label=ReadDisplayLabel(s.Folder,first[i]);if(String.IsNullOrEmpty(label))throw new InvalidOperationException("empty-label");string filePath=null;try{filePath=GetItemFilePath(s.Folder,first[i]);}catch(COMException){}catch(ArgumentException){} ReadPathCache[key]=filePath;ReadNameCache[key]=label;}
+     Marshal.ThrowExceptionForHR(s.Folder.GetItemPosition(first[i],point));rows[i]=new ShellReadRow{identity=key,label=label,path=ReadPathCache[key],index=i,x=Marshal.ReadInt32(point,0),y=Marshal.ReadInt32(point,4)};
+    }
+    second=EnumerateRead(s.Folder);if(first.Length!=second.Length)throw new InvalidOperationException("item-count-changed");
+    for(int i=0;i<second.Length;i++)if(rows[i].identity!=PidlKey(second[i]))throw new InvalidOperationException("pidl-order-changed");
+    var expired=new System.Collections.Generic.List<string>();foreach(var key in ReadNameCache.Keys)if(!seen.Contains(key))expired.Add(key);
+    foreach(var key in expired){ReadNameCache.Remove(key);ReadPathCache.Remove(key);}
+    if(ReadNameCache.Count>10000)ClearReadNameCache();return rows;
+   }finally{if(point!=IntPtr.Zero)Marshal.FreeCoTaskMem(point);if(first!=null)foreach(var p in first)Marshal.FreeCoTaskMem(p);if(second!=null)foreach(var p in second)Marshal.FreeCoTaskMem(p);}
+  }
+ }
+
  public static long[] ReadState(){using(var s=new Session()){
   uint flags;Marshal.ThrowExceptionForHR(s.Folder.GetCurrentFolderFlags(out flags));
   int hr=s.Folder.GetAutoArrange();
@@ -478,14 +548,16 @@ public static class OkibaFolderView {
  }}
  // Strict path only: persist placement through the Shell view, not merely
  // its underlying ListView. PIDL identity and old coordinates must match.
- public static void PositionNewItem(int index,string expectedPath,int oldX,int oldY,int x,int y) {
+ public static void PositionNewItem(int index,string expectedPath,int oldX,int oldY,int x,int y,string expectedIdentity=null) {
   using(var s=new Session()) {
    uint flags;Marshal.ThrowExceptionForHR(s.Folder.GetCurrentFolderFlags(out flags));
    if(s.Folder.GetAutoArrange()!=1||(flags&1)!=0||(flags&4)==0)throw new InvalidOperationException("unsafe-shell-state");
    IntPtr child=IntPtr.Zero,point=IntPtr.Zero,array=IntPtr.Zero;
    try {
-    Marshal.ThrowExceptionForHR(s.Folder.Item(index,out child));
+    if(expectedIdentity!=null)child=FindChildByIdentity(s.Folder,expectedIdentity);
+    else Marshal.ThrowExceptionForHR(s.Folder.Item(index,out child));
     if(child==IntPtr.Zero)throw new InvalidOperationException("missing-shell-item");
+    if(expectedIdentity!=null&&!String.Equals(PidlKey(child),expectedIdentity,StringComparison.Ordinal))throw new InvalidOperationException("shell-item-identity-changed");
     string actual=GetItemFilePath(s.Folder,child);
     if(String.IsNullOrEmpty(actual)||!String.Equals(System.IO.Path.GetFullPath(actual),System.IO.Path.GetFullPath(expectedPath),StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("shell-item-path-mismatch");
     point=Marshal.AllocCoTaskMem(8);
@@ -500,6 +572,37 @@ public static class OkibaFolderView {
     if(point!=IntPtr.Zero)Marshal.FreeCoTaskMem(point);
     if(child!=IntPtr.Zero)Marshal.FreeCoTaskMem(child);
    }
+  }
+ }
+ // Free-wave batch: all identities/paths/old positions are checked BEFORE any set.
+ public static void PositionNewItems(string[] identities,string[] paths,int[] oldX,int[] oldY,int[] newX,int[] newY) {
+  int count=identities==null?0:identities.Length;
+  if(count<1||count>10000||paths==null||oldX==null||oldY==null||newX==null||newY==null||paths.Length!=count||oldX.Length!=count||oldY.Length!=count||newX.Length!=count||newY.Length!=count)throw new ArgumentException("invalid-batch");
+  using(var s=new Session()) {
+   IntPtr[] children=null;IntPtr array=IntPtr.Zero,points=IntPtr.Zero,point=IntPtr.Zero;
+   try {
+    uint flags;Marshal.ThrowExceptionForHR(s.Folder.GetCurrentFolderFlags(out flags));
+    if(s.Folder.GetAutoArrange()!=1||(flags&1)!=0||(flags&4)==0)throw new InvalidOperationException("unsafe-shell-state");
+    children=EnumerateRead(s.Folder);
+    var byId=new System.Collections.Generic.Dictionary<string,IntPtr>(StringComparer.Ordinal);
+    foreach(var child in children){string key=PidlKey(child);if(byId.ContainsKey(key))throw new InvalidOperationException("duplicate-shell-identity");byId.Add(key,child);}
+    var chosen=new IntPtr[count];var seen=new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);var cells=new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+    point=Marshal.AllocCoTaskMem(8);
+    for(int i=0;i<count;i++) {
+     if(String.IsNullOrEmpty(identities[i])||!seen.Add(identities[i])||!byId.TryGetValue(identities[i],out chosen[i]))throw new InvalidOperationException("batch-identity-mismatch");
+     string actual=GetItemFilePath(s.Folder,chosen[i]);
+     if(String.IsNullOrEmpty(actual)||!String.Equals(System.IO.Path.GetFullPath(actual),System.IO.Path.GetFullPath(paths[i]),StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("batch-path-mismatch");
+     Marshal.ThrowExceptionForHR(s.Folder.GetItemPosition(chosen[i],point));
+     if(Marshal.ReadInt32(point,0)!=oldX[i]||Marshal.ReadInt32(point,4)!=oldY[i])throw new InvalidOperationException("batch-position-changed");
+     if(!cells.Add(newX[i].ToString(System.Globalization.CultureInfo.InvariantCulture)+","+newY[i].ToString(System.Globalization.CultureInfo.InvariantCulture)))throw new InvalidOperationException("batch-destination-overlap");
+    }
+    array=Marshal.AllocCoTaskMem(IntPtr.Size*count);points=Marshal.AllocCoTaskMem(8*count);
+    for(int i=0;i<count;i++){Marshal.WriteIntPtr(array,i*IntPtr.Size,chosen[i]);Marshal.WriteInt32(points,i*8,newX[i]);Marshal.WriteInt32(points,i*8+4,newY[i]);}
+    Marshal.ThrowExceptionForHR(s.Folder.GetCurrentFolderFlags(out flags));
+    if(s.Folder.GetAutoArrange()!=1||(flags&1)!=0||(flags&4)==0)throw new InvalidOperationException("unsafe-shell-state");
+    // Not assumed atomic. Caller keeps metadata/originals and verifies every old icon.
+    Marshal.ThrowExceptionForHR(s.Folder.SelectAndPositionItems((uint)count,array,points,0x80));
+   }finally{if(point!=IntPtr.Zero)Marshal.FreeCoTaskMem(point);if(points!=IntPtr.Zero)Marshal.FreeCoTaskMem(points);if(array!=IntPtr.Zero)Marshal.FreeCoTaskMem(array);if(children!=null)foreach(var child in children)Marshal.FreeCoTaskMem(child);}
   }
  }
  // Never exposed through the normal helper protocol. Hosted CI only.
@@ -807,16 +910,13 @@ function Get-RawStrictDesktopSnapshot {
     $sx = [OkibaDesk]::GetSpacingX($lv); $sy = [OkibaDesk]::GetSpacingY($lv)
     if ($sx -le 0 -or $sy -le 0) { return @{ok=$false;reason='unknown-spacing'} }
     $viewDpi=[int][OkibaWin32]::GetDpiForWindow($lv)
-    $count = [OkibaDesk]::GetItemCount($lv)
+    $explorerProcess=[uint32]0;[void][OkibaDesk]::GetWindowThreadProcessId($lv,[ref]$explorerProcess)
+    $explorerStarted=[Diagnostics.Process]::GetProcessById([int]$explorerProcess).StartTime.ToUniversalTime().Ticks.ToString()
+    $generation=('{0}:{1}:{2}' -f $explorerProcess,$explorerStarted,$lv.ToInt64())
+    try {$shellIcons=[OkibaFolderView]::ReadShellBatch($generation)}catch{return @{ok=$false;reason='shell-snapshot-error';detail=$_.Exception.Message}}
+    $count=@($shellIcons).Count
     $icons = New-Object 'System.Collections.Generic.List[object]'
-    for ($i=0; $i -lt $count; $i++) {
-      $label = $reader.GetText($i); $pos = $reader.GetPosition($i)
-      $labelAfter = $reader.GetText($i)
-      if ($label -cne $labelAfter) { return @{ok=$false;reason='desktop-changing';detail='index-label-changed'} }
-      if ([string]::IsNullOrEmpty($label) -or $null -eq $pos) { return @{ok=$false;reason='unreadable-icon'} }
-      $icons.Add(@{label=$label;x=[int]$pos[0];y=[int]$pos[1];index=$i})
-    }
-    if ([OkibaDesk]::GetItemCount($lv) -ne $count) { return @{ok=$false;reason='desktop-changing'} }
+    foreach($item in $shellIcons){$icons.Add(@{label=$item.label;x=$item.x;y=$item.y;index=$item.index;identity=$item.identity;path=$item.path})}
     $grid = [OkibaDesk]::ReadGridOrigin($reader,$count,$sx,$sy,[int[]]@())
     $origin = [OkibaDesk]::ToClient($lv,0,0)
     $areas = @([OkibaWin32]::MonitorAreas() | ForEach-Object {
@@ -828,9 +928,7 @@ function Get-RawStrictDesktopSnapshot {
       @{left=[int]$tl[0];top=[int]$tl[1];right=[int]$br[0];bottom=[int]$br[1];grid=$areaGrid;scale=[int]$r[6];monitorOrigin=@{x=$monitorOrigin[0];y=$monitorOrigin[1]}}
     })
     if ($areas.Count -eq 0) { return @{ok=$false;reason='unknown-monitors'} }
-    $explorerProcess=[uint32]0;[void][OkibaDesk]::GetWindowThreadProcessId($lv,[ref]$explorerProcess)
-    $explorerStarted=[Diagnostics.Process]::GetProcessById([int]$explorerProcess).StartTime.ToUniversalTime().Ticks.ToString()
-    $snapshot=@{ok=$true;explorerPid=$explorerProcess;explorerStarted=$explorerStarted;listviewHwnd=$lv.ToInt64();autoArrange=($shellState[1] -ne 0 -or ($shellState[0] -band 1) -ne 0 -or ([OkibaDesk]::GetWindowLong($lv,-16) -band 0x0100) -ne 0);
+    $snapshot=@{ok=$true;identityVersion=1;explorerPid=$explorerProcess;explorerStarted=$explorerStarted;listviewHwnd=$lv.ToInt64();autoArrange=($shellState[1] -ne 0 -or ($shellState[0] -band 1) -ne 0 -or ([OkibaDesk]::GetWindowLong($lv,-16) -band 0x0100) -ne 0);
       snap=(($shellState[0] -band 4) -ne 0);viewDpi=$viewDpi;folderFlags=$shellState[0];shellAutoArrange=($shellState[1] -ne 0);sx=$sx;sy=$sy;gx=$grid[0];gy=$grid[1];
       origin=@{x=$origin[0];y=$origin[1]};areas=$areas;icons=@($icons.ToArray())}
     $physicalKey=Strict-GeometryKey $snapshot
@@ -848,7 +946,10 @@ function Get-RawStrictDesktopSnapshot {
     return $snapshot
   } finally { $reader.Dispose() }
 }
-function Strict-IconKey($i) { return (@([string]$i.label,[int]$i.x,[int]$i.y) | ConvertTo-Json -Compress) }
+function Strict-IconKey($i) {
+  if([string]::IsNullOrEmpty([string]$i.identity)){throw 'missing-icon-identity'}
+  return (@([string]$i.identity,[int]$i.x,[int]$i.y) | ConvertTo-Json -Compress)
+}
 function Strict-GeometryKey($s) {
   $areas=@($s.areas | ForEach-Object { @([int]$_.left,[int]$_.top,[int]$_.right,[int]$_.bottom,$_.scale,$_.monitorOrigin) })
   return (@($s.explorerPid,$s.explorerStarted,$s.listviewHwnd,$s.folderFlags,[bool]$s.autoArrange,[bool]$s.snap,[int]$s.sx,[int]$s.sy,[int]$s.viewDpi,[int]$s.origin.x,[int]$s.origin.y,$areas) | ConvertTo-Json -Compress -Depth 8)
@@ -894,31 +995,36 @@ function Strict-Overlap($a,$b,$s) {
 }
 function Strict-Near($a,$b) { return [Math]::Abs($a.x-$b.x) -le 1 -and [Math]::Abs($a.y-$b.y) -le 1 }
 function Get-StrictTransactionState($baseline,$current,$targets) {
-  if (-not $current.ok -or (Strict-GeometryKey $baseline) -cne (Strict-GeometryKey $current)) { return @{ok=$false;reason='desktop-changed'} }
-  $old=New-Object 'System.Collections.Generic.Dictionary[string,int]' ([StringComparer]::Ordinal)
-  foreach($i in $baseline.icons) { $k=Strict-IconKey $i; if($old.ContainsKey($k)){$old[$k]++}else{$old[$k]=1} }
-  $extra=New-Object 'System.Collections.Generic.List[object]'
-  foreach($i in $current.icons) {
-    $k=Strict-IconKey $i
-    if($old.ContainsKey($k) -and $old[$k] -gt 0){$old[$k]--}else{$extra.Add($i)}
+  if(-not $current.ok -or (Strict-GeometryKey $baseline) -cne (Strict-GeometryKey $current)){return @{ok=$false;reason='desktop-changed'}}
+  foreach($snapshot in @($baseline,$current)){
+    $seen=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach($i in $snapshot.icons){if([string]::IsNullOrEmpty([string]$i.identity) -or -not $seen.Add([string]$i.identity)){return @{ok=$false;reason='missing-or-duplicate-icon-identity'}}}
   }
-  foreach($key in $old.Keys){if($old[$key] -ne 0){
-    $missing=$key | ConvertFrom-Json
-    $actual=@($current.icons | Where-Object {$_.label -ceq [string]$missing[0]} | ForEach-Object {@{x=$_.x;y=$_.y}})
-    return @{ok=$false;reason='existing-icon-changed';changed=@{label=$missing[0];before=@{x=$missing[1];y=$missing[2]};after=$actual}}
-  }}
+  $old=New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+  foreach($i in $baseline.icons){$old[[string]$i.identity]=$i}
+  $extra=New-Object 'System.Collections.Generic.List[object]'
+  foreach($i in $current.icons){
+    if($old.ContainsKey([string]$i.identity)){
+      $before=$old[[string]$i.identity]
+      if($before.x -ne $i.x -or $before.y -ne $i.y){return @{ok=$false;reason='existing-icon-changed';changed=@{identity=$i.identity;label=$before.label;before=@{x=$before.x;y=$before.y};after=@(@{x=$i.x;y=$i.y})}}}
+      $old.Remove([string]$i.identity)|Out-Null
+    }else{$extra.Add($i)}
+  }
+  if($old.Count -gt 0){$missing=@($old.Values)[0];return @{ok=$false;reason='existing-icon-changed';changed=@{identity=$missing.identity;label=$missing.label;before=@{x=$missing.x;y=$missing.y};after=@()}}}
   $new=@{}
-  foreach($i in $extra) {
+  foreach($i in $extra){
+    if([string]::IsNullOrEmpty([string]$i.path)){return @{ok=$false;reason='unidentified-new-icon'}}
     $matches=@()
-    for($n=0;$n -lt $targets.Count;$n++) {
-      $name=[string]$targets[$n].name; $stem=[IO.Path]::GetFileNameWithoutExtension($name)
-      if($i.label -ceq $name -or ($stem -and $i.label -ceq $stem)){$matches+= $n}
+    for($n=0;$n -lt $targets.Count;$n++){
+      try{$actual=[IO.Path]::GetFullPath([string]$i.path);$expected=[IO.Path]::GetFullPath([string]$targets[$n].path)}catch{return @{ok=$false;reason='invalid-target-path'}}
+      if([string]::Equals($actual,$expected,[StringComparison]::OrdinalIgnoreCase)){$matches+=$n}
     }
-    if($matches.Count -ne 1 -or $new.ContainsKey([int]$matches[0])) {return @{ok=$false;reason='ambiguous-new-icon'}}
+    if($matches.Count -ne 1 -or $new.ContainsKey([int]$matches[0])){return @{ok=$false;reason='ambiguous-new-icon'}}
     $new[[int]$matches[0]]=$i
   }
   return @{ok=$true;new=$new;current=$current}
 }
+
 # One transaction-local proof only. Never persist calibration from another
 # desktop state, and never accept caller-supplied grid without measured proof.
 $script:DesktopCalibration=$null
@@ -989,7 +1095,7 @@ function Calibrate-DesktopGrid($baseline,$probe,$plan) {
       }
       $i=$fresh.new[0]
       if($clock.ElapsedMilliseconds -ge 90000){return @{ok=$false;reason='calibration-deadline'}}
-      [OkibaFolderView]::PositionNewItem([int]$i.index,$dest,[int]$i.x,[int]$i.y,[int]$q.x,[int]$q.y)
+      [OkibaFolderView]::PositionNewItem([int]$i.index,$dest,[int]$i.x,[int]$i.y,[int]$q.x,[int]$q.y,[string]$i.identity)
       $after=Wait-CalibrationSettled $baseline $probe $patch $clock
       if(-not $after.ok){$after.phase='calibration-after';$after.sampleId=$q.id;$after.axis=$q.axis;$after.pass=$q.pass;$after.elapsedMs=$clock.ElapsedMilliseconds;return $after}
       if($after.new.Count -ne 1){return @{ok=$false;reason='calibration-probe-disappeared'}}
@@ -1049,6 +1155,21 @@ function Export-DesktopCalibration {
     return @{ok=$true;version=1;entries=$entries}
   }catch{return @{ok=$false;reason='calibration-cache-unavailable'}}
 }
+# Pure free-wave selection. Never assume a multi-item Shell call resolves cycles.
+function Get-StrictFreeWave($state,$targets,$unfinished,$buffer,$baseline) {
+  $wave=New-Object 'System.Collections.Generic.List[object]'
+  foreach($n in $unfinished){
+    $free=$true
+    foreach($k in $state.new.Keys){if($k -ne $n -and (Strict-Overlap $targets[$n] $state.new[$k] $baseline)){$free=$false;break}}
+    if($free){$wave.Add(@{index=[int]$n;destination=$targets[$n]})}
+  }
+  if($wave.Count -eq 0){
+    foreach($k in $state.new.Keys){if(Strict-Overlap $buffer $state.new[$k] $baseline){return @{ok=$false;reason='buffer-occupied'}}}
+    if(@($unfinished).Count -eq 0){return @{ok=$false;reason='empty-wave'}}
+    $wave.Add(@{index=[int]$unfinished[0];destination=$buffer})
+  }
+  return @{ok=$true;items=@($wave.ToArray())}
+}
 function Position-DesktopPlan($baseline,$targets,$buffer,$calibration=$null) {
   $operation=[System.Diagnostics.Stopwatch]::StartNew()
   $targets=@($targets)
@@ -1078,8 +1199,8 @@ function Position-DesktopPlan($baseline,$targets,$buffer,$calibration=$null) {
     $p=$all[$n]
     if(-not (Strict-PointValid $p) -or -not (Strict-PointInside $p $baseline)) {return @{ok=$false;reason='outside-desktop'}}
     if((($p.x-$selectedGrid.gx)%$selectedGrid.sx) -ne 0 -or (($p.y-$selectedGrid.gy)%$selectedGrid.sy) -ne 0) {return @{ok=$false;reason='off-grid'}}
-    foreach($old in $baseline.icons){if(Strict-Overlap $p $old $baseline){return @{ok=$false;reason='occupied'}}}
-    for($j=0;$j -lt $n;$j++){if(Strict-Overlap $p $all[$j] $baseline){return @{ok=$false;reason='overlapping-plan'}}}
+    foreach($old in $baseline.icons){if(Strict-Overlap $p $old $selectedGrid){return @{ok=$false;reason='occupied'}}}
+    for($j=0;$j -lt $n;$j++){if(Strict-Overlap $p $all[$j] $selectedGrid){return @{ok=$false;reason='overlapping-plan'}}}
   }
   for($n=0;$n -lt $targets.Count;$n++) {
     $name=[string]$targets[$n].name
@@ -1089,8 +1210,7 @@ function Position-DesktopPlan($baseline,$targets,$buffer,$calibration=$null) {
       $desktop=[IO.Path]::GetFullPath([Environment]::GetFolderPath('DesktopDirectory')).TrimEnd('\')
       if([IO.Path]::GetDirectoryName($dest).TrimEnd('\') -ine $desktop -or [IO.Path]::GetFileName($dest) -cne $name -or -not (Test-Path -LiteralPath $dest)) {return @{ok=$false;reason='invalid-destination'}}
     } catch {return @{ok=$false;reason='invalid-destination'}}
-    $stem=[IO.Path]::GetFileNameWithoutExtension($name)
-    foreach($old in $baseline.icons){if($old.label -ieq $name -or $old.label -ieq $stem){return @{ok=$false;reason='ambiguous-name'}}}
+    foreach($old in $baseline.icons){if(-not [string]::IsNullOrEmpty([string]$old.path) -and [string]::Equals([IO.Path]::GetFullPath([string]$old.path),$dest,[StringComparison]::OrdinalIgnoreCase)){return @{ok=$false;reason='destination-already-visible'}}}
     for($j=0;$j -lt $n;$j++){if($targets[$j].name -ieq $name){return @{ok=$false;reason='duplicate-name'}}}
   }
   try {
@@ -1113,6 +1233,7 @@ function Position-DesktopPlan($baseline,$targets,$buffer,$calibration=$null) {
       $pn=@(0..($targets.Count-1)|Where-Object {$targets[$_].path -ieq $proof.probePath})[0]
       if(-not (Strict-Near $state.new[$pn] $proof.probePosition)){return @{ok=$false;reason='calibration-probe-changed'}}
     }
+    $batchSizes=New-Object 'System.Collections.Generic.List[int]'
     $maxSteps=$targets.Count*3+3
     for($step=0;$step -lt $maxSteps;$step++) {
       if($operation.ElapsedMilliseconds -ge 50000){return @{ok=$false;reason='position-deadline'}}
@@ -1124,40 +1245,38 @@ function Position-DesktopPlan($baseline,$targets,$buffer,$calibration=$null) {
         if($last.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed';phase='final'}}
         foreach($n in 0..($targets.Count-1)){if(-not (Strict-Near $last.new[$n] $targets[$n])){return @{ok=$false;reason='late-position-change'}}}
         if($null -ne $proof){$cacheNow=[DateTime]::UtcNow;$script:CalibratedDesktopGrids[[int]$proof.areaIndex]=@{areaIndex=[int]$proof.areaIndex;geometry=(Strict-GeometryKey $last.current);grid=$calibration.grid;proof=@{samples=$proof.samples;maxSpacing=$proof.maxSpacing};createdUtc=$cacheNow.ToString("o");expiresUtc=$cacheNow.AddHours(24).ToString("o")}}
-        return @{ok=$true;positioned=$targets.Count;reason=''}
+        return @{ok=$true;positioned=$targets.Count;reason='';batchSizes=@($batchSizes.ToArray())}
       }
-      $chosen=-1; $destination=$null
-      foreach($n in $unfinished) {
-        $free=$true
-        foreach($k in $state.new.Keys){if($k -ne $n -and (Strict-Overlap $targets[$n] $state.new[$k] $baseline)){$free=$false;break}}
-        if($free){$chosen=$n;$destination=$targets[$n];break}
-      }
-      if($chosen -lt 0) {
-        foreach($k in $state.new.Keys){if(Strict-Overlap $buffer $state.new[$k] $baseline){return @{ok=$false;reason='buffer-occupied'}}}
-        $chosen=[int]$unfinished[0];$destination=$buffer
-      }
+      $wave=Get-StrictFreeWave $state $targets $unfinished $buffer $selectedGrid
+      if(-not $wave.ok){return $wave}
       # Revalidate immediately before each write, including every new icon's
       # exact current location. A user move aborts, it is never overwritten.
       $fresh=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) $targets
       if(-not $fresh.ok){$fresh.phase='before-set';return $fresh}
       if($fresh.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed';phase='before-set'}}
-      foreach($k in $state.new.Keys){if(-not (Strict-Near $fresh.new[$k] $state.new[$k])){return @{ok=$false;reason='new-icon-changed'}}}
+      foreach($k in $state.new.Keys){if($fresh.new[$k].identity -cne $state.new[$k].identity -or -not (Strict-Near $fresh.new[$k] $state.new[$k])){return @{ok=$false;reason='new-icon-changed'}}}
       $lv=Find-BestListView
       if($lv -eq [IntPtr]::Zero){return @{ok=$false;reason='no-listview'}}
-      $guard=New-Object OkibaDesk+Reader -ArgumentList $lv
-      try {
-        $index=[int]$fresh.new[$chosen].index
-        $label=$guard.GetText($index);$pos=$guard.GetPosition($index)
-        if([OkibaDesk]::GetItemCount($lv) -ne @($fresh.current.icons).Count -or $label -cne $fresh.new[$chosen].label -or $null -eq $pos -or $pos[0] -ne $fresh.new[$chosen].x -or $pos[1] -ne $fresh.new[$chosen].y) {return @{ok=$false;reason='desktop-changed-before-write'}}
-        if($operation.ElapsedMilliseconds -ge 50000){return @{ok=$false;reason='position-deadline'}}
-        [OkibaFolderView]::PositionNewItem($index,[string]$targets[$chosen].path,[int]$pos[0],[int]$pos[1],[int]$destination.x,[int]$destination.y)
-      } finally {$guard.Dispose()}
+      $ids=@();$paths=@();$oldX=@();$oldY=@();$newX=@();$newY=@();$waveIndexes=@{}
+      foreach($entry in $wave.items){
+        $n=[int]$entry.index;$item=$fresh.new[$n]
+        if([string]::IsNullOrEmpty([string]$item.identity)){return @{ok=$false;reason='missing-icon-identity'}}
+        $ids+=[string]$item.identity;$paths+=[string]$targets[$n].path;$oldX+=[int]$item.x;$oldY+=[int]$item.y;$newX+=[int]$entry.destination.x;$newY+=[int]$entry.destination.y;$waveIndexes[$n]=$true
+      }
+      if($operation.ElapsedMilliseconds -ge 50000){return @{ok=$false;reason='position-deadline'}}
+      try {[OkibaFolderView]::PositionNewItems([string[]]$ids,[string[]]$paths,[int[]]$oldX,[int[]]$oldY,[int[]]$newX,[int[]]$newY)} catch {
+        $failed=@{ok=$false;reason='batch-call-failed';phase='batch-call-failed';partialPossible=$true;detail=$_.Exception.Message}
+        try {$diagnostic=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) $targets;$failed.afterState=$diagnostic;if($null -ne $diagnostic.changed){$failed.changed=$diagnostic.changed}}catch{$failed.afterState=@{ok=$false;reason='diagnostic-unavailable'}}
+        return $failed
+      }
+      $batchSizes.Add($ids.Count)
       Start-Sleep -Milliseconds 180
       $after=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) $targets
-      if(-not $after.ok){$after.phase='after-set';$after.movedName=$targets[$chosen].name;return $after}
-      if($after.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed';phase='after-set'}}
-      if(-not (Strict-Near $after.new[$chosen] $destination)){return @{ok=$false;reason='position-unverified'}}
-      foreach($k in $fresh.new.Keys){if($k -ne $chosen -and -not (Strict-Near $fresh.new[$k] $after.new[$k])){return @{ok=$false;reason='other-new-icon-changed'}}}
+      if(-not $after.ok){$after.phase='after-batch';$after.batchCount=$wave.items.Count;return $after}
+      if($after.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed';phase='after-batch'}}
+      foreach($k in $fresh.new.Keys){if($fresh.new[$k].identity -cne $after.new[$k].identity){return @{ok=$false;reason='new-icon-identity-changed'}}}
+      foreach($entry in $wave.items){if(-not (Strict-Near $after.new[[int]$entry.index] $entry.destination)){return @{ok=$false;reason='position-unverified';phase='after-batch'}}}
+      foreach($k in $fresh.new.Keys){if(-not $waveIndexes.ContainsKey([int]$k) -and -not (Strict-Near $fresh.new[$k] $after.new[$k])){return @{ok=$false;reason='other-new-icon-changed'}}}
       $state=$after
     }
     return @{ok=$false;reason='position-step-limit'}

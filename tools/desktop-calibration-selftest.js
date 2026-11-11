@@ -51,4 +51,11 @@ for(const pitches of [[78,98],[101,67],[151,100],[156,196]]){
  }
 }
 console.log('coarse sampling sweep: '+JSON.stringify({accepted,rejected,bad}));
+
+const strictIdentity={...snapshot,identityVersion:1,icons:[{label:'same',identity:'PIDL-A',x:-900,y:20},{label:'same',identity:'PIDL-B',x:-900,y:120}]};
+const strictPlan=planCalibration({...args,snapshot:strictIdentity});ok(strictPlan.ok,'two equal labels with distinct identities remain distinguishable');
+const swapped={...strictIdentity,icons:strictIdentity.icons.map(i=>({...i,identity:i.identity==='PIDL-A'?'PIDL-B':'PIDL-A'}))};
+const swapPlan=planCalibration({...args,snapshot:swapped});ok(strictPlan.iconsKey!==swapPlan.iconsKey,'same-label icons swapping positions changes identity fingerprint');
+ok(!planCalibration({...args,snapshot:{...strictIdentity,icons:strictIdentity.icons.map(i=>{const {identity,...rest}=i;return rest;})}}).ok,'production missing PIDL identities fails closed');
+ok(!planCalibration({...args,snapshot:{...strictIdentity,icons:strictIdentity.icons.map(i=>({...i,identity:'same-id'}))}}).ok,'duplicate PIDL identities fail closed');
 console.log('desktop calibration: '+n+' checks passed (pure model, NOT mixed-DPI Shell proof)');

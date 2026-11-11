@@ -35,6 +35,10 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "PowerShell script check failed for $f" }
           }
 
+      - name: PIDL identity and same-label swap pure safety checks
+        shell: pwsh
+        run: pwsh -NoProfile -File ./tools/desktop-identity-selftest.ps1
+
       - name: Per-monitor grid inference pure safety checks
         shell: pwsh
         run: pwsh -NoProfile -File ./tools/helper-grid-selftest.ps1

@@ -2,6 +2,7 @@ name: hidden-preposition
 on:
   push:
     paths:
+      - 'scripts/shell-helper.ps1'
       - 'tools/hidden-preposition-ci.ps1'
       - 'tools/hidden-preposition-ci.cs'
       - '.github/workflows/hidden-preposition.yml'
