@@ -13,10 +13,12 @@ const mh = require('./lib/movehistory');
 const cu = require('./lib/cleanup');
 const pr = require('./lib/preresolve');
 const dragCoords = require('./lib/dragcoords');
+const desktopPreviewPolicy = require('./lib/desktop-preview-policy');
+function leasePreview(){return desktopPreviewPolicy.enabled({isPackaged:app.isPackaged,platform:process.platform,env:process.env});}
 
 // Hidden-attribute runner for linked items (v2.0). Real attrib.exe
 // in production; OKIBA_TEST_ATTRIB=stub swaps in the counting stub.
-const attrib = ln.attribRunnerFromEnv();
+const attrib = leasePreview()?ln.createAttribRunner():ln.attribRunnerFromEnv();
 
 // ------------------------------------------------------------------ paths
 let BASE = null;
@@ -609,7 +611,7 @@ function registerIpc() {
   const leaseReceipt=require('./lib/desktop-commit-receipt');
   const residentSelection=require('./lib/desktop-resident-selection');
   let desktopLeaseClient=null,desktopLeasePending=false,desktopLeaseVerification=null;
-  function leaseOptIn(){return process.env.OKIBA_TEST_HOOKS==='1'&&process.env.OKIBA_TEST_SNAP_LEASE==='1';}
+  function leaseOptIn(){return leasePreview()||(process.env.OKIBA_TEST_HOOKS==='1'&&process.env.OKIBA_TEST_SNAP_LEASE==='1');}
   function pendingLeaseResult(reason){return {moved:[],destinations:[],skipped:[],failed:[],error:'配置処理の完了をまだ確認できません。素材の再移動はせず、このまま確認結果をお待ちください。',reason,pendingVerification:true,retrySafe:false,position:{status:'pending'}};}
   // BEGIN tested-desktop-lease-preflight
   async function desktopLeasePreflight(target,clientFactory=leaseClient) {
@@ -658,10 +660,10 @@ function registerIpc() {
       // which another watchdog has since finalized; never erase its journal.
       desktopLeaseClient=null;
     }
-    const fake=process.env.OKIBA_TEST_HELPER==='fake';
+    const fake=!leasePreview()&&process.env.OKIBA_TEST_HELPER==='fake';
     const hosted=process.env.GITHUB_ACTIONS==='true'&&process.env.RUNNER_OS==='Windows'&&process.env.RUNNER_ENVIRONMENT==='github-hosted';
-    if(!leaseOptIn()||(!fake&&!hosted))throw Error('lease-test-environment-required');
-    const helper=fake?{command:process.execPath,args:[path.join(__dirname,'tools','fake-helper.js')],env:{...process.env,ELECTRON_RUN_AS_NODE:'1'}}:{command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',bundledScriptPath('shell-helper.ps1')]};
+    if(!leaseOptIn()||(!leasePreview()&&!fake&&!hosted))throw Error('lease-test-environment-required');
+    const helper=fake?{command:process.execPath,args:[path.join(__dirname,'tools','fake-helper.js')],env:{...process.env,ELECTRON_RUN_AS_NODE:'1'}}:{command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',bundledScriptPath('shell-helper.ps1')],...(leasePreview()?{env:desktopPreviewPolicy.nativeEnv(process.env)}:{})};
     desktopLeaseClient=require('./lib/desktop-lease-client').createDesktopLeaseClient({journalDir:path.join(app.getPath('userData'),'desktop-lease-journals'),helper,owner:{pid:process.pid}});
     app.once('will-quit',()=>desktopLeaseClient?.disconnect());
     return desktopLeaseClient;
@@ -693,7 +695,7 @@ function registerIpc() {
 
   const {createCrossVolumeMove}=require('./lib/cross-volume-move');
   function desktopReturnDir(){
-    if(process.env.OKIBA_TEST_HOOKS==='1')return process.env.OKIBA_TEST_DESKTOP_DIR||process.env.OKIBA_SHORTCUT_DESKTOP||null;
+    if(!leasePreview()&&process.env.OKIBA_TEST_HOOKS==='1')return process.env.OKIBA_TEST_DESKTOP_DIR||process.env.OKIBA_SHORTCUT_DESKTOP||null;
     return shellDesktopDir()||bf.desktopDir();
   }
   let desktopBusy = false;
@@ -711,7 +713,7 @@ function registerIpc() {
     return {moved:[],skipped:[],failed:[],blocked:true,reason,recovery,error:message};
   }
   async function desktopSnapshot() {
-    if(process.env.OKIBA_TEST_HOOKS==='1' && process.env.OKIBA_TEST_POSITIONER==='stub') {
+    if(!leasePreview()&&process.env.OKIBA_TEST_HOOKS==='1' && process.env.OKIBA_TEST_POSITIONER==='stub') {
       if(process.env.OKIBA_TEST_DESKTOP_SNAPSHOT) return JSON.parse(process.env.OKIBA_TEST_DESKTOP_SNAPSHOT);
       return {ok:true,autoArrange:false,snap:true,sx:100,sy:100,gx:0,gy:0,origin:{x:0,y:0},
         areas:[{left:-1000,top:-1000,right:10000,bottom:10000}],icons:[]};
@@ -856,7 +858,7 @@ function registerIpc() {
       const point=payload.automatic?null:{x:Number(payload.screenX)+Number(snap.origin?.x),y:Number(payload.screenY)+Number(snap.origin?.y)};
       let plan=safeDesk.planDesktop({snapshot:snap,items:planned,point,automatic:!!payload.automatic});
       let calibrationPlan=null,calibrationEvidence=null;
-      if(!plan.ok&&(plan.reason==='unknown-desktop'||(payload.automatic&&plan.reason==='no-space'))) {
+      if(!leasePreview()&&!plan.ok&&(plan.reason==='unknown-desktop'||(payload.automatic&&plan.reason==='no-space'))) {
         const candidateAreas=(snap.areas||[]).map((area,index)=>({area,index})).filter(({area})=>Object.hasOwn(area,'grid')&&area.grid===null&&(payload.automatic||(point&&point.x>=area.left&&point.x<area.right&&point.y>=area.top&&point.y<area.bottom)));
         if(payload.automatic||candidateAreas.length===1)for(const {area,index} of candidateAreas) {
           const ratio=Number(area.scale)*96/(Number(snap.viewDpi)*100);
@@ -874,7 +876,7 @@ function registerIpc() {
       if(leaseOptIn()) {
         const first=plan.targets?.[0];
         const targetAreaIndex=(snap.areas||[]).findIndex(a=>first&&first.x>=a.left&&first.x<a.right&&first.y>=a.top&&first.y<a.bottom);
-        const residentCandidate=process.env.OKIBA_TEST_RESIDENT_LEASE==='1'&&!calibrationPlan&&planned.every(i=>!i.isLink&&!i.crossVolume&&!ln.samePath(i.path,i.dest));
+        const residentCandidate=(leasePreview()||process.env.OKIBA_TEST_RESIDENT_LEASE==='1')&&!calibrationPlan&&planned.every(i=>!i.isLink&&!i.crossVolume&&!ln.samePath(i.path,i.dest));
         const candidate={kind:residentCandidate?'resident-archive-samevolume':'samepath-hidden',desktop:target.path,items:planned.map(i=>({path:i.path,destination:i.dest,hidden:i.hidden,fileIdentity:String(i.identity.dev)+':'+String(i.identity.ino)})),snapshot:snap,targetAreaIndex,metadataPaths:[meta],targets:(plan.targets||[]).map(t=>({...t,path:planned.find(i=>i.path===t.path)?.dest})),buffer:plan.buffer};
         const eligible=!calibrationPlan&&(residentCandidate||planned.every(i=>i.isLink&&i.hidden&&ln.samePath(i.path,i.dest)))&&leaseController.validateScope(candidate);
         if(eligible){
@@ -906,6 +908,8 @@ function registerIpc() {
           }
         }else diagnostic('lease-not-covered',{reason:calibrationPlan?'unknown-grid-calibration':'scope-not-supported',legacyArrivalRiskUnresolved:true});
       }
+      // Preview never falls back to any legacy Desktop mutation, including calibration.
+      if(leasePreview()&&!leaseTransaction)return desktopBlocked('safe-preview-scope-not-supported');
       if(!leaseTransaction&&leaseOptIn()){
         const client=leaseClient();legacyReserveRequested=true;const reserved=await client.reserveLegacy({desktop:target.path});
         if(!reserved?.ok||!reserved.token){legacyReserveRequested=false;return {...desktopBlocked(reserved?.reason||'desktop-reservation-unconfirmed'),leaseBlocked:true,retrySafe:false};}
@@ -1111,8 +1115,8 @@ function registerIpc() {
   // helper entirely; OKIBA_TEST_HELPER=fake swaps in the Node test
   // double (tools/fake-helper.js).
   function createShellHelper() {
-    if (process.env.OKIBA_HELPER_MODE === 'off') return null;
-    if (process.env.OKIBA_TEST_HELPER === 'fake') {
+    if (!leasePreview() && process.env.OKIBA_HELPER_MODE === 'off') return null;
+    if (!leasePreview() && process.env.OKIBA_TEST_HELPER === 'fake') {
       const fake = path.join(__dirname, 'tools', 'fake-helper.js');
       if (!fs.existsSync(fake)) return null;
       // process.execPath is the ELECTRON binary here, not Node:
@@ -1128,6 +1132,7 @@ function registerIpc() {
       command: 'powershell.exe',
       args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
         '-File', bundledScriptPath('shell-helper.ps1')],
+      ...(leasePreview()?{env:desktopPreviewPolicy.nativeEnv(process.env)}:{}),
     });
   }
   shellHelper = createShellHelper();

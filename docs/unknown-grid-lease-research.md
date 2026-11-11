@@ -237,3 +237,7 @@ Successful fixture cleanup first closes and confirms the owning watchdog/helper.
 - Pure coordinator regression additionally asserts duplicate calls add no native operation, save or global release. Owner-death after fully written receipts resolves visible; before receipts rolls back; unknown/deviating receipts remain pending/blocked.
 - This is **idempotence**, not transport response-loss evidence. A real response-loss test must drop the watchdog reply after durable processing and before client receive, and prove timeout/recovery independently. It remains a later isolated case.
 - Owner death at native boundaries and external OFF require separate fault cases with explicit blocked/recovery expectations; not claimed by this increment. Production and real user Desktop are untouched.
+
+
+### Actual 150% hosted single-monitor run selection
+The unknown success driver accepts `OKIBA_UNKNOWN_EXPECTED_SCALE=150` and `OKIBA_UNKNOWN_CASES=success,no-fit`. Defaults remain actual 100% and all three cases. Accepted scale/case strings are strict allowlists; no arbitrary partial case list. This only changes the asserted expected value and test selection: the existing native desktopSnapshot is used unchanged, and its real single monitor scale must match before fixtures are created. All old identities/coordinates, selected exact shape, no-fit abort, flags, metadata and cleanup guards remain. The separate official Windows DPI UI fixture owns changing/restoring actual DPI. Even a PASS at 150% is single-monitor evidence, not mixed-monitor geometry proof.
