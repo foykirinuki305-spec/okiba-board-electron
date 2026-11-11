@@ -1341,6 +1341,11 @@ async function main() {
   const scrollJson = () => readJson(path.join(scrollDir, '.okiba-board.json'));
   const app20 = await launch();
   page = await app20.firstWindow();
+  // This case tests an in-window synthetic drag, not the physical OS mouse.
+  await app20.evaluate(({ ipcMain }) => {
+    ipcMain.removeHandler('cursor-point');
+    ipcMain.handle('cursor-point', () => null);
+  });
   await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
   await page.click(`#boardGrid .board-card[data-name="${scrollBoard}"]`);
   await page.waitForSelector('#boardView:not([hidden]) .item');
