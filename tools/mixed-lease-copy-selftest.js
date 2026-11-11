@@ -17,8 +17,8 @@ try{
  fs.symlinkSync(temp,copy,process.platform==='win32'?'junction':'dir');try{assert.throws(()=>ownedCopyDestination(copy),/already exists/);}finally{assert(fs.lstatSync(copy).isSymbolicLink());fs.unlinkSync(copy);}
  buildMixedCopy(copy);generateMixedDriver(copy,path.join(__dirname,'resident-lease-ci.js'));
  for(const f of ['lib/desktop-snap-lease-controller.js','lib/desktop-lease-watchdog.js','tools/mixed-driver-ci.js','tools/desktop-lease-protocol-host-ci.js'])execFileSync(process.execPath,['--check',path.join(copy,f)]);
- if(process.platform==='win32')for(const file of ['snap-lease.ps1','mixed-lease-native-ci.ps1'])execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',"$t=$null;$e=$null;$null=[Management.Automation.Language.Parser]::ParseFile($env:OKIBA_PARSE_FILE,[ref]$t,[ref]$e);if($e.Count){$e|ConvertTo-Json -Depth 5;exit 1};exit 0"],{windowsHide:true,env:{...process.env,OKIBA_PARSE_FILE:path.join(copy,'scripts',file)}});
- const driver=fs.readFileSync(path.join(copy,'tools/mixed-driver-ci.js'),'utf8');assert(driver.includes("'success32','abort-placed','abort-after-restore','fault-first-move','fault-first-reveal','hang-first-move','owner-death'"));assert(driver.includes('length:6'));assert(driver.includes('mode:i.mode'));assert(driver.includes('ShowHidden ON unsupported'));
+ if(process.platform==='win32')for(const file of ['snap-lease.ps1','mixed-lease-native-ci.ps1','shell-helper.ps1'])execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',"$t=$null;$e=$null;$null=[Management.Automation.Language.Parser]::ParseFile($env:OKIBA_PARSE_FILE,[ref]$t,[ref]$e);if($e.Count){$e|ConvertTo-Json -Depth 5;exit 1};exit 0"],{windowsHide:true,env:{...process.env,OKIBA_PARSE_FILE:path.join(copy,'scripts',file)}});
+ const driver=fs.readFileSync(path.join(copy,'tools/mixed-driver-ci.js'),'utf8');assert(driver.includes("'success32','abort-placed','abort-after-restore','fault-first-move','fault-first-reveal','hang-first-move','owner-death','success-dense','cached-destination'"));assert(driver.includes('length:6'));assert(driver.includes('mode:i.mode'));assert(driver.includes('ShowHidden ON unsupported'));
  const native=fs.readFileSync(path.join(copy,'scripts/snap-lease.ps1'),'utf8');for(const n of ['ValidateRecovery','Prepare','RevealPlace','RestoreVerify','Rollback','Release'])assert(native.includes('function Lease-'+n+'-CoreMixedBase('));
  const c=require(path.join(copy,'lib/desktop-snap-lease-controller.js'));
  const snapshot={ok:true,identityVersion:1,autoArrange:false,snap:true,icons:[],areas:[{left:0,top:0,right:800,bottom:600,grid:{gx:0,gy:0,sx:100,sy:70}}]};
@@ -26,5 +26,5 @@ try{
  assert(c.validateScope(scope));assert(!c.validateScope({...scope,items:[scope.items[0]]}));assert(!c.validateScope({...scope,items:[scope.items[0],{...scope.items[1],destination:scope.items[0].path}]}));
  assert.throws(()=>buildMixedCopy(copy),/already exists/);
  for(const [f,hash]of originals)assert.equal(digest(path.join(root,f)),hash,'Production source changed');
- console.log('mixed copy builder PASS: native not invoked; 7-case driver, scope rejection, source hashes preserved');
+ console.log('mixed copy builder PASS: native not invoked; 9-case driver, scope rejection, source hashes preserved');
 }finally{assert(path.basename(temp).startsWith('okiba-mixed-copy-pure-'));fs.rmSync(temp,{recursive:true,force:true});}

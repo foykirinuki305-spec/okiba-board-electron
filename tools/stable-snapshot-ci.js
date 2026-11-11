@@ -1,13 +1,16 @@
 'use strict';
 // CI-only bounded read stabilization. No mutations and no best-effort snapshots.
-async function stableSnapshot({read,guard,same,sleep,attempts=100}){
+async function stableSnapshot({read,guard,same,sleep,attempts=100,cleanupEvidence=null}){
  let previous;
  for(let n=0;n<attempts;n++){
   const response=await read();
   if(!response?.ok||!response.result)throw Error('snapshot transport failure '+JSON.stringify(response));
   const s=response.result;
   if(!s.ok){
-   if(s.reason!=='desktop-changing'||s.hresult!=null||s.errorType||s.detail||s.innerDetail)throw Error('snapshot failure '+JSON.stringify(s));
+   const changing=s.reason==='desktop-changing'&&s.hresult==null&&!s.errorType&&!s.detail&&!s.innerDetail;
+   const cleanupRead=cleanupEvidence?.phase==='terminal-owned-removal'&&cleanupEvidence.terminalConfirmed===true&&typeof cleanupEvidence.record==='function'&&s.reason==='shell-snapshot-error'&&s.errorType==='System.Runtime.InteropServices.COMException'&&['0x80004005','0x80070490'].includes(String(s.hresult).toLowerCase())&&typeof s.detail==='string'&&s.detail.includes('ReadShellBatch');
+   if(!changing&&!cleanupRead)throw Error('snapshot failure '+JSON.stringify(s));
+   if(cleanupRead)cleanupEvidence.record({attempt:n,reason:s.reason,hresult:s.hresult,errorType:s.errorType,detail:s.detail,innerDetail:s.innerDetail});
    previous=undefined;await sleep(100);continue;
   }
   guard(s);

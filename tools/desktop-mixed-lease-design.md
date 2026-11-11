@@ -96,3 +96,18 @@ identity/attributes, old icons, visibility and original snap state as before.
 No snapshot subset, global Refresh, fake DELETE, changed receipt semantics, or
 additional OFF epoch is introduced. This isolates Shell disappearance from the
 subsequent physical rename. Original attributes stay immutable in the journal.
+
+## Dense/cache robustness increment (native results pending)
+
+After the original seven cases, seed 42 owned old icons through the existing
+resident lease, then freeze their full real snapshot as the old baseline. Run a
+six-item mixed success. For cached-destination testing, first complete a mixed
+placement, verify selected native IDs/bytes, hide every existing destination with
+recorded attributes and truthful notification, and wait for complete disappearance.
+Only resident files are renamed back; samepath link paths remain unchanged.
+Place a different owned guard at the first prior cached cell through a one-item
+resident lease, then retry the same six destination names at a newly valid shape.
+The guard and all dense/original old icons must stay exact. Cleanup only removes
+owned fixture files after terminal verification and checks the original baseline.
+External OFF, mid-operation ShowHidden, and stop-during-rollback robustness are
+still separate unimplemented cases. Initial ShowHidden ON remains unsupported.

@@ -30,6 +30,14 @@ function buildMixedCopy(destination){
 }\n`;
  fs.writeFileSync(controller,s);
  patch('lib/desktop-lease-watchdog.js',"active.scope.kind==='resident-archive-samevolume'?'source-restored':'hidden'","active.scope.kind==='mixed-hidden-resident-prototype'?'mixed-restored':active.scope.kind==='resident-archive-samevolume'?'source-restored':'hidden'",2);
+ patch('scripts/shell-helper.ps1',"      'readHiddenFile'       { $result = Invoke-HiddenFileRequest $req $false }",`      'ciMixedHideOwned' {
+       if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'CI only'}
+       $p=[IO.Path]::GetFullPath([string]$req.path)
+       if([IO.Path]::GetDirectoryName($p) -ine [Environment]::GetFolderPath('DesktopDirectory') -or [IO.Path]::GetFileName($p) -notmatch '^OkibaResident-[a-f0-9]{16}-'){throw 'owned fixture only'}
+       $n=[OkibaFileAttributes]::SetRecordedAndNotify($p,[string]$req.expectedIdentity,[bool]$req.expectedHidden,$true,[string]$req.size,[string]$req.mtime,[uint32]$req.attributes)
+       $result=@{ok=$true;hidden=$n.hidden;identity=$n.identity}
+      }
+      'readHiddenFile'       { $result = Invoke-HiddenFileRequest $req $false }`);
  const functions=['ValidateRecovery','Prepare','RevealPlace','RestoreVerify','Rollback','Release'];
  for(const name of functions)patch('scripts/snap-lease.ps1','function Lease-'+name+'(','function Lease-'+name+'-CoreMixedBase(');
  const native=path.join(root,'tools/mixed-lease-native-ci.ps1');if(!fs.existsSync(native))throw Error('Mixed native prototype unavailable');
