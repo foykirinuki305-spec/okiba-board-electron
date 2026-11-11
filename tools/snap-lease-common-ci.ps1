@@ -53,10 +53,10 @@ function Get-LeaseSnapshot {
  $dpi=[OkibaWin32]::EnterPhysicalScope()
  try {return Get-StrictDesktopSnapshot}finally{if($dpi -ne [IntPtr]::Zero){[OkibaWin32]::LeavePhysicalScope($dpi)}}
 }
-function Lease-Geometry($s){return (@($s.explorerPid,$s.explorerStarted,$s.listviewHwnd,$s.origin,$s.viewDpi,$s.sx,$s.sy,@($s.areas|ForEach-Object{@($_.left,$_.top,$_.right,$_.bottom,$_.scale,$_.monitorOrigin)}))|ConvertTo-Json -Depth 10 -Compress)}
+function Lease-Geometry($s){return (@($s.explorerPid,$s.explorerStarted,$s.listviewHwnd,$s.origin.x,$s.origin.y,$s.viewDpi,$s.sx,$s.sy,@($s.areas|ForEach-Object{@($_.left,$_.top,$_.right,$_.bottom,$_.scale,$_.monitorOrigin.x,$_.monitorOrigin.y)}))|ConvertTo-Json -Depth 10 -Compress)}
 function Assert-LeaseOld($baseline,$current,$selectedPaths){
  if(-not $current.ok){return $false}
- if((Lease-Geometry $baseline) -cne (Lease-Geometry $current)){throw 'Explorer or physical display changed'}
+ if((Lease-Geometry $baseline) -cne (Lease-Geometry $current)){throw ('Explorer or physical display changed; baseline='+(Lease-Geometry $baseline)+'; current='+(Lease-Geometry $current))}
  $old=New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
  foreach($i in $baseline.icons){if([string]::IsNullOrEmpty($i.identity) -or $old.ContainsKey($i.identity)){throw 'invalid baseline'};$old.Add($i.identity,$i)}
  $seen=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)

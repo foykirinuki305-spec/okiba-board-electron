@@ -926,6 +926,15 @@ function Get-StrictDesktopSnapshot {
   $clock=[Diagnostics.Stopwatch]::StartNew()
   try{return Get-StrictDesktopSnapshotCore}finally{Add-DesktopPerf 'strictSnapshot' $clock}
 }
+function Get-ShellSnapshotFailure([Exception]$exception) {
+  # Only the reader's two explicit enumeration consistency failures are retryable.
+  # COM, permissions, duplicate identities and all other errors remain fatal.
+  $inner=$exception
+  while($null -ne $inner.InnerException){$inner=$inner.InnerException}
+  $reason='shell-snapshot-error'
+  if($inner -is [InvalidOperationException] -and @('item-count-changed','pidl-order-changed') -ccontains $inner.Message){$reason='desktop-changing'}
+  return @{ok=$false;reason=$reason;detail=$exception.Message}
+}
 function Get-RawStrictDesktopSnapshotCore {
   $lv = Find-BestListView
   if ($lv -eq [IntPtr]::Zero) { return @{ok=$false; reason='no-listview'} }
@@ -940,7 +949,7 @@ function Get-RawStrictDesktopSnapshotCore {
     $explorerStarted=[Diagnostics.Process]::GetProcessById([int]$explorerProcess).StartTime.ToUniversalTime().Ticks.ToString()
     $generation=('{0}:{1}:{2}' -f $explorerProcess,$explorerStarted,$lv.ToInt64())
     $batchClock=[Diagnostics.Stopwatch]::StartNew()
-    try {$shellIcons=[OkibaFolderView]::ReadShellBatch($generation)}catch{return @{ok=$false;reason='shell-snapshot-error';detail=$_.Exception.Message}}finally{Add-DesktopPerf 'shellRead' $batchClock}
+    try {$shellIcons=[OkibaFolderView]::ReadShellBatch($generation)}catch{return (Get-ShellSnapshotFailure $_.Exception)}finally{Add-DesktopPerf 'shellRead' $batchClock}
     $count=@($shellIcons).Count
     $icons = New-Object 'System.Collections.Generic.List[object]'
     foreach($item in $shellIcons){$icons.Add(@{label=$item.label;x=$item.x;y=$item.y;index=$item.index;identity=$item.identity;path=$item.path})}
@@ -978,7 +987,7 @@ function Strict-IconKey($i) {
   return (@([string]$i.identity,[int]$i.x,[int]$i.y) | ConvertTo-Json -Compress)
 }
 function Strict-GeometryKey($s) {
-  $areas=@($s.areas | ForEach-Object { @([int]$_.left,[int]$_.top,[int]$_.right,[int]$_.bottom,$_.scale,$_.monitorOrigin) })
+  $areas=@($s.areas | ForEach-Object { @([int]$_.left,[int]$_.top,[int]$_.right,[int]$_.bottom,$_.scale,@([int]$_.monitorOrigin.x,[int]$_.monitorOrigin.y)) })
   return (@($s.explorerPid,$s.explorerStarted,$s.listviewHwnd,$s.folderFlags,[bool]$s.autoArrange,[bool]$s.snap,[int]$s.sx,[int]$s.sy,[int]$s.viewDpi,[int]$s.origin.x,[int]$s.origin.y,$areas) | ConvertTo-Json -Compress -Depth 8)
 }
 function Strict-AreaGrid($area,$s) {

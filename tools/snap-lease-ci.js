@@ -86,8 +86,8 @@ async function main(){
   async function waitJson(file,timeout=45000){const end=Date.now()+timeout;while(Date.now()<end){if(fs.existsSync(file)){try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch{}}await sleep(100);}throw Error('timeout waiting for '+path.basename(file));}
   function launch(script,specPath,logfile,kind){const fd=fs.openSync(logfile,'w');const child=spawn('pwsh',['-NoProfile','-NonInteractive','-File',path.join(root,'tools',script),'-SpecPath',specPath],{windowsHide:true,stdio:['ignore',fd,fd]});fs.closeSync(fd);child.on('error',e=>note('child-error',{kind,error:String(e)}));children.push({child,kind});return child;}
   async function killVerified(pid,started){
-   const ps="$ErrorActionPreference='Stop';try{$p=[Diagnostics.Process]::GetProcessById([int]$env:OKIBA_KILL_PID)}catch{return};if($p.StartTime.ToUniversalTime().Ticks.ToString() -cne $env:OKIBA_KILL_START){throw 'PID reused; refusing kill'};if(-not $p.HasExited){$p.Kill();if(-not $p.WaitForExit(5000)){throw 'owned process did not stop'}}";
-   await run('pwsh',['-NoProfile','-NonInteractive','-Command',ps],{windowsHide:true,timeout:15000,env:{...process.env,OKIBA_KILL_PID:String(pid),OKIBA_KILL_START:String(started)}});
+   const ps="$ErrorActionPreference='Stop';try{$p=[Diagnostics.Process]::GetProcessById([int]$env:OKIBA_KILL_PID)}catch [ArgumentException]{exit 0};$null=$p.Handle;if($p.HasExited){exit 0};if($p.StartTime.ToUniversalTime().Ticks.ToString() -cne $env:OKIBA_KILL_START){throw 'PID reused; refusing kill'};if(-not $p.HasExited){$p.Kill();if(-not $p.WaitForExit(5000)){throw 'owned process did not stop'}};exit 0";
+   try{await run('pwsh',['-NoProfile','-NonInteractive','-Command',ps],{windowsHide:true,timeout:15000,env:{...process.env,OKIBA_KILL_PID:String(pid),OKIBA_KILL_START:String(started)}});}catch(e){note('kill-verified-error',{pid,started,code:e.code,stdout:e.stdout,stderr:e.stderr});throw e;}
   }
   for(const killPhase of ['off','one-visible','all-visible','pre-restore'])for(const victim of ['host','worker']){
    const before=await stable('lease-before',remaining);assert(before.snap&&!before.autoArrange);

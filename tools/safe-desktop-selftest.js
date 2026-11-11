@@ -69,6 +69,13 @@ check('source path does not cause a false destination collision',()=>{const s=pa
 check('virtual item display label does not collide with new file',()=>{const s=pathSnapshot();s.icons[0].path=null;s.icons[0].label='shared.pdf';assert(plan(s,pathItem('C:\\Desktop\\shared.pdf')).ok);});
 check('normalized duplicate destinations are blocked',()=>assert(!plan(pathSnapshot(),[{path:'C:\\a',dest:'C:\\Desktop\\new',name:'a',offset:[0,0]},{path:'C:\\b',dest:'c:/desktop/NEW',name:'b',offset:[1,0]}]).ok));
 
+check('object property order does not change snapshot geometry',()=>{const a=multi();a.origin={x:1920,y:0};a.areas[0].monitorOrigin={x:0,y:71};const reorder=v=>Array.isArray(v)?v.map(reorder):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).reverse().map(([k,x])=>[k,reorder(x)])):v;assert(sameSnapshot(a,reorder(a)));});
+check('reordered objects with real nested grid difference remain unequal',()=>{const a=multi(),b=clone(a);b.areas[0].grid={gy:7,gx:42,sy:67,sx:101};assert(!sameSnapshot(a,b));});
+check('monitor array order remains significant for areaIndex safety',()=>{const a=multi(),b=clone(a);b.areas.reverse();assert(!sameSnapshot(a,b));});
+check('unknown geometry fields are retained in comparison',()=>{const a=multi(),b=clone(a);a.areas[0].futureMetric={alpha:1,beta:[2,3]};b.areas[0].futureMetric={beta:[2,4],alpha:1};assert(!sameSnapshot(a,b));});
+check('new geometry field versus missing field is not equal',()=>{const a=multi(),b=clone(a);b.areas[0].futureMetric=null;assert(!sameSnapshot(a,b));});
+check('nested monitor origin physical change is not ignored',()=>{const a=multi(),b=clone(a);a.areas[0].monitorOrigin={x:0,y:71};b.areas[0].monitorOrigin={y:72,x:0};assert(!sameSnapshot(a,b));});
+check('geometry types are preserved',()=>{const a=multi(),b=clone(a);b.areas[0].grid.gx='42';assert(!sameSnapshot(a,b));});
 async function transactions() {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-safe-unit-'));
   try {
