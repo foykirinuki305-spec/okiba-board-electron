@@ -1,0 +1,32 @@
+name: hidden-snap-off
+on:
+  push:
+    paths:
+      - 'scripts/shell-helper.ps1'
+      - 'lib/safe-desktop.js'
+      - 'lib/links.js'
+      - 'tools/hidden-snap-off-ci.*'
+      - '.github/workflows/hidden-snap-off.yml'
+  workflow_dispatch:
+jobs:
+  reproduce:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Research snap OFF/ON, preserve every pre-existing icon
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/hidden-snap-off-ci.ps1 2>&1 | Tee-Object -FilePath hidden-snap-off-ci.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve reproduction evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hidden-snap-off-evidence
+          path: |
+            hidden-snap-off-ci.json
+            hidden-snap-off-ci.log
