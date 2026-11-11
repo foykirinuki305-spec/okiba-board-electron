@@ -48,6 +48,67 @@ try {
 # ---- Resolve interop (same as resolve-drop.ps1) -------------------
 Add-Type -TypeDefinition @'
 using System;
+using System.IO;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+// Handle-bound attribute operations. The app has not enabled these commands yet.
+public static class OkibaFileAttributes {
+ [StructLayout(LayoutKind.Sequential)] struct FileTime {public uint low,high;}
+ [StructLayout(LayoutKind.Sequential)] struct Info {public uint attributes;public FileTime created,accessed,written;public uint volume,sizeHigh,sizeLow,links,indexHigh,indexLow;}
+ [StructLayout(LayoutKind.Sequential)] struct Basic {public long created,accessed,written,changed;public uint attributes;}
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFile(string path,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle h,out Info info);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetFileInformationByHandle(SafeFileHandle h,int type,ref Basic info,uint size);
+ public sealed class Snapshot {public string identity;public bool hidden;public uint attributes;public bool directory;}
+ static string CheckPath(string path) {
+  path=Path.GetFullPath(path);
+  if(path.StartsWith(@"\\",StringComparison.Ordinal))throw new InvalidOperationException("unsupported-network-path");
+  string component=path;
+  while(!String.IsNullOrEmpty(component)){
+   var attrs=File.GetAttributes(component);
+   if((attrs&FileAttributes.ReparsePoint)!=0)throw new InvalidOperationException("reparse-path");
+   var parent=Path.GetDirectoryName(component);
+   if(parent==component)break;component=parent;
+  }
+  return path;
+ }
+ static SafeFileHandle Open(string path,bool write){
+  // READ_DATA / LIST_DIRECTORY access makes Windows enforce sharing (attributes-only handles do not).
+  // No file content is read. No FILE_SHARE_DELETE: replacement is blocked while the handle lives.
+  var h=CreateFile(path,write?0x181u:0x81u,3,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
+  if(h.IsInvalid){int error=Marshal.GetLastWin32Error();h.Dispose();throw new Win32Exception(error);}
+  return h;
+ }
+ static Snapshot Capture(SafeFileHandle h){
+  Info info;if(!GetFileInformationByHandle(h,out info))throw new Win32Exception(Marshal.GetLastWin32Error());
+  if((info.attributes&0x400)!=0)throw new InvalidOperationException("reparse-path");
+  return new Snapshot{identity=info.volume.ToString("X8")+":"+info.indexHigh.ToString("X8")+info.indexLow.ToString("X8"),hidden=(info.attributes&2)!=0,attributes=info.attributes,directory=(info.attributes&16)!=0};
+ }
+ public static Snapshot Read(string path){path=CheckPath(path);using(var h=Open(path,false))return Capture(h);}
+ public static Snapshot Set(string path,string expectedIdentity,bool expectedHidden,bool hidden){
+  path=CheckPath(path);using(var h=Open(path,true)){
+   var before=Capture(h);
+   if(String.IsNullOrEmpty(expectedIdentity)||!String.Equals(before.identity,expectedIdentity,StringComparison.Ordinal))throw new InvalidOperationException("file-identity-changed");
+   if(before.hidden!=expectedHidden)throw new InvalidOperationException("hidden-state-changed");
+   uint desired=hidden?(before.attributes|2u):(before.attributes&~2u);
+   // NORMAL is valid only by itself; all substantive flags are retained.
+   if((desired&~128u)!=0)desired&=~128u;else desired=128u;
+   if(before.hidden!=hidden){
+    var basic=new Basic{attributes=desired};
+    // Zero time fields mean do not change file timestamps.
+    if(!SetFileInformationByHandle(h,0,ref basic,(uint)Marshal.SizeOf(typeof(Basic))))throw new Win32Exception(Marshal.GetLastWin32Error());
+   }
+   var after=Capture(h);
+   if(after.identity!=before.identity||after.hidden!=hidden||((after.attributes^before.attributes)&~130u)!=0)throw new InvalidOperationException("attribute-verification-failed");
+   return after;
+  }
+ }
+}
+'@
+
+Add-Type -TypeDefinition @'
+using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -1347,6 +1408,22 @@ function Get-CursorState {
   return @{ x = [int]$s[0]; y = [int]$s[1]; lbtn = ($s[2] -ne 0) }
 }
 
+# Optional protocol commands; no existing app call site uses them yet.
+function Invoke-HiddenFileRequest($req,[bool]$write) {
+  if($req.path -isnot [string] -or [string]::IsNullOrWhiteSpace($req.path)){return @{ok=$false;reason='invalid-path'}}
+  if($write -and ($req.expectedIdentity -isnot [string] -or [string]::IsNullOrWhiteSpace($req.expectedIdentity) -or $req.expectedHidden -isnot [bool] -or $req.hidden -isnot [bool])){return @{ok=$false;reason='invalid-attribute-contract'}}
+  try {
+    if($write){$value=[OkibaFileAttributes]::Set($req.path,$req.expectedIdentity,$req.expectedHidden,$req.hidden)}else{$value=[OkibaFileAttributes]::Read($req.path)}
+    return @{ok=$true;identity=$value.identity;hidden=$value.hidden;attributes=$value.attributes;directory=$value.directory}
+  }catch{
+    $inner=$_.Exception;while($null -ne $inner.InnerException){$inner=$inner.InnerException}
+    $code=$null;if($inner -is [ComponentModel.Win32Exception]){$code=$inner.NativeErrorCode}elseif($inner -is [IO.IOException]){$code=$inner.HResult -band 0xffff}
+    # Keep this new command's wire ASCII; localized OS messages can break legacy console decoding.
+    $detail=$inner.GetType().Name;if($inner -is [InvalidOperationException]){$detail=$inner.Message}
+    return @{ok=$false;reason='attribute-operation-failed';detail=$detail;errorCode=$code;errorType=$inner.GetType().Name}
+  }
+}
+
 # ---- Main loop ------------------------------------------------------
 [Console]::Out.WriteLine('{"ready":true}')
 [Console]::Out.Flush()
@@ -1367,6 +1444,8 @@ while ($true) {
       'getDesktopPositions' { $result = Get-DesktopPositions ([string[]]@($req.names)) }
       'cursorState'         { $result = Get-CursorState }
       'desktopSnapshot'     { $result = Get-StrictDesktopSnapshot }
+      'readHiddenFile'       { $result = Invoke-HiddenFileRequest $req $false }
+      'setHiddenFile'        { $result = Invoke-HiddenFileRequest $req $true }
       'moveNoReplace'        {
         $code=[OkibaDesk]::MoveNoReplace([string]$req.source,[string]$req.destination)
         $result=@{ok=($code -eq 0);errorCode=$code;reason=$(if($code -eq 0){''}else{'move-no-replace-failed'})}

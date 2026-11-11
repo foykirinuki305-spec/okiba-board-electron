@@ -35,6 +35,10 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "PowerShell script check failed for $f" }
           }
 
+      - name: Hidden attribute protocol on owned temporary files
+        shell: pwsh
+        run: powershell -NoProfile -File ./tools/hidden-attributes-protocol-test.ps1
+
       - name: PIDL identity and same-label swap pure safety checks
         shell: pwsh
         run: pwsh -NoProfile -File ./tools/desktop-identity-selftest.ps1
