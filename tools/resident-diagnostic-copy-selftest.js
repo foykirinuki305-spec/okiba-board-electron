@@ -7,7 +7,7 @@ try{
  for(const marker of ['before-restore','after-restore','rollback-start','rollback-verified',"Resident-CITrace 'visibility'",'AddSeconds(15)','$stable -ge 2','Lease-Guard $r $s'])assert(s.includes(marker));
  assert(s.indexOf("Resident-CITrace 'after-restore'")<s.indexOf('$s=Resident-WaitRestoredInvisible $r $expectedFlags'));
  assert(!s.includes('Resident-CIWaitVisibility'));assert.equal((s.match(/function Resident-WaitRestoredInvisible\(/g)||[]).length,1);
- for(const marker of ['Resident-IsDisappearanceReadFailure $_','$failures -gt 3','Resident-AssertRestoredSources $r;Lease-AssertFastOff $r $expectedFlags',"Resident-CITrace 'disappearance-read-error'"])assert(s.includes(marker));
+ for(const marker of ['Resident-IsDisappearanceReadFailure $_','$failures -gt 3','Resident-AssertRestoredSources $r;Resident-AssertExactSessionFlags $r $expectedFlags',"Resident-CITrace 'disappearance-read-error'"])assert(s.includes(marker));
  // Each source anchor must match exactly once: missing/duplicated anchors fail closed.
  for(const anchor of [' $initial=Lease-Snapshot;Resident-Validate $r $initial;',
  '  $null=Lease-Guard $r (Lease-Snapshot);$n=Resident-Locate $i',

@@ -52,6 +52,9 @@ jobs:
       - name: ShowHidden fixture structure and permission gate
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/show-hidden-fixture-selftest.ps1
+      - name: Exact ON and OFF native flag predicate
+        shell: powershell
+        run: ./tools/resident-exact-flags-selftest.ps1
       - name: Restored-source disappearance read guard
         shell: powershell
         run: ./tools/resident-disappearance-selftest.ps1

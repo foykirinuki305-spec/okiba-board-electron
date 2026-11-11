@@ -754,6 +754,18 @@ public static class OkibaFolderView {
    if(flags!=expectedFlags||(flags&5)!=0||s.Folder.GetAutoArrange()!=1)throw new InvalidOperationException("lease-flags-changed");
   }
  }
+ // Read-only exact witness for rollback disappearance, where Snap can be ON or OFF.
+ // The existing OFF-only witness above intentionally remains unchanged.
+ static void ValidateExactLeaseFlags(uint flags,uint expectedFlags,int autoArrange){
+  if(flags!=expectedFlags||(flags&1)!=0||autoArrange!=1)throw new InvalidOperationException("lease-flags-changed");
+ }
+ public static void AssertLeaseExactSessionFlags(uint expectedFlags,long expectedLv,int expectedPid,string expectedStarted){
+  using(var s=new Session()){
+   AssertLeaseSession(s,expectedLv,expectedPid,expectedStarted);
+   uint flags;Marshal.ThrowExceptionForHR(s.Folder.GetCurrentFolderFlags(out flags));
+   ValidateExactLeaseFlags(flags,expectedFlags,s.Folder.GetAutoArrange());
+  }
+ }
  public static void SetLeaseSnap(uint expectedFlags,bool enabled,long expectedLv,int expectedPid,string expectedStarted,string[] identities,int[] xs,int[] ys){
   if(identities==null||xs==null||ys==null||identities.Length!=xs.Length||xs.Length!=ys.Length)throw new ArgumentException("lease-invalid-guard");
   using(var s=new Session()){

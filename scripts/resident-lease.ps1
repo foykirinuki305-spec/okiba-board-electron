@@ -92,12 +92,15 @@ function Resident-AssertRestoredSources($r){
  # Locate verifies both parent chains, volume, file ID, size/mtime and destination absence.
  foreach($i in $r.residentRecords){$n=Resident-Locate $i;if($n.state -cne 'unmoved' -or [uint32]$n.record.attributes -ne [uint32]$i.originalAttributes){throw 'resident-source-not-restored'}}
 }
+function Resident-AssertExactSessionFlags($r,[uint32]$expectedFlags){
+ [OkibaFolderView]::AssertLeaseExactSessionFlags($expectedFlags,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted)
+}
 function Resident-WaitRestoredInvisible($r,[uint32]$expectedFlags){
  $until=[DateTime]::UtcNow.AddSeconds(15);$stable=0;$failures=0
  for($attempt=0;$attempt -lt 100 -and [DateTime]::UtcNow -lt $until;$attempt++){
   Resident-AssertRestoredSources $r
   # Fast native check also rejects Explorer replacement and external flag changes.
-  Lease-AssertFastOff $r $expectedFlags
+  Resident-AssertExactSessionFlags $r $expectedFlags
   try{$s=Lease-Snapshot}catch{
    if(-not (Resident-IsDisappearanceReadFailure $_)){throw}
    $stable=0;$failures++
@@ -105,7 +108,7 @@ function Resident-WaitRestoredInvisible($r,[uint32]$expectedFlags){
    $r.disappearanceReadFailures+=,@{phase='post-restored-disappearance';attempt=$attempt;detail=$_.Exception.Message;failure=$_.Exception.Data['snapshotFailure']}
    if($failures -gt 3){throw}
    # This is read-only recovery. No rename, hidden setter, or flag restoration here.
-   Resident-AssertRestoredSources $r;Lease-AssertFastOff $r $expectedFlags
+   Resident-AssertRestoredSources $r;Resident-AssertExactSessionFlags $r $expectedFlags
    Start-Sleep -Milliseconds 100;continue
   }
   $selected=Lease-Guard $r $s

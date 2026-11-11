@@ -10,7 +10,7 @@ function Record($e){return [System.Management.Automation.ErrorRecord]::new($e,'m
 Check (Resident-IsDisappearanceReadFailure (Record (Failure))) 'exact failure accepted'
 foreach($e in @((Failure '0x80070490'),(Failure '0x80004005' 'desktop-changing'),(Failure '0x80004005' 'shell-snapshot-error' 'Other'),(Failure '0x80004005' 'shell-snapshot-error' 'System.Runtime.InteropServices.COMException' 'DifferentMethod'),([Exception]::new('E_FAIL ReadShellBatch')))) {Check (-not (Resident-IsDisappearanceReadFailure (Record $e))) 'non-specific failure rejected'}
 function Resident-Locate($i){$script:sourceReads++;if($script:badSource){throw 'resident-source-changed'};return @{state='unmoved';record=@{attributes=32}}}
-function Lease-AssertFastOff($r,$f){$script:flagReads++;if($script:badFlags){throw 'external-flags-changed'}}
+function Resident-AssertExactSessionFlags($r,$f){$script:flagReads++;if($script:badFlags){throw 'external-flags-changed'}}
 function Lease-Snapshot {$script:snapshotReads++;$v=$script:queue.Dequeue();if($v -is [Exception]){throw $v};return $v}
 function Lease-Guard($r,$s){if($s.badOld){throw 'lease-old-icon-moved'};if($s.visible){return @{owned=1}};return @{}}
 function Start-Sleep {param($Milliseconds)}

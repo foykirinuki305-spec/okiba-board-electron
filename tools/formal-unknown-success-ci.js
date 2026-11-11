@@ -21,7 +21,7 @@ async function main(){const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-unk
   const metadata=path.join(caseDir,'board.json');fs.writeFileSync(metadata,'{"unchanged":true}');const area=before.areas[0],requestedAnchor=scenario==='no-fit'?{x:area.right+1000,y:area.bottom+1000}:{x:plan.patch.left+before.sx,y:plan.patch.top+before.sy};
   const scope={version:2,kind:'samepath-hidden-unknown-grid',desktop,snapshot:before,targetAreaIndex:0,plan,items:selected.map(({path,destination,hidden,fileIdentity})=>({path,destination,hidden,fileIdentity})),metadataPaths:[metadata],success:{items:selected.map(({path,cell})=>({path,cell})),anchorPath:selected[0].path,requestedAnchor}};
   const journalDir=path.join(caseDir,'journal'),owner=fork(path.join(root,'tools/formal-unknown-success-host-ci.js'),[],{windowsHide:true,stdio:['ignore','ignore','ignore','ipc'],env:{...process.env,OKIBA_UNKNOWN_GRID_CI:'1'}});children.push(owner);
-  let recoveredCase=false;try{const pending=receive(owner);owner.send({cmd:'run',spec:{copy,scope,scenario,journalDir}});const response=await pending;note('result',{scenario,response});
+  let recoveredCase=false;try{const requestStarted=Date.now();const pending=receive(owner);owner.send({cmd:'run',spec:{copy,scope,scenario,journalDir}});const response=await pending;note('result',{scenario,requestElapsedMs:Date.now()-requestStarted,response});
    if(response.phase==='error'){
     report.primaryError=response.error;
     if(response.recovery?.ok&&response.recovery.state==='aborted'&&response.closed?.ok){
