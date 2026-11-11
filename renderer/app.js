@@ -594,6 +594,7 @@ function renderBoard() {
         const items = [{ label: `${selection.size}件を選択中`, action: () => {} }];
         if (hasOut) {
           items.push({ label: '選択をボードから出す', action: () => takeOutSelection() });
+          items.push({ label: '原本を残してコピー…', action: () => copySelectionOut() });
         }
         items.push({ label: 'ゴミ箱へ削除（実ファイルも削除）', danger: true, action: () => trashSelection() });
         showMenu(e.clientX, e.clientY, items);
@@ -622,6 +623,7 @@ function renderBoard() {
             { label: '開く', action: () => api.openItem(fullPath) },
             { label: '名前を変更', action: () => renameLinkedFlow(key, link) },
             { label: '場所を開く', action: () => api.showItem(fullPath) },
+            { label: '原本を残してコピー…', action: () => copySelectionOut() },
             { label: 'デスクトップへ移動', action: () => moveLinkedToDesktopFlow([fullPath]) },
             { label: 'ボードから外す', action: () => unlinkFlow([fullPath]) },
             { label: 'ファイルをゴミ箱へ削除', danger: true, action: async () => {
@@ -634,6 +636,7 @@ function renderBoard() {
           { label: '開く', action: () => api.openItem(fullPath) },
           { label: '名前を変更', action: () => renameItemFlow(key, fullPath, label) },
           { label: '場所を開く', action: () => api.showItem(fullPath) },
+            { label: '原本を残してコピー…', action: () => copySelectionOut() },
           { label: 'デスクトップへ移動', action: async () => {
               const result=await api.safeTakeout({boardName:boardData.name,paths:[fullPath],linkedPaths:[],layout:[{path:fullPath,cell:cells.get(key)}]}); if(result?.error)toast(result.error,15000);else if(result?.warningText)toast(result.warningText,15000); refreshBoard();
             } },
@@ -728,6 +731,15 @@ async function moveLinkedToDesktopFlow(paths) {
 // (with their links detached). Plain removal without moving is the
 // single-item ボードから外す. Notes stay (a note has no file to
 // take out; deleting notes is the trash action below).
+// Copy never removes selection, links, cells or files from this board.
+async function copySelectionOut() {
+ const keys=[...selection],boardName=boardData.name;
+ const payload={boardName,paths:keys.filter(k=>k.startsWith('file:')).map(pathOfKey).filter(Boolean),linkedPaths:keys.filter(k=>k.startsWith('link:')).map(k=>k.slice(5))};
+ toast('保存先のフォルダを選んでください。原本は残ります。',20000);
+ try {const result=await api.copySelectedOut(payload);if(result?.cancelled)toast('コピーをキャンセルしました。');else toast(result?.message||'コピー結果を確認できませんでした。再実行前に保存先を確認してください。',20000);}
+ catch(e){toast('コピー結果を確認できませんでした。保存先を確認してください: '+String(e.message||e),20000);}
+}
+
 async function takeOutSelection() {
   const keys = [...selection];
   const linkedPaths = keys.filter((k) => k.startsWith('link:')).map((k) => k.slice(5));

@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('okiba', {
   // real path for a File object from a drop / drag event (Electron 32+)
   getPathForFile: (file) => webUtils.getPathForFile(file),
 
+  copySelectedOut: (payload) => ipcRenderer.invoke('copy-selected-out', payload),
+
   getHome: () => ipcRenderer.invoke('get-home'),
   getBoard: (name) => ipcRenderer.invoke('get-board', name),
   watchHome: () => ipcRenderer.invoke('watch-home'),

@@ -125,11 +125,40 @@ jobs:
           path: lease-gui-evidence/
           if-no-files-found: ignore
 
+      - name: Original-preserving native copy in generated TEMP fixtures
+        run: node tools/copyout-selftest.js
+
+      - name: Native copy failure cleanup before and after publication
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./tools/copyout-fault-selftest.ps1
+
+      - name: User-initiated copy UI cancellation and partial outcomes
+        run: node tests/copyout-ui.e2e.js
+
+      - name: Upload copy UI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: copyout-ui-evidence
+          path: copyout-ui-evidence/
+          if-no-files-found: ignore
+
       - name: Build installer + portable exe
         # --publish never: electron-builder's implicit CI publishing
         # otherwise tries to push a GitHub release and fails the
         # whole build for a missing GH_TOKEN.
         run: npx electron-builder --win --publish never
+
+      - name: Packaged app copy through real menu and bundled native worker
+        run: node tests/packaged-copyout.e2e.js
+
+      - name: Upload packaged copy evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaged-copyout-evidence
+          path: packaged-copyout-evidence/
+          if-no-files-found: ignore
 
       - name: Verify both exes exist
         shell: pwsh

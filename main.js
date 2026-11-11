@@ -342,6 +342,17 @@ function registerIpc() {
     return boardState(name);
   });
   ipcMain.handle('watch-home', () => { setupWatchers(null); return true; });
+  // Explicit copy action only. No copy or directory creation before the user's folder choice.
+  const copyUi=require('./lib/copyout-ui');
+  const copySelected=copyUi.createCopyOutHandler({
+    selectionState:name=>{const folder=guardBoard(name);return {folder,entries:bf.scanFolder(folder),links:bf.loadBoard(folder).links};},
+    chooseDirectory:()=>dialog.showOpenDialog(win,{title:'原本を残してコピー',buttonLabel:'ここにコピー',defaultPath:app.getPath('desktop'),properties:['openDirectory']}),
+    forbiddenDestinations:()=>[app.getPath('desktop'),path.join(process.env.PUBLIC||'C:\\Users\\Public','Desktop')],
+    canonicalDirectory:p=>{try{return fs.realpathSync.native(p);}catch(e){if(e.code==='ENOENT')return path.resolve(p);throw e;}},
+    copyFiles:args=>{if(win&&!win.isDestroyed())win.webContents.send('status','コピー中です。原本は残ります。完了までお待ちください。');return require('./lib/copyout').copyFilesOut({...args,scriptPath:path.join(app.isPackaged?process.resourcesPath:__dirname,'scripts','copyout.ps1')});},
+  });
+  ipcMain.handle('copy-selected-out',(_e,payload)=>copySelected(payload));
+
 
   ipcMain.handle('thumb', async (_e, fullPath) => thumbnailFor(fullPath, 300));
 
@@ -1559,6 +1570,7 @@ function registerIpc() {
                 });
                 if (one.moved) {
                   result.moved.push(lp);
+                  copyUi.noteMovedVisibility(result,lp,one);
                   if (one.dest) {
                     allDestinations.push(one.dest);
                     const [c, rr] = cellOfLink(histSnap ? histSnap.links : [], lp);
