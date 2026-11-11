@@ -1,0 +1,39 @@
+name: packaged-unknown-dense-51-real-drag
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/packaged-unknown-*'
+      - 'main.js'
+      - 'lib/desktop-unknown-*'
+      - 'scripts/unknown-grid-*'
+      - '.github/workflows/packaged-unknown-dense.yml'
+jobs:
+  isolated:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: node tools/packaged-unknown-dense-selftest.js
+      - name: Fast owned Settings window exposure probe (before build)
+        shell: powershell
+        run: ./tools/packaged-settings-window-ci.ps1 -Probe
+      - name: Synthetic 202 icon mixed-scope pure guards (not native proof)
+        shell: powershell
+        run: ./tools/unknown-mixed-scope-selftest.ps1
+      - run: npm run build
+      - name: Packaged actual pointer drag with exact 150 fixture restoration
+        shell: powershell
+        run: ./tools/packaged-unknown-dense-dpi-ci.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: packaged-unknown-dense-evidence
+          path: |
+            packaged-unknown-dense-evidence/**
+            formal-unknown-dpi-*.json
+            packaged-settings-probe.json
