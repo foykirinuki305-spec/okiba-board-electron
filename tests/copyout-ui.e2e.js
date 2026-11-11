@@ -16,7 +16,9 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
  app=await electron.launch({args:[ROOT,'--no-sandbox','--user-data-dir='+profile],env});
  const page=await app.firstWindow();await page.waitForSelector('#boardGrid .board-card');await page.locator('#boardGrid .board-card').first().dblclick();await page.waitForSelector('#boardArea .item');
  await app.evaluate(({app,dialog},dest)=>{
-  const module=process.mainModule.require(process.mainModule.require('path').join(app.getAppPath(),'lib/copyout.js'));
+  const nativeModule=process.getBuiltinModule('module'),nativePath=process.getBuiltinModule('path');
+  const requireFromApp=nativeModule.createRequire(nativePath.join(app.getAppPath(),'package.json'));
+  const module=requireFromApp('./lib/copyout.js');
   global.__copyUi={mode:'cancel',dialogs:0,copies:0,inputs:[],dest};
   dialog.showOpenDialog=async(_window,options)=>{const s=global.__copyUi;s.dialogs++;s.options=options;if(s.mode==='hold')return new Promise(r=>{s.release=r;});return s.mode==='cancel'?{canceled:true,filePaths:[]}:{canceled:false,filePaths:[dest]};};
   module.copyFilesOut=async args=>{const s=global.__copyUi;s.copies++;s.inputs.push(args);if(s.mode==='fail')return {copied:[],skipped:[],failed:args.sources.map(src=>({src,reason:'fixture-failure',cleanupVerified:true})),partial:[]};if(s.mode==='partial')return {copied:[],skipped:[],failed:[],partial:args.sources.map(src=>({src,reason:'visibility-unverified',partialPath:dest}))};return {copied:args.sources.map(src=>({src,dest})),skipped:[],failed:[],partial:[]};};

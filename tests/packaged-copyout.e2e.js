@@ -20,7 +20,9 @@ async function records(paths,action='read'){const r=await run('powershell.exe',[
  report.runtime=await app.evaluate(({app})=>({packaged:app.isPackaged,profile:app.getPath('userData'),exe:process.execPath,pid:process.pid,resources:process.resourcesPath}));assert(report.runtime.packaged);assert.equal(path.resolve(report.runtime.profile),profile);
  const page=await app.firstWindow();await page.waitForSelector('#boardGrid .board-card');await page.locator('#boardGrid .board-card').first().dblclick();await page.waitForSelector('#boardArea .item');
  await app.evaluate(({app,dialog},choice)=>{
-  const p=process.mainModule.require('path'),module=process.mainModule.require(p.join(app.getAppPath(),'lib/copyout.js')),real=module.copyFilesOut;
+  const nativeModule=process.getBuiltinModule('module'),nativePath=process.getBuiltinModule('path');
+  const requireFromApp=nativeModule.createRequire(nativePath.join(app.getAppPath(),'package.json'));
+  const module=requireFromApp('./lib/copyout.js'),real=module.copyFilesOut;
   global.__packagedCopy={cancel:true,dest:choice,dialogs:0,calls:[]};
   dialog.showOpenDialog=async(_w,options)=>{const s=global.__packagedCopy;s.dialogs++;s.options=options;return s.cancel?{canceled:true,filePaths:[]}:{canceled:false,filePaths:[s.dest]};};
   module.copyFilesOut=async args=>{const r=await real(args);global.__packagedCopy.calls.push({args,result:r});return r;};
