@@ -5,10 +5,13 @@ function attrib(file,flag){let args=flag?[flag,file]:[file];const r=cp.spawnSync
 (async()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-copyout-test-'));const dest=path.join(root,'dest'),srcdir=path.join(root,'source');fs.mkdirSync(dest);fs.mkdirSync(srcdir);
  try{
-  const src=path.join(srcdir,'日本語 空白.bin');fs.writeFileSync(src,crypto.randomBytes(1024*1024));attrib(src,'+H');
+  const src=path.join(srcdir,'日本語 空白 🧪.bin');fs.writeFileSync(src,crypto.randomBytes(1024*1024));attrib(src,'+H');
   const meta=path.join(root,'board.json'),metabytes=JSON.stringify({links:[{path:src,wasHidden:false}],positions:{retain:[2,3]},unknown:true});fs.writeFileSync(meta,metabytes);
   const before={hash:hash(src),ino:fs.statSync(src).ino,attrs:attrib(src)};
-  let heartbeat=false;const timer=setTimeout(()=>heartbeat=true,5);const r=await copyFilesOut({sources:[src],destDir:dest});clearTimeout(timer);
+  let captured=Buffer.alloc(0);const captureSpawn=(...args)=>{const child=cp.spawn(...args);child.stdout.on('data',b=>{captured=Buffer.concat([captured,b]);});return child;};
+  let heartbeat=false;const timer=setTimeout(()=>heartbeat=true,5);const r=await copyFilesOut({sources:[src],destDir:dest,spawnImpl:captureSpawn});clearTimeout(timer);
+  if(!r.copied.length){let decoded;try{decoded=JSON.parse(captured.toString('utf8'));}catch{};console.error(JSON.stringify({fixtureOnlyWireDiagnostic:true,rawHexPrefix:captured.subarray(0,512).toString('hex'),requestedSrcCodepoints:[...src].map(c=>c.codePointAt(0)),returned:decoded?.results?.map(x=>({srcCodepoints:[...String(x.src)].map(c=>c.codePointAt(0)),destCodepoints:[...String(x.dest)].map(c=>c.codePointAt(0)),copied:x.copied,skipped:x.skipped,cleanupVerified:x.cleanupVerified,hash:x.sha256,reason:x.reason}))}));}
+  ok([...captured].every(b=>b<128),'native response JSON is ASCII-only including non-BMP source');
   ok(heartbeat,'copy worker does not block event loop');ok(r.copied.length===1,JSON.stringify(r));ok(r.failed.length===0&&r.partial.length===0,'no failure');
   const out=path.join(dest,path.basename(src));ok(hash(out)===before.hash,'copy bytes match');ok(fs.statSync(out).ino!==before.ino,'independent destination ID');ok(!attrib(out).includes('H'),'destination visible');
   ok(hash(src)===before.hash&&fs.statSync(src).ino===before.ino&&attrib(src)===before.attrs,'source bytes ID attrs unchanged');ok(fs.readFileSync(meta,'utf8')===metabytes,'board untouched');

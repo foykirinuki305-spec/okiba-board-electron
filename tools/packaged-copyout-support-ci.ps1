@@ -25,4 +25,10 @@ if($Action -ceq 'prepare'){
 }
 $result=@();foreach($p in $paths){$result += [OkibaCopyOutFiles]::Read($p)}
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
-ConvertTo-Json -InputObject $result -Depth 5 -Compress
+# BEGIN tested-copy-fixture-wire
+function Convert-CopyFixtureWire($value){
+ $json=ConvertTo-Json -InputObject $value -Depth 8 -Compress
+ return [regex]::Replace($json,'[^\u0000-\u007f]',{param($m) ('\u{0:x4}' -f [int][char]$m.Value)})
+}
+# END tested-copy-fixture-wire
+[Console]::Out.WriteLine((Convert-CopyFixtureWire $result))

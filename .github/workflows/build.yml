@@ -125,6 +125,10 @@ jobs:
           path: lease-gui-evidence/
           if-no-files-found: ignore
 
+      - name: Packaged copy fixture ASCII wire roundtrip
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ./tools/packaged-copyout-wire-selftest.ps1
+
       - name: Native copy refuses Desktop roots before opening material
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File ./tools/copyout-desktop-guard-selftest.ps1
