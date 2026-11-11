@@ -35,7 +35,8 @@ function buildMixedCopy(destination){
  const native=path.join(root,'tools/mixed-lease-native-ci.ps1');if(!fs.existsSync(native))throw Error('Mixed native prototype unavailable');
  fs.copyFileSync(native,path.join(destination,'scripts/mixed-lease-native-ci.ps1'));
  fs.appendFileSync(path.join(destination,'scripts/snap-lease.ps1'),"\n. (Join-Path $PSScriptRoot 'mixed-lease-native-ci.ps1')\n");
- const host=fs.readFileSync(path.join(root,'tools/desktop-lease-protocol-host-ci.js'),'utf8').replace('hidden:true})),snapshot:spec.baseline','hidden:true,mode:i.mode})),snapshot:spec.baseline');
+ let host=fs.readFileSync(path.join(root,'tools/desktop-lease-protocol-host-ci.js'),'utf8').replace('hidden:true})),snapshot:spec.baseline','hidden:true,mode:i.mode})),snapshot:spec.baseline');
+ host=host.replace("helper:{command:'powershell.exe'","helper:{env:{...process.env,OKIBA_MIXED_TRACE_PATH:path.join(spec.journalDir,'mixed-trace.jsonl')},command:'powershell.exe'");
  if(!host.includes('mode:i.mode'))throw Error('host mode anchor missing');
  fs.writeFileSync(path.join(destination,'tools/desktop-lease-protocol-host-ci.js'),host);
  fs.writeFileSync(path.join(destination,'copy-manifest.json'),JSON.stringify({researchOnly:true,evidence},null,2));

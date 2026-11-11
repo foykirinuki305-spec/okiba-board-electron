@@ -68,3 +68,4 @@ jobs:
             mixed-lease-ci.log
             mixed-lease-ci-journals/**
             copy-manifest.json
+            mixed-trace.jsonl

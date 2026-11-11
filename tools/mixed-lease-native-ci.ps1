@@ -2,6 +2,27 @@
 function Mixed-CIOnly {
  if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'mixed-hosted-ci-only'}
 }
+# Diagnostic observer only: no retry, timeout, guard, or Shell notification changes.
+function Mixed-Trace([string]$phase,$detail=$null){
+ Mixed-CIOnly
+ $line=(@{utc=[DateTime]::UtcNow.ToString('o');pid=$PID;phase=$phase;detail=$detail}|ConvertTo-Json -Compress -Depth 8)
+ if($env:OKIBA_MIXED_TRACE_PATH){
+  $trace=[IO.Path]::GetFullPath($env:OKIBA_MIXED_TRACE_PATH)
+  if(-not [IO.Path]::IsPathRooted($env:OKIBA_MIXED_TRACE_PATH) -or [IO.Path]::GetExtension($trace) -cne '.jsonl'){throw 'mixed-trace-path-invalid'}
+  [IO.File]::AppendAllText($trace,$line+[Environment]::NewLine,(New-Object Text.UTF8Encoding($false)))
+ }else{[Console]::Error.WriteLine($line)}
+}
+function Mixed-WaitVisibility($r,[bool]$visible){
+ $until=[DateTime]::UtcNow.AddSeconds(15);$stable=0;$poll=0
+ do{
+  $s=Lease-Snapshot;$selected=Lease-Guard $r $s
+  $indices=@();for($j=0;$j -lt @($r.records).Count;$j++){if($selected.ContainsKey((Lease-Path $r.records[$j].path))){$indices+=,$j}}
+  if(($visible -and $selected.Count -eq @($r.records).Count) -or (-not $visible -and $selected.Count -eq 0)){$stable++}else{$stable=0}
+  Mixed-Trace 'rollback-visibility-poll' @{poll=$poll;selectedCount=$selected.Count;selectedIndices=$indices;wantVisible=$visible;stable=$stable;flags=$s.folderFlags}
+  if($stable -ge 2){return $s};Start-Sleep -Milliseconds 100;$poll++
+ }while([DateTime]::UtcNow -lt $until)
+ throw 'lease-visibility-timeout'
+}
 function Mixed-Is($r){return ($r.kind -ceq 'mixed-hidden-resident-prototype')}
 function Mixed-ProjectionSame($a,$b){return ($a.identity -ceq $b.identity -and $a.size -ceq $b.size -and $a.mtime -ceq $b.mtime -and [uint32]$a.attributes -eq [uint32]$b.attributes)}
 function Mixed-Validate($r,$current){
@@ -110,18 +131,33 @@ function Mixed-TerminalRestored($r){
 }
 function Lease-Rollback([string]$token){
  $r=Lease-Require $token;if(-not (Mixed-Is $r)){return Lease-Rollback-CoreMixedBase $token}
- Mixed-CIOnly;Mixed-Validate $r (Lease-Snapshot)
- foreach($link in $r.linkRecords){$null=Lease-Guard $r (Lease-Snapshot);Lease-SetHidden $link $true}
- foreach($i in $r.residentRecords){$null=Lease-Guard $r (Lease-Snapshot);$n=Resident-Locate $i
-  if($n.state -ceq 'moved'){$null=[OkibaResidentFiles]::RestoreMoved($i.destination,$i.source,$i.identity,$i.size,$i.mtime,[uint32]$i.originalAttributes,$i.sourceParentID,$i.destParentID)}
-  else{$null=[OkibaResidentFiles]::RestoreUnmoved($i.source,$i.identity,$i.size,$i.mtime,[uint32]$i.originalAttributes,$i.sourceParentID)}
- }
- $s=Lease-WaitVisibility $r $false;Lease-AllGrid $r.snapshot $s;Mixed-TerminalRestored $r
- if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){Lease-SetSnap $r $s $true}
- Start-Sleep -Milliseconds 250;$s=Lease-Snapshot;$selected=Lease-Guard $r $s
- if($selected.Count -ne 0 -or [uint32]$s.folderFlags -ne [uint32]$r.originalFlags){throw 'mixed-rollback-unverified'}
- Mixed-TerminalRestored $r;Lease-MarkRestored $r
- return @{ok=$true;snapRestored=$true;oldUnchanged=$true;selectedHidden=$true;sourceRestored=$true;recovered=$true}
+ Mixed-CIOnly;Mixed-Trace 'rollback-start' @{links=@($r.linkRecords).Count;residents=@($r.residentRecords).Count}
+ try{
+  Mixed-Validate $r (Lease-Snapshot);Mixed-Trace 'rollback-preflight-done'
+  $index=0
+  foreach($link in $r.linkRecords){
+   $script:LeasePhase='mixed-rollback-rehide';Mixed-Trace 'rehide-before' @{index=$index}
+   $null=Lease-Guard $r (Lease-Snapshot);Lease-SetHidden $link $true
+   Mixed-Trace 'rehide-after' @{index=$index};$index++
+  }
+  $index=0
+  foreach($i in $r.residentRecords){
+   $script:LeasePhase='mixed-rollback-resident';Mixed-Trace 'resident-restore-before' @{index=$index}
+   $null=Lease-Guard $r (Lease-Snapshot);$n=Resident-Locate $i;Mixed-Trace 'resident-located' @{index=$index;state=$n.state}
+   if($n.state -ceq 'moved'){$null=[OkibaResidentFiles]::RestoreMoved($i.destination,$i.source,$i.identity,$i.size,$i.mtime,[uint32]$i.originalAttributes,$i.sourceParentID,$i.destParentID)}
+   else{$null=[OkibaResidentFiles]::RestoreUnmoved($i.source,$i.identity,$i.size,$i.mtime,[uint32]$i.originalAttributes,$i.sourceParentID)}
+   Mixed-Trace 'resident-restore-after' @{index=$index};$index++
+  }
+  $script:LeasePhase='mixed-rollback-visibility';Mixed-Trace 'visibility-before'
+  $s=Mixed-WaitVisibility $r $false;Mixed-Trace 'visibility-after' @{flags=$s.folderFlags};Lease-AllGrid $r.snapshot $s;Mixed-TerminalRestored $r
+  $script:LeasePhase='mixed-rollback-restore-snap';Mixed-Trace 'restore-snap-before' @{flags=$s.folderFlags;originalFlags=$r.originalFlags}
+  if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){Lease-SetSnap $r $s $true}
+  Mixed-Trace 'restore-snap-after'
+  Start-Sleep -Milliseconds 250;$s=Lease-Snapshot;$selected=Lease-Guard $r $s
+  if($selected.Count -ne 0 -or [uint32]$s.folderFlags -ne [uint32]$r.originalFlags){throw 'mixed-rollback-unverified'}
+  Mixed-TerminalRestored $r;Lease-MarkRestored $r;Mixed-Trace 'rollback-verified' @{flags=$s.folderFlags}
+  return @{ok=$true;snapRestored=$true;oldUnchanged=$true;selectedHidden=$true;sourceRestored=$true;recovered=$true}
+ }catch{Mixed-Trace 'rollback-failed' @{phase=$script:LeasePhase;error=$_.Exception.Message};throw}
 }
 function Lease-Release([string]$token,[string]$expectedOutcome){
  $r=Lease-Require $token;if(-not (Mixed-Is $r)){return Lease-Release-CoreMixedBase $token $expectedOutcome}

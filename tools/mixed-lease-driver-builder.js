@@ -25,6 +25,8 @@ function generateMixedDriver(copy,source){let s=fs.readFileSync(source,'utf8');
  replace("assert(!fs.existsSync(i.dest));assert(fs.readFileSync(i.path).equals(contents[n]));","if(i.mode==='resident-file')assert(!fs.existsSync(i.dest));assert(fs.readFileSync(i.path).equals(contents[n]));");
  replace("assert.deepEqual(await attributes(items.map(i=>i.path)),[attrs,attrs,attrs]);","assert.deepEqual(await attributes(items.map(i=>i.path)),[34,34,34,32,32,32]);");
  replace('  baseline=await stable();',"  assert.equal((await showPolicy('read')).value,false,'ShowHidden ON unsupported for initial Hidden link group');baseline=await stable();");
+ replace("helper:{command:'powershell.exe',args:","helper:{env:{...process.env,OKIBA_MIXED_TRACE_PATH:path.join(dir,'mixed-trace.jsonl')},command:'powershell.exe',args:");
+ replace("helperTimeoutMs:name==='hang-first-move'?4000:15000","helperTimeoutMs:name==='hang-first-move'?4000:30000");
  replace("scope:'Hosted native resident new kind; main default unchanged'","scope:'Mixed private-copy research only; samepath selected initially visible is unsupported; production unchanged'");
  s=s.replaceAll('resident-lease-ci.json','mixed-lease-ci.json').replaceAll('resident-lease-ci-journals','mixed-lease-ci-journals');
  fs.writeFileSync(path.join(copy,'tools/mixed-driver-ci.js'),s);
