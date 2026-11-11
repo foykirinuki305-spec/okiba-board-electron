@@ -5,7 +5,7 @@ const {createDesktopLeaseClient}=require('../lib/desktop-lease-client'),{createS
 const root=path.resolve(__dirname,'..'),desktop=path.resolve(process.argv[2]),run=promisify(execFile),report={passed:false,cleanupVerified:false,cases:[],scope:'Hosted native resident new kind; main default unchanged'};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms)),hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 async function main(){
- const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-resident-ci-')),tag='OkibaResident-'+crypto.randomBytes(8).toString('hex'),owned=[],hosts=[];
+ const temp=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'okiba-resident-ci-'))),tag='OkibaResident-'+crypto.randomBytes(8).toString('hex'),owned=[],hosts=[];
  const observer=createShellHelperClient({command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(root,'scripts/shell-helper.ps1')],timeoutMs:20000});
  let client=null,unsafe=false,baseline;
  async function snapshot(){const r=await observer.request('desktopSnapshot');assert(r.ok&&r.result?.ok,JSON.stringify(r));return r.result;}
@@ -15,11 +15,11 @@ async function main(){
  async function returnedToBaseline(){for(let i=0;i<100;i++){const s=await stable();if(s.icons.length===baseline.icons.length)return;await sleep(100);}throw Error('owned Desktop items remain');}
  try{
   baseline=await stable();assert(baseline.snap&&!baseline.autoArrange&&baseline.identityVersion===1);
-  for(const [index,name] of ['success32','success34','abort-placed','abort-after-restore','fault-after-hide','fault-first-move','hang-first-move','owner-death','source-occupied'].entries()){
+  for(const [index,name] of ['success32','success34','abort-placed','abort-after-restore','fault-after-hide','fault-first-move','hang-first-move','owner-death','source-occupied','cached-destination'].entries()){
    const dir=path.join(temp,name);fs.mkdirSync(dir);const attrs=name==='success34'?34:32;
    const items=Array.from({length:3},(_,n)=>{const base=tag+'-'+index+'-'+n+'.txt',source=path.join(dir,base),dest=path.join(desktop,base);fs.writeFileSync(source,'resident fixture '+index+' '+n);owned.push(dest);return {name:base,path:source,dest,offset:[0,n]};});
    await attributes(items.map(i=>i.path),attrs);const contents=items.map(i=>fs.readFileSync(i.path));
-   const before=await stable(),plan=planDesktop({snapshot:before,items,automatic:true});assert(plan.ok,JSON.stringify(plan));
+   let before=await stable(),plan=planDesktop({snapshot:before,items,automatic:true});assert(plan.ok,JSON.stringify(plan));
    let helperPath=path.join(root,'scripts/shell-helper.ps1');
    if(name.startsWith('fault-')||name==='hang-first-move'){
     const hd=path.join(dir,'helper');fs.mkdirSync(hd);for(const f of ['shell-helper.ps1','snap-lease.ps1','resident-lease.ps1','resident-file-native.cs'])fs.copyFileSync(path.join(root,'scripts',f),path.join(hd,f));helperPath=path.join(hd,'shell-helper.ps1');
@@ -30,12 +30,24 @@ async function main(){
     }
    }
    const journalDir=path.join(dir,'journal');client=createDesktopLeaseClient({journalDir,helperTimeoutMs:name==='hang-first-move'?4000:15000,helper:{command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',helperPath]}});assert((await client.ready()).ok);
-   const targets=plan.targets.map(t=>({...t,path:items.find(i=>i.name===t.name).dest}));const area=before.areas.findIndex(a=>targets.every(t=>t.x>=a.left&&t.x<a.right&&t.y>=a.top&&t.y<a.bottom));
+   let targets=plan.targets.map(t=>({...t,path:items.find(i=>i.name===t.name).dest}));let area=before.areas.findIndex(a=>targets.every(t=>t.x>=a.left&&t.x<a.right&&t.y>=a.top&&t.y<a.bottom));
    const metadata=path.join(dir,'board.json'),beforeText='{"resident":true}',afterText='{"resident":false}';fs.writeFileSync(metadata,beforeText);const receipts=[{path:metadata,beforeHash:hash(beforeText),afterHash:hash(afterText)}];
-   const scope=await client.prepareScope({kind:'resident-archive-samevolume',desktop,items:items.map(i=>({path:i.path,destination:i.dest})),snapshot:before,targetAreaIndex:area,targets,metadataPaths:[metadata]});
+   let scope=await client.prepareScope({kind:'resident-archive-samevolume',desktop,items:items.map(i=>({path:i.path,destination:i.dest})),snapshot:before,targetAreaIndex:area,targets,metadataPaths:[metadata]});
    const adapter=client.adapter(async()=>{const tmp=metadata+'.tmp';fs.writeFileSync(tmp,afterText);fs.renameSync(tmp,metadata);});
+   let cachedGuard=null;
+   if(name==='cached-destination'){
+    const seeded=await runLease({scope,receipts,adapter});assert(seeded.ok,JSON.stringify(seeded));const seededCell={x:targets[0].x,y:targets[0].y};
+    for(const i of items){assert(fs.existsSync(i.dest)&&!fs.existsSync(i.path));fs.renameSync(i.dest,i.path);}await returnedToBaseline();await attributes(items.map(i=>i.path),attrs);fs.writeFileSync(metadata,beforeText);
+    const guardName=tag+'-cached-guard.txt',guardSource=path.join(dir,guardName),guardDest=path.join(desktop,guardName);fs.writeFileSync(guardSource,'owned cached-cell guard');owned.push(guardDest);
+    const guardBefore=await stable(),gArea=guardBefore.areas.find(a=>seededCell.x>=a.left&&seededCell.x<a.right&&seededCell.y>=a.top&&seededCell.y<a.bottom),g=gArea.grid;
+    const guardItem={name:guardName,path:guardSource,dest:guardDest,offset:[0,0]},guardPlan=planDesktop({snapshot:guardBefore,items:[guardItem],point:{x:seededCell.x+g.sx/2,y:seededCell.y+g.sy/2}});assert(guardPlan.ok);assert.equal(guardPlan.targets[0].x,seededCell.x);assert.equal(guardPlan.targets[0].y,seededCell.y);
+    fs.renameSync(guardSource,guardDest);const placed=await observer.request('positionDesktopPlan',{snapshot:guardBefore,targets:guardPlan.targets.map(t=>({...t,path:guardDest})),buffer:guardPlan.buffer});assert(placed.ok&&placed.result?.ok,JSON.stringify(placed));
+    before=await stable();const icon=before.icons.find(i=>i.path&&path.resolve(i.path).toLowerCase()===guardDest.toLowerCase());assert(icon&&icon.x===seededCell.x&&icon.y===seededCell.y);cachedGuard={...icon,dest:guardDest};
+    plan=planDesktop({snapshot:before,items,automatic:true});assert(plan.ok);targets=plan.targets.map(t=>({...t,path:items.find(i=>i.name===t.name).dest}));area=before.areas.findIndex(a=>targets.every(t=>t.x>=a.left&&t.x<a.right&&t.y>=a.top&&t.y<a.bottom));
+    scope=await client.prepareScope({...scope,snapshot:before,targetAreaIndex:area,targets});report.cachedSeed={seededCell,guard:cachedGuard,finalTargets:targets};
+   }
    let result;
-   if(name.startsWith('success')||name.startsWith('fault-')||name==='hang-first-move')result=await runLease({scope,receipts,adapter});
+   if(name.startsWith('success')||name.startsWith('fault-')||name==='hang-first-move'||name==='cached-destination')result=await runLease({scope,receipts,adapter});
    else if(name==='owner-death'){
     unsafe=true;
     const host=fork(path.join(root,'tools/desktop-lease-protocol-host-ci.js'),[],{windowsHide:true,stdio:['ignore','ignore','ignore','ipc']});hosts.push(host);
@@ -56,9 +68,10 @@ async function main(){
     result=await adapter.abort(p.token);
    }
    const status=await client.status();if(name==='hang-first-move'){assert(status.helper.cumulativeRestartCount>=1);const h=status.helper.history;assert(h.length>=2&&h.at(-2).stoppedConfirmed);assert(h.at(-2).pid!==h.at(-1).pid||h.at(-2).started!==h.at(-1).started);}report.cases.push({name,result,status});console.log('resident-case '+JSON.stringify(report.cases.at(-1)));
-   if(name.startsWith('success')){assert(result.ok,JSON.stringify(result));assert.equal(fs.readFileSync(metadata,'utf8'),afterText);for(const [n,i] of items.entries()){assert(!fs.existsSync(i.path));assert(fs.readFileSync(i.dest).equals(contents[n]));}assert.deepEqual(await attributes(items.map(i=>i.dest)),[32,32,32]);}
+   if(name.startsWith('success')||name==='cached-destination'){assert(result.ok,JSON.stringify(result));assert.equal(fs.readFileSync(metadata,'utf8'),afterText);for(const [n,i] of items.entries()){assert(!fs.existsSync(i.path));assert(fs.readFileSync(i.dest).equals(contents[n]));}assert.deepEqual(await attributes(items.map(i=>i.dest)),[32,32,32]);}
    else{if(name.startsWith('fault-')||name==='hang-first-move')assert(!result.ok&&result.resolution?.state==='aborted',JSON.stringify(result));else assert(result.ok&&result.state==='aborted',JSON.stringify(result));assert.equal(fs.readFileSync(metadata,'utf8'),beforeText);for(const [n,i] of items.entries()){assert(!fs.existsSync(i.dest));assert(fs.readFileSync(i.path).equals(contents[n]));}assert.deepEqual(await attributes(items.map(i=>i.path)),[attrs,attrs,attrs]);}
-   assert((await client.close()).ok);client=null;for(const i of items){if(fs.existsSync(i.dest)){assert.equal(path.dirname(i.dest),desktop);assert(path.basename(i.dest).startsWith(tag));fs.unlinkSync(i.dest);}}
+   if(cachedGuard){const now=await stable();assert(now.icons.some(i=>i.identity===cachedGuard.identity&&i.x===cachedGuard.x&&i.y===cachedGuard.y),'cached guard displaced');assert.equal(status.helper.generation,1);report.cachedGuardUnchanged=true;}
+   assert((await client.close()).ok);client=null;if(cachedGuard){assert.equal(fs.readFileSync(cachedGuard.dest,'utf8'),'owned cached-cell guard');fs.unlinkSync(cachedGuard.dest);}for(const i of items){if(fs.existsSync(i.dest)){assert.equal(path.dirname(i.dest),desktop);assert(path.basename(i.dest).startsWith(tag));fs.unlinkSync(i.dest);}}
    await returnedToBaseline();
   }
   report.passed=true;

@@ -2,7 +2,7 @@
 if(process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Windows'||process.env.RUNNER_ENVIRONMENT!=='github-hosted')throw Error('Hosted CI only');
 const fs=require('fs'),path=require('path');
 const {createDesktopLeaseClient}=require('../lib/desktop-lease-client');
-const {runLease}=require('../lib/desktop-snap-lease-controller');
+const {runLease,resumeLeaseVerification}=require('../lib/desktop-snap-lease-controller');
 let client,chain=Promise.resolve();
 const send=m=>{try{if(process.connected)process.send(m,()=>{});}catch{}};
 async function ensureClient(spec){
@@ -15,7 +15,15 @@ async function run(spec){
  const commit=async(permit,receipts)=>{for(const r of receipts){const saved=spec.receipts.find(x=>x.path===r.path),tmp=r.path+'.write';const fd=fs.openSync(tmp,'wx');try{fs.writeFileSync(fd,saved.afterText);fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(tmp,r.path);}};
  const adapter=client.adapter(commit);const started=Date.now();
  if(spec.commitCase==='success'||spec.commitCase==='helper-hang'||spec.commitCase.startsWith('release-')||['post-restore-off','restore-reply-loss'].includes(spec.commitCase)){
-  const result=await runLease({scope,receipts:spec.receipts,adapter});send({phase:'done',result,ms:Date.now()-started,status:await client.status(),watchdog:client.diagnostics()});return;
+  let result=await runLease({scope,receipts:spec.receipts,adapter});const initialResult=result,verificationAttempts=[];
+  if(spec.commitCase==='restore-reply-loss'&&result.verificationContext&&result.resolution?.state!=='aborted'){
+   for(let attempt=0;attempt<3;attempt++){
+    await new Promise(r=>setTimeout(r,2000));const verified=await resumeLeaseVerification({adapter,context:initialResult.verificationContext});verificationAttempts.push({verified,status:await client.status()});
+    if(verified.verifiedAborted){result={...initialResult,...verified};break;}
+    if(verified.ok)throw Error('restore failure unexpectedly committed');
+   }
+  }
+  send({phase:'done',result,initialResult,verificationAttempts,ms:Date.now()-started,status:await client.status(),watchdog:client.diagnostics()});return;
  }
  const p=await adapter.prepare(scope);if(!p.ok)throw Error(JSON.stringify(p));const token=p.token;
  let r=await adapter.revealAndPlace(token);if(!r.ok)throw Error(JSON.stringify(r));

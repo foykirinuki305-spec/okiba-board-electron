@@ -26,6 +26,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/snap-lease-controller-selftest.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Native canonical file-record matching
+        shell: pwsh
+        run: node tools/resident-read-path-selftest.js
       - name: Native handle adapter in owned TEMP only
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/resident-files-native-selftest.ps1

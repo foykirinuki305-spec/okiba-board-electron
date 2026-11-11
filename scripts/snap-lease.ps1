@@ -20,7 +20,7 @@ function Lease-Snapshot {
  $metricClock=[Diagnostics.Stopwatch]::StartNew()
  try{
  $deadline=[DateTime]::UtcNow.AddSeconds(8)
- do{$s=Get-StrictDesktopSnapshot;if($s.ok){return $s};if($s.reason -ne 'desktop-changing'){throw ('lease-snapshot-'+$s.reason)};Start-Sleep -Milliseconds 50}while([DateTime]::UtcNow -lt $deadline)
+ do{$s=Get-StrictDesktopSnapshot;if($s.ok){return $s};if($s.reason -ne 'desktop-changing'){$failure=[InvalidOperationException]::new(('lease-snapshot-'+$s.reason));$failure.Data['snapshotFailure']=@{reason=$s.reason;detail=$s.detail;innerDetail=$s.innerDetail;hresult=$s.hresult;errorType=$s.errorType};throw $failure};Start-Sleep -Milliseconds 50}while([DateTime]::UtcNow -lt $deadline)
  throw 'lease-snapshot-timeout'
  }finally{Add-LeasePerf 'snapshot' $metricClock}
 }
@@ -270,7 +270,7 @@ function Invoke-SnapLeaseRequestCore($req){
  }catch{
   $inner=$_.Exception;while($null -ne $inner.InnerException){$inner=$inner.InnerException}
   $detail=[regex]::Replace([string]$inner.Message,'[^\x20-\x7E]','?')
-  return @{ok=$false;reason='lease-operation-failed';detail=$detail;phase=$script:LeasePhase;errorType=$inner.GetType().FullName;hresult=('0x{0:X8}' -f $inner.HResult);line=$_.InvocationInfo.ScriptLineNumber;batch=$script:LeaseBatchFailure}
+  return @{ok=$false;reason='lease-operation-failed';detail=$detail;phase=$script:LeasePhase;errorType=$inner.GetType().FullName;hresult=('0x{0:X8}' -f $inner.HResult);line=$_.InvocationInfo.ScriptLineNumber;batch=$script:LeaseBatchFailure;snapshotFailure=$inner.Data['snapshotFailure']}
  }
 }
 

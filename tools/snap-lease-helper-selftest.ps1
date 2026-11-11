@@ -8,6 +8,15 @@ $n=0
 function Pass([bool]$yes,[string]$name){if(-not $yes){throw $name};$script:n++;Write-Host ('ok - '+$name)}
 function Reject($f,[string]$expected){try{& $f|Out-Null}catch{Pass ($_.Exception.Message -ceq $expected) $expected;return};throw ('accepted '+$expected)}
 function Clone-Data($a){return ($a|ConvertTo-Json -Depth 20|ConvertFrom-Json)}
+# Mock failed Shell read: preserve diagnostics without accepting/retrying it.
+function Get-StrictDesktopSnapshot {$script:diagnosticReads++;return @{ok=$false;reason='shell-snapshot-error';detail='outer';innerDetail='inner';hresult='0x80070490';errorType='System.Runtime.InteropServices.COMException'}}
+$script:diagnosticReads=0
+try {Lease-Snapshot;throw 'expected failure'}catch {
+ Pass ($_.Exception.Message -eq 'lease-snapshot-shell-snapshot-error') 'unknown snapshot error remains fatal'
+ Pass ($_.Exception.Data['snapshotFailure'].hresult -eq '0x80070490' -and $_.Exception.Data['snapshotFailure'].innerDetail -eq 'inner') 'snapshot inner diagnostic retained'
+}
+Pass ($script:diagnosticReads -eq 1) 'unknown snapshot failure is not internally retried'
+Remove-Item Function:Get-StrictDesktopSnapshot
 Pass ((Lease-OtherAttributes 2) -eq (Lease-OtherAttributes 128)) 'Hidden-only and NORMAL compare as same substantive attributes'
 foreach($flag in @(1,4,16,32,1024,2048)) {Pass ((Lease-OtherAttributes ($flag -bor 2)) -ne (Lease-OtherAttributes 128)) ('substantive attribute still compared '+$flag)}
 $desktop=[Environment]::GetFolderPath('DesktopDirectory')

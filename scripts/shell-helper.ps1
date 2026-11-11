@@ -1102,7 +1102,7 @@ function Get-ShellSnapshotFailure([Exception]$exception) {
   while($null -ne $inner.InnerException){$inner=$inner.InnerException}
   $reason='shell-snapshot-error'
   if($inner -is [InvalidOperationException] -and @('item-count-changed','pidl-order-changed') -ccontains $inner.Message){$reason='desktop-changing'}
-  return @{ok=$false;reason=$reason;detail=$exception.Message}
+  return @{ok=$false;reason=$reason;detail=$exception.Message;innerDetail=$inner.Message;errorType=$inner.GetType().FullName;hresult=('0x{0:X8}' -f $inner.HResult)}
 }
 function Get-RawStrictDesktopSnapshotCore {
   $lv = Find-BestListView

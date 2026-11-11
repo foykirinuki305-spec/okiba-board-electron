@@ -47,3 +47,18 @@ $b.areas[0].monitorOrigin.x=6
 Assert-Case ((Strict-GeometryKey $a) -cne (Strict-GeometryKey $b)) 'real monitor origin change detected'
 Assert-Case (-not (Get-StrictTransactionState $a $b @()).ok) 'changed geometry transaction still rejected'
 Write-Host ('desktop identity/stability total: '+$n+' checks passed; no desktop calls')
+
+# Diagnostic fields preserve the deepest exception without changing retry policy.
+$com=[Runtime.InteropServices.COMException]::new('opaque-shell-failure',-2147023728)
+$middle=[Reflection.TargetInvocationException]::new('middle-wrapper',$com)
+$outer=[Exception]::new('outer-wrapper',$middle)
+$d=Get-ShellSnapshotFailure $outer
+Assert-Case ($d.reason -ceq 'shell-snapshot-error' -and -not $d.ok) 'HRESULT diagnostics do not make COM retryable'
+Assert-Case ($d.detail -ceq 'outer-wrapper') 'legacy outer detail preserved'
+Assert-Case ($d.innerDetail -ceq 'opaque-shell-failure') 'deepest message retained'
+Assert-Case ($d.errorType -ceq 'System.Runtime.InteropServices.COMException' -and $d.hresult -ceq '0x80070490') 'deepest HRESULT and type retained'
+$j=$d|ConvertTo-Json -Compress|ConvertFrom-Json
+Assert-Case ($j.hresult -ceq $d.hresult -and $j.innerDetail -ceq $d.innerDetail -and $j.errorType -ceq $d.errorType) 'diagnostics survive JSON wire'
+$t=Get-ShellSnapshotFailure ([Reflection.TargetInvocationException]::new('wrapper',[InvalidOperationException]::new('item-count-changed')))
+Assert-Case ($t.reason -ceq 'desktop-changing' -and $t.errorType -ceq 'System.InvalidOperationException' -and $t.innerDetail -ceq 'item-count-changed') 'known transient classification unchanged'
+Write-Host ('desktop identity/diagnostics total: '+$n+' checks passed; no desktop calls')
