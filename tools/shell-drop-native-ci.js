@@ -45,5 +45,5 @@ let client,baseline,records=[];
 }catch(e){report.error=e.stack;process.exitCode=1;}finally{
  if(fs.existsSync(path.join(temp,'input-result.json')))report.input=JSON.parse(fs.readFileSync(path.join(temp,'input-result.json')));
  if(client)report.readonlyObserverStopped=await client.stopAndWait(15000);
- fs.mkdirSync(path.join(root,'shell-drop-evidence'),{recursive:true});fs.writeFileSync(path.join(root,'shell-drop-evidence',kind+'.json'),JSON.stringify(report,null,2));
+ fs.mkdirSync(path.join(root,'shell-drop-evidence'),{recursive:true});if(fs.existsSync(path.join(temp,'source-guard-failure.png')))fs.copyFileSync(path.join(temp,'source-guard-failure.png'),path.join(root,'shell-drop-evidence',kind+'-source-guard-failure.png'));fs.writeFileSync(path.join(root,'shell-drop-evidence',kind+'.json'),JSON.stringify(report,null,2));
 }})();

@@ -34,7 +34,7 @@ public static class OkibaShellDragCI {
   [FieldOffset(12)] public int dy;
   [FieldOffset(20)] public uint flags;
  }
- public sealed class Result {public int hresult;public uint effect;public bool loopReturned;public string inputError;public string topLeftSemantics="POINT[0]=group top-left at source cursor; remaining relative offsets";public int startX,startY,targetX,targetY;public string targetClass;public string sourceWindowDiagnostic;public bool asyncSupported;public bool asyncDisabled;public bool inOperation;public string asyncDiagnostic;public uint? performedEffect,logicalEffect;}
+ public sealed class Result {public int hresult;public uint effect;public bool loopReturned;public string inputError;public string topLeftSemantics="POINT[0]=group top-left at source cursor; remaining relative offsets";public int startX,startY,targetX,targetY;public string targetClass;public string sourceWindowDiagnostic;public string failureScreenshot;public string screenshotError;public bool asyncSupported;public bool asyncDisabled;public bool inOperation;public string asyncDiagnostic;public uint? performedEffect,logicalEffect;}
  [DllImport("ole32.dll")] static extern int OleInitialize(IntPtr p);
  [DllImport("ole32.dll")] static extern void OleUninitialize();
  [DllImport("ole32.dll",PreserveSig=true)] static extern int DoDragDrop(System.Runtime.InteropServices.ComTypes.IDataObject data,IOkibaDropSource source,uint allowed,out uint effect);
@@ -54,10 +54,16 @@ public static class OkibaShellDragCI {
  [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Pt p);
  [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h,uint mode);
  [StructLayout(LayoutKind.Sequential)] struct Rect {public int left,top,right,bottom;}
+ [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+ [DllImport("user32.dll")] static extern bool IsWindowEnabled(IntPtr hwnd);
+ [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd,int command);
+ [DllImport("user32.dll",EntryPoint="GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr hwnd,int index);
+ [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
+ [DllImport("user32.dll")] static extern IntPtr GetThreadDpiAwarenessContext();
  [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd,out Rect rect);
  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);
  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
- static string DescribeWindow(IntPtr hwnd){Rect rect;bool got=GetWindowRect(hwnd,out rect);uint pid;GetWindowThreadProcessId(hwnd,out pid);var cls=new StringBuilder(128);GetClassName(hwnd,cls,128);return "hwnd="+hwnd.ToInt64()+" pid="+pid+" class="+cls+" rectValid="+got+" rect="+rect.left+","+rect.top+","+rect.right+","+rect.bottom;}
+ static string DescribeWindow(IntPtr hwnd){Rect rect;bool got=GetWindowRect(hwnd,out rect);uint pid;GetWindowThreadProcessId(hwnd,out pid);var cls=new StringBuilder(128);GetClassName(hwnd,cls,128);return "hwnd="+hwnd.ToInt64()+" pid="+pid+" class="+cls+" visible="+IsWindowVisible(hwnd)+" enabled="+IsWindowEnabled(hwnd)+" style="+GetWindowLongPtr(hwnd,-16).ToInt64()+" exstyle="+GetWindowLongPtr(hwnd,-20).ToInt64()+" dpi="+GetDpiForWindow(hwnd)+" threadDpiContext="+GetThreadDpiAwarenessContext().ToInt64()+" rectValid="+got+" rect="+rect.left+","+rect.top+","+rect.right+","+rect.bottom;}
 
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr h,StringBuilder b,int count);
  static void Gate(){if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true"||Environment.GetEnvironmentVariable("RUNNER_OS")!="Windows"||Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT")!="github-hosted")throw new Exception("hosted CI only");}
@@ -103,7 +109,7 @@ public static class OkibaShellDragCI {
     var label=new Label{Text="Hosted disposable Shell drag fixture",Dock=DockStyle.Top,Height=30};form.Controls.Add(label);
     form.MouseDown+=(sender,e)=>{if(e.Button!=MouseButtons.Left)return;try{Offsets(data,result.startX,result.startY,offsetX,offsetY);started.Set();uint effect;result.hresult=DoDragDrop(data,new OkibaDropSourceCI(),2,out effect);result.effect=effect;result.loopReturned=true;}catch(Exception ex){result.inputError=ex.ToString();}finally{finished.Set();form.BeginInvoke(new Action(()=>form.Close()));}};
     form.Shown+=(sender,e)=>{
-     form.BringToFront();form.Activate();form.Focus();
+     form.Enabled=true;ShowWindow(form.Handle,5);form.BringToFront();form.Activate();form.Focus();
      IntPtr hwnd=form.Handle;Pt start=new Pt{x=form.Left+100,y=form.Top+100};result.startX=start.x;result.startY=start.y;
      var thread=new Thread(()=>{
       IntPtr workerDpi=SetThreadDpiAwarenessContext(new IntPtr(-4));bool down=false;
@@ -112,15 +118,22 @@ public static class OkibaShellDragCI {
        var focusWait=System.Diagnostics.Stopwatch.StartNew();
        do{IntPtr actualForeground=GetForegroundWindow(),pointWindow=WindowFromPoint(start),pointRoot=GetAncestor(pointWindow,2);
         result.sourceWindowDiagnostic="expected{"+DescribeWindow(hwnd)+"} foreground{"+DescribeWindow(actualForeground)+"} point{"+DescribeWindow(pointWindow)+"} pointRoot{"+DescribeWindow(pointRoot)+"} start="+start.x+","+start.y+" elapsedMs="+focusWait.ElapsedMilliseconds;
-        if(actualForeground==hwnd&&pointRoot==hwnd)break;
+        if(actualForeground==hwnd&&pointRoot==hwnd&&IsWindowVisible(hwnd)&&IsWindowEnabled(hwnd))break;
         Thread.Sleep(50);
        }while(focusWait.ElapsedMilliseconds<2000);
-       if(GetForegroundWindow()!=hwnd||GetAncestor(WindowFromPoint(start),2)!=hwnd)throw new Exception("owned foreground/source HWND mismatch: "+result.sourceWindowDiagnostic);
+       if(GetForegroundWindow()!=hwnd||GetAncestor(WindowFromPoint(start),2)!=hwnd||!IsWindowVisible(hwnd)||!IsWindowEnabled(hwnd))throw new Exception("owned foreground/source HWND mismatch: "+result.sourceWindowDiagnostic);
        Pt target=new Pt{x=x,y=y};var cls=new StringBuilder(128);GetClassName(WindowFromPoint(target),cls,128);result.targetClass=cls.ToString();if(result.targetClass!="SysListView32"&&result.targetClass!="WorkerW"&&result.targetClass!="Progman")throw new Exception("not exposed Desktop: "+result.targetClass);
        Move(start.x,start.y);Button(2);down=true;if(!started.WaitOne(10000))throw new Exception("drag loop not entered");
        for(int n=1;n<=24;n++){Move(start.x+(x-start.x)*n/24,start.y+(y-start.y)*n/24);Thread.Sleep(25);if(cancel&&n==8){keybd_event(27,0,0,UIntPtr.Zero);keybd_event(27,0,2,UIntPtr.Zero);break;}}
        Thread.Sleep(300);Button(4);down=false;if(!finished.WaitOne(20000))throw new Exception("Explorer completion unproven; no cleanup allowed");
-      }catch(Exception ex){result.inputError=ex.ToString();if(started.WaitOne(0)&&GetForegroundWindow()==hwnd){keybd_event(27,0,0,UIntPtr.Zero);keybd_event(27,0,2,UIntPtr.Zero);}if(!started.WaitOne(0))form.BeginInvoke(new Action(()=>form.Close()));}
+      }catch(Exception ex){result.inputError=ex.ToString();
+       try{
+        string evidence=Environment.GetEnvironmentVariable("OKIBA_SHELL_DROP_EVIDENCE_DIR");
+        if(String.IsNullOrEmpty(evidence)||!Path.GetFullPath(evidence).StartsWith(tmp+"\\",StringComparison.OrdinalIgnoreCase)||!new DirectoryInfo(evidence).Name.StartsWith("okiba-shell-drop-"))throw new Exception("owned evidence directory required");
+        result.failureScreenshot=Path.Combine(evidence,"source-guard-failure.png");
+        using(var bitmap=new Bitmap(right-left,bottom-top)){using(var graphics=Graphics.FromImage(bitmap)){graphics.CopyFromScreen(left,top,0,0,new Size(right-left,bottom-top));}bitmap.Save(result.failureScreenshot,System.Drawing.Imaging.ImageFormat.Png);}
+       }catch(Exception capture){result.screenshotError=capture.ToString();}
+       if(started.WaitOne(0)&&GetForegroundWindow()==hwnd){keybd_event(27,0,0,UIntPtr.Zero);keybd_event(27,0,2,UIntPtr.Zero);}if(!started.WaitOne(0))form.BeginInvoke(new Action(()=>form.Close()));}
       finally{try{if(down)Button(4);Move(cursor.x,cursor.y);}catch(Exception ex){result.inputError=(result.inputError??"")+" cursor restore: "+ex.Message;}if(workerDpi!=IntPtr.Zero)SetThreadDpiAwarenessContext(workerDpi);}
      });inputThread=thread;thread.IsBackground=true;thread.Start();
     };

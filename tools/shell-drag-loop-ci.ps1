@@ -19,6 +19,7 @@ Add-Type -Path (Join-Path $PSScriptRoot 'shell-drag-loop-ci.cs') -ReferencedAsse
 $terminal=$null;$result=@{}
 try{
  $terminal=Suspend-RunnerTerminal
+ $env:OKIBA_SHELL_DROP_EVIDENCE_DIR=$root
  $result.input=[OkibaShellDragCI]::Run([string[]]$q.paths,[int]$q.target.x,[int]$q.target.y,0,[int]$q.sy,[int]$q.area.left,[int]$q.area.top,[int]$q.area.right,[int]$q.area.bottom,($q.kind -ceq 'cancel'))
 }finally{
  if($terminal){try{Resume-RunnerTerminal $terminal}finally{$result.terminal=$terminal.evidence;$terminal.owner.Dispose()}}
