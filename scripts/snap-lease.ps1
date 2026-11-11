@@ -1,5 +1,6 @@
 ﻿# Dedicated watchdog lease commands. No main.js call site is enabled.
 $script:SnapLease=$null
+$script:LeasePhase='idle'
 function Lease-PhysicalKey($s) {
  return (@($s.explorerPid,$s.explorerStarted,$s.listviewHwnd,[int]$s.origin.x,[int]$s.origin.y,$s.viewDpi,$s.sx,$s.sy,@($s.areas|ForEach-Object{@($_.left,$_.top,$_.right,$_.bottom,$_.scale,[int]$_.monitorOrigin.x,[int]$_.monitorOrigin.y)}))|ConvertTo-Json -Depth 10 -Compress)
 }
@@ -51,6 +52,7 @@ function Lease-SetHidden($record,[bool]$hidden){
  $null=[OkibaFileAttributes]::SetRecorded($record.path,$record.identity,$n.hidden,$hidden,$record.size,$record.mtime,[uint32]$record.attributes)
 }
 function Lease-SetSnap($r,$current,[bool]$enabled){
+ $script:LeasePhase=if($enabled){'native-snap-enable'}else{'native-snap-disable'}
  $null=Lease-Guard $r $current
  if($enabled){Lease-AllGrid $r.snapshot $current}
  [OkibaFolderView]::SetLeaseSnap([uint32]$current.folderFlags,$enabled,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted,[string[]]@($current.icons.identity),[int[]]@($current.icons.x),[int[]]@($current.icons.y))
@@ -115,24 +117,30 @@ function Lease-WaitVisibility($r,[bool]$visible){
  throw 'lease-visibility-timeout'
 }
 function Lease-RevealPlace([string]$token){
+ $script:LeasePhase='reveal-preflight'
  $r=Lease-Require $token;if(([OkibaLeaseOwner]::Read()).state -ne 'alive'){throw 'lease-owner-not-alive'};$s=Lease-Snapshot;Lease-ValidateRecovery $r $s
  if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){throw 'lease-not-initial-flags'}
  foreach($record in $r.records){if(-not (Lease-CheckRecord $record).hidden){throw 'lease-selected-not-hidden'}}
  if((Lease-Guard $r $s).Count -ne 0){throw 'lease-selected-visible-before-reveal'}
  Lease-SetSnap $r $s $false
  $off=[uint32]$r.originalFlags -band ([uint32]::MaxValue -bxor 4)
+ $script:LeasePhase='reveal-attributes'
  foreach($record in $r.records){$s=Lease-Snapshot;$null=Lease-Guard $r $s;if([uint32]$s.folderFlags -ne $off){throw 'lease-flags-changed'};Lease-SetHidden $record $false}
+ $script:LeasePhase='reveal-arrival'
  $s=Lease-WaitVisibility $r $true;$selected=Lease-Guard $r $s
  if([uint32]$s.folderFlags -ne $off){throw 'lease-flags-changed'}
  $ids=@();$paths=@();$xs=@();$ys=@();$tx=@();$ty=@()
  foreach($t in $r.targets){$i=$selected[(Lease-Path $t.path)];$ids+=$i.identity;$paths+=$t.path;$xs+=$i.x;$ys+=$i.y;$tx+=$t.x;$ty+=$t.y}
+ $script:LeasePhase='native-place'
  [OkibaFolderView]::PositionLeaseItems([string[]]$ids,[string[]]$paths,[int[]]$xs,[int[]]$ys,[int[]]$tx,[int[]]$ty,$off,[long]$r.snapshot.listviewHwnd,[int]$r.snapshot.explorerPid,[string]$r.snapshot.explorerStarted)
+ $script:LeasePhase='after-place'
  Start-Sleep -Milliseconds 180
  $s=Lease-Snapshot;$null=Lease-Guard $r $s $true
  if([uint32]$s.folderFlags -ne $off){throw 'lease-flags-changed'}
  return @{ok=$true;oldUnchanged=$true;targetsExact=$true;snapRestored=$false}
 }
 function Lease-RestoreVerify([string]$token){
+ $script:LeasePhase='restore-preflight'
  $r=Lease-Require $token;$s=Lease-Snapshot;$null=Lease-Guard $r $s $true;Lease-AllGrid $r.snapshot $s
  foreach($record in $r.records){if((Lease-CheckRecord $record).hidden){throw 'lease-target-hidden'}}
  if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){Lease-SetSnap $r $s $true}
@@ -142,6 +150,7 @@ function Lease-RestoreVerify([string]$token){
  return @{ok=$true;snapRestored=$true;oldUnchanged=$true;targetsExact=$true}
 }
 function Lease-Rollback([string]$token){
+ $script:LeasePhase='rollback-preflight'
  $r=Lease-Require $token;$s=Lease-Snapshot;$null=Lease-Guard $r $s
  foreach($record in $r.records){$null=Lease-CheckRecord $record}
  foreach($record in $r.records){$s=Lease-Snapshot;$null=Lease-Guard $r $s;Lease-SetHidden $record $true}
@@ -154,6 +163,7 @@ function Lease-Rollback([string]$token){
 }
 function Invoke-SnapLeaseRequest($req){
  try{
+  $script:LeasePhase=[string]$req.cmd
   if($env:OKIBA_SNAP_LEASE -ne '1'){throw 'lease-dedicated-helper-required'}
   switch($req.cmd){
    'leaseOwnerPin' {if($null -ne $script:SnapLease){throw 'lease-already-active'};return [OkibaLeaseOwner]::Pin([int]$req.pid,[string]$req.started)}
@@ -167,5 +177,9 @@ function Invoke-SnapLeaseRequest($req){
    'leaseRelease' {$r=Lease-Require $req.token;$s=Lease-Snapshot;$null=Lease-Guard $r $s;if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags){throw 'lease-still-disabled'};$script:SnapLease=$null;return @{ok=$true}}
    default {throw 'lease-unknown-command'}
   }
- }catch{return @{ok=$false;reason='lease-operation-failed';detail=$_.Exception.Message}}
+ }catch{
+  $inner=$_.Exception;while($null -ne $inner.InnerException){$inner=$inner.InnerException}
+  $detail=[regex]::Replace([string]$inner.Message,'[^\x20-\x7E]','?')
+  return @{ok=$false;reason='lease-operation-failed';detail=$detail;phase=$script:LeasePhase;errorType=$inner.GetType().FullName;hresult=('0x{0:X8}' -f $inner.HResult);line=$_.InvocationInfo.ScriptLineNumber}
+ }
 }

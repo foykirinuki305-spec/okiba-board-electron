@@ -22,6 +22,9 @@ jobs:
       - name: Canonical lease geometry pure checks
         shell: pwsh
         run: pwsh -NoProfile -File ./tools/snap-lease-geometry-selftest.ps1
+      - name: Read-only native Shell session identity verification
+        shell: pwsh
+        run: powershell -NoProfile -File ./tools/lease-session-read-selftest.ps1
       - name: Atomic journal replacement pure checks
         shell: pwsh
         run: powershell -NoProfile -File ./tools/snap-lease-json-selftest.ps1

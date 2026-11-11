@@ -699,12 +699,12 @@ public static class OkibaFolderView {
    }finally{if(point!=IntPtr.Zero)Marshal.FreeCoTaskMem(point);if(points!=IntPtr.Zero)Marshal.FreeCoTaskMem(points);if(array!=IntPtr.Zero)Marshal.FreeCoTaskMem(array);if(children!=null)foreach(var child in children)Marshal.FreeCoTaskMem(child);}
   }
  }
- [ComImport,Guid("00000114-0000-0000-C000-000000000046"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
- interface IOleWindowLease {[PreserveSig]int GetWindow(out IntPtr hwnd);[PreserveSig]int ContextSensitiveHelp(bool enter);}
+ [ComImport,Guid("000214E3-0000-0000-C000-000000000046"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+ interface IShellViewWindowLease {[PreserveSig]int GetWindow(out IntPtr hwnd);[PreserveSig]int ContextSensitiveHelp(bool enter);}
  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);
  [DllImport("user32.dll")] static extern bool IsChild(IntPtr parent,IntPtr child);
  static void AssertLeaseSession(Session s,long expectedLv,int expectedPid,string expectedStarted){
-  IntPtr hwnd;Marshal.ThrowExceptionForHR(((IOleWindowLease)s.Folder).GetWindow(out hwnd));
+  IntPtr hwnd;Marshal.ThrowExceptionForHR(((IShellViewWindowLease)s.Folder).GetWindow(out hwnd));
   uint pid;GetWindowThreadProcessId(hwnd,out pid);
   if(pid!=(uint)expectedPid||(hwnd.ToInt64()!=expectedLv&&!IsChild(hwnd,new IntPtr(expectedLv))))throw new InvalidOperationException("lease-view-changed");
   using(var p=System.Diagnostics.Process.GetProcessById(expectedPid)){if(p.StartTime.ToUniversalTime().Ticks.ToString()!=expectedStarted)throw new InvalidOperationException("lease-explorer-changed");}

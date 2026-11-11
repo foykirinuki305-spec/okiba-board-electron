@@ -109,8 +109,9 @@ async function main(){
    const spec={desktop,caseDir,journalDir,commitCase,helperPath,baseline:before,selected:selected.map(i=>({path:i.dest})),targets,targetAreaIndex,receipts};
    let ownerChild=index===1?warmOwner:fork(path.join(root,'tools','desktop-lease-protocol-host-ci.js'),[],{windowsHide:true,stdio:['ignore','ignore','ignore','ipc']});
    if(index!==1)children.push({child:ownerChild,kind:'protocol-owner'});
+   let lastMessage=null;
    try{
-    const response=ownerMessage(ownerChild);ownerChild.send({cmd:'run',spec});const message=await response;note('protocol-owner',{name,...message});
+    const response=ownerMessage(ownerChild);ownerChild.send({cmd:'run',spec});const message=await response;lastMessage=message;note('protocol-owner',{name,...message});
     let expected;
     if(commitCase==='success'){assert(message.result.ok);assert.equal(message.status.helper.spawns,1,'normal transactions must reuse one warm helper');expected='released';}
     else if(commitCase==='helper-hang'){assert(!message.result.ok);assert.equal(message.result.resolution?.state,'aborted');assert(message.status.helper.spawns>=2);expected='aborted';}
@@ -123,7 +124,15 @@ async function main(){
     for(const i of selected){assert.equal((await attrs.readHidden(i.dest)).hidden,expected==='aborted');assert.equal(crypto.createHash('sha256').update(fs.readFileSync(i.dest)).digest('hex'),hashes.get(i.dest));}
     assert.equal(crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'),expected==='released'?receipts[0].afterHash:receipts[0].beforeHash);
     if(index===0){warmOwner=ownerChild;warmJournal=journalDir;}else if(ownerChild.exitCode===null&&ownerChild.signalCode===null){const closed=ownerMessage(ownerChild);ownerChild.send({cmd:'close'});assert((await closed).result.ok);}
-   }catch(e){note('protocol-case-error',{name,error:String(e.stack||e)});unsafe=true;throw e;}
+   }catch(e){
+    report.primaryError=String(e.stack||e);note('protocol-case-error',{name,error:report.primaryError});
+    // A proven terminal lease may be shut down cleanly even if a test assertion failed.
+    if(lastMessage?.status?.unsafe===false&&['aborted','released','idle'].includes(lastMessage.status.phase)&&ownerChild.connected){
+     try{const closed=ownerMessage(ownerChild,15000);ownerChild.send({cmd:'close'});const result=await closed;if(!result.result?.ok)throw Error(JSON.stringify(result));note('failed-case-terminal-close',{name});}
+     catch(closeError){unsafe=true;report.cleanupBlocked=String(closeError);}
+    }else{unsafe=true;report.cleanupBlocked='failed case lacks confirmed terminal watchdog shutdown';}
+    throw e;
+   }
    finally{fs.cpSync(caseDir,path.join(evidenceDir,name),{recursive:true});}
    for(const i of selected)assert((await attrs.setHidden(i.dest,true)).ok);await visible(selected.map(i=>i.name),false,'protocol-between',before);
   }
@@ -137,9 +146,9 @@ async function main(){
    for(let n=0;n<100;n++){const s=await observe('lease-fixture-cleanup',original);if(s.ok&&s.icons.length===original.icons.length)break;if(n===99)throw Error('owned fixture icons still present; snap restoration withheld');await sleep(100);}
    const on=await req('ciSnapFlags',{flags:4});assert(on.ok);const last=await stable('lease-cleanup-restored',original);assert(last.snap&&!last.autoArrange);report.cleanupVerified=true;
   }
-  if(!await c.stopAndWait(10000))unsafe=true;
+  if(!await c.stopAndWait(10000)){unsafe=true;report.cleanupBlocked='observer helper stop unconfirmed';}
   fs.writeFileSync(path.join(root,'desktop-lease-protocol-ci.json'),JSON.stringify(report,null,2));
-  if(unsafe)throw Error('helper termination unconfirmed');
+  if(unsafe)throw Error(report.primaryError||report.cleanupBlocked||'cleanup safety unconfirmed');
   const resolved=path.resolve(temp);assert(resolved.startsWith(fs.realpathSync.native(os.tmpdir())+path.sep)&&path.basename(resolved).startsWith('okiba-dense-ci-'));fs.rmSync(resolved,{recursive:true,force:true});
  }
 }
