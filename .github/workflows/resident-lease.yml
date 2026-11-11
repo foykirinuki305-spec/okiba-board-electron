@@ -33,6 +33,7 @@ jobs:
           node tools/desktop-resident-selection-selftest.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/stable-snapshot-ci-selftest.js
+          node tools/show-abort-policy-selftest.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/snap-lease-controller-selftest.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

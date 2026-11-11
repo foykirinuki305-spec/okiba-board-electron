@@ -1,0 +1,10 @@
+'use strict';
+const assert=require('assert/strict'),fs=require('fs'),{isSafeShowAbort:f}=require('./show-abort-policy-ci');
+const r={ok:false,resolution:{state:'aborted'}},s={ok:true,unsafe:false,phase:'aborted'};
+assert(f('show-hidden-mid-stage',r,s));
+for(const name of ['success32','cached-destination','show-hidden-already-on'])assert(!f(name,r,s));
+for(const x of [{ok:true,resolution:{state:'aborted'}},{ok:false,resolution:{state:'pending'}},{ok:false}])assert(!f('show-hidden-mid-stage',x,s));
+for(const x of [{...s,unsafe:true},{...s,phase:'blocked'},{...s,ok:false},{ok:true,phase:'aborted'}])assert(!f('show-hidden-mid-stage',r,x));
+const source=fs.readFileSync(require('path').join(__dirname,'resident-lease-ci.js'),'utf8');
+for(const needle of ["['identity','size','mtime','attributes']","originals[n].hash","originals[n].parent","safe-aborted-external-show-change","wait-owned-processes-ci.ps1","runSentinelResident"])assert(source.includes(needle));
+console.log('ShowHidden safe-abort policy 11 cases plus proof wiring PASS');

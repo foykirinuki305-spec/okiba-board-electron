@@ -30,7 +30,7 @@ function generateMixedDriver(copy,source){let s=fs.readFileSync(source,'utf8');
  replace("assert(!fs.existsSync(i.dest));assert(fs.readFileSync(i.path).equals(contents[n]));","if(i.mode==='resident-file')assert(!fs.existsSync(i.dest));assert(fs.readFileSync(i.path).equals(contents[n]));");
  replace("assert.deepEqual(await attributes(items.map(i=>i.path)),[attrs,attrs,attrs]);","assert.deepEqual(await attributes(items.map(i=>i.path)),[34,34,34,32,32,32]);");
  replace('  baseline=await stable();',"  assert.equal((await showPolicy('read')).value,false,'ShowHidden ON unsupported for initial Hidden link group');baseline=await stable();");
- replace("helper:{command:'powershell.exe',args:","helper:{env:{...process.env,OKIBA_MIXED_TRACE_PATH:path.join(dir,'mixed-trace.jsonl')},command:'powershell.exe',args:");
+ replace("helper:{command:'powershell.exe',args:","helper:{env:{...process.env,OKIBA_MIXED_TRACE_PATH:path.join(dir,'mixed-trace.jsonl')},command:'powershell.exe',args:",2);
  replace("const {diagnosticCopy}=require('./resident-diagnostic-copy-ci');", "");
  replace("   helperPath=diagnosticCopy(helperPath,dir);if(showCase)policy.proofPath=path.join(path.dirname(helperPath),'show-proof.json');", "");
  replace("const fs=require('fs')","const {runOwnedResidents}=require('./mixed-owned-resident-fixture-ci');\nconst fs=require('fs')");
@@ -46,14 +46,15 @@ function generateMixedDriver(copy,source){let s=fs.readFileSync(source,'utf8');
    const dir=path.join(temp,name);`);
  replace("    for(const i of items){assert(fs.existsSync(i.dest)&&!fs.existsSync(i.path));fs.renameSync(i.dest,i.path);}await returnedToBaseline();await attributes(items.map(i=>i.path),attrs);fs.writeFileSync(metadata,beforeText);",`    // Terminal seeded transaction; hide every actual destination before renaming residents.
     for(const i of items){assert(fs.existsSync(i.dest));const read=await observer.request('readHiddenFile',{path:i.dest});assert(read.ok&&read.result.ok);assert.equal(read.result.identity,scope.items[items.indexOf(i)].fileIdentity);assert(fs.readFileSync(i.dest).equals(contents[items.indexOf(i)]));const changed=await observer.request('ciMixedHideOwned',{path:i.dest,expectedIdentity:read.result.identity,expectedHidden:read.result.hidden,size:read.result.size,mtime:read.result.mtime,attributes:read.result.attributes});assert(changed.ok&&changed.result.ok);}
-    await returnedToBaseline();
+    const terminal=await client.status();assert(terminal.ok&&!terminal.unsafe&&terminal.phase==='released');
+    await returnedToBaseline({cleanup:true});
     for(const i of items){if(i.mode==='resident-file'){assert(!fs.existsSync(i.path));fs.renameSync(i.dest,i.path);}}
-    await attributes(items.filter(i=>i.mode==='resident-file').map(i=>i.path),32);await returnedToBaseline();fs.writeFileSync(metadata,beforeText);`);
+    await attributes(items.filter(i=>i.mode==='resident-file').map(i=>i.path),32);for(const [n,i] of items.entries()){const own=await observer.request('readHiddenFile',{path:i.path});assert(own.ok&&own.result.ok);assert.equal(own.result.identity,scope.items[n].fileIdentity);assert(fs.readFileSync(i.path).equals(contents[n]));}await returnedToBaseline({cleanup:true});fs.writeFileSync(metadata,beforeText);`);
  replace("    fs.renameSync(guardSource,guardDest);const placed=await observer.request('positionDesktopPlan',{snapshot:guardBefore,targets:guardPlan.targets.map(t=>({...t,path:guardDest})),buffer:guardPlan.buffer});assert(placed.ok&&placed.result?.ok,JSON.stringify(placed));",`    await attributes([guardSource],32);const placed=await runOwnedResidents({client,items:[guardItem],plan:guardPlan,snapshot:guardBefore,desktop,metadata:path.join(dir,'guard-metadata.json'),runLease});assert(placed.result.ok);`);
  replace("if(baseline){await returnedToBaseline({cleanup:true});report.cleanupVerified=true;}",`if(denseState){if(denseState.planted)await stable();baseline=denseState.initialBaseline;for(const f of denseState.files){if(fs.existsSync(f.path)){assert.equal(path.dirname(f.path),desktop);assert(path.basename(f.path).startsWith(tag+'-dense-'));assert(fs.readFileSync(f.path).equals(f.bytes));fs.unlinkSync(f.path);}}}if(baseline){await returnedToBaseline({cleanup:true});report.cleanupVerified=true;}`);
  replace("scope:'Hosted native resident new kind; main default unchanged'","scope:'Mixed private-copy research only; samepath selected initially visible is unsupported; production unchanged'");
  s=s.replaceAll('resident-lease-ci.json','mixed-lease-ci.json').replaceAll('resident-lease-ci-journals','mixed-lease-ci-journals');
  fs.writeFileSync(path.join(copy,'tools/mixed-driver-ci.js'),s);
- for(const file of ['stable-snapshot-ci.js','wait-owned-processes-ci.ps1','show-hidden-command-ci.ps1','show-hidden-fixture-ci.cs','mixed-owned-resident-fixture-ci.js'])fs.copyFileSync(path.join(path.dirname(source),file),path.join(copy,'tools',file));
+ for(const file of ['stable-snapshot-ci.js','show-abort-policy-ci.js','wait-owned-processes-ci.ps1','show-hidden-command-ci.ps1','show-hidden-fixture-ci.cs','mixed-owned-resident-fixture-ci.js'])fs.copyFileSync(path.join(path.dirname(source),file),path.join(copy,'tools',file));
 }
 module.exports={generateMixedDriver};

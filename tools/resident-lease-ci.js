@@ -1,6 +1,8 @@
 'use strict';
 if(process.platform!=='win32'||process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Windows'||process.env.RUNNER_ENVIRONMENT!=='github-hosted')throw Error('Hosted Windows CI only');
 const {stableSnapshot}=require('./stable-snapshot-ci');
+const {isSafeShowAbort}=require('./show-abort-policy-ci');
+const {runOwnedResidents:runSentinelResident}=require('./mixed-owned-resident-fixture-ci');
 const {diagnosticCopy}=require('./resident-diagnostic-copy-ci');
 const fs=require('fs'),os=require('os'),path=require('path'),assert=require('assert/strict'),crypto=require('crypto'),{execFile,fork}=require('child_process'),{promisify}=require('util');
 const {createDesktopLeaseClient}=require('../lib/desktop-lease-client'),{createShellHelperClient}=require('../lib/shellhelper'),{runLease}=require('../lib/desktop-snap-lease-controller'),{planDesktop,sameSnapshot}=require('../lib/safe-desktop');
@@ -44,6 +46,7 @@ async function main(){
    if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'CI only'}
    Add-Type -Path (Join-Path $PSScriptRoot 'show-hidden-fixture-ci.cs')
    $proof=@{phase='first-stage-hidden';path=$i.destination;visible=$false};${toggle}
+   $proof|ConvertTo-Json -Depth 8|Set-Content (Join-Path $PSScriptRoot 'show-proof.json') -Encoding UTF8
    for($attempt=0;$attempt -lt 60;$attempt++){
     $ss=Lease-Snapshot;$selected=Lease-Guard $r $ss
     if($ss.snap){throw 'Expected snap OFF during hidden stage'}
@@ -62,6 +65,7 @@ async function main(){
    const metadata=path.join(dir,'board.json'),beforeText='{"resident":true}',afterText='{"resident":false}';fs.writeFileSync(metadata,beforeText);const receipts=[{path:metadata,beforeHash:hash(beforeText),afterHash:hash(afterText)}];
    let scope=await client.prepareScope({kind:'resident-archive-samevolume',desktop,items:items.map(i=>({path:i.path,destination:i.dest})),snapshot:before,targetAreaIndex:area,targets,metadataPaths:[metadata]});
    const adapter=client.adapter(async()=>{const tmp=metadata+'.tmp';fs.writeFileSync(tmp,afterText);fs.renameSync(tmp,metadata);});
+   const originals=[];for(const i of items){const r=await observer.request('readHiddenFile',{path:i.path});assert(r.ok&&r.result.ok);const parent=fs.statSync(path.dirname(i.path),{bigint:true});originals.push({native:r.result,hash:hash(fs.readFileSync(i.path)),parent:[String(parent.dev),String(parent.ino)]});}
    let cachedGuard=null;
    if(name==='cached-destination'){
     const seeded=await runLease({scope,receipts,adapter});assert(seeded.ok,JSON.stringify(seeded));const seededCell={x:targets[0].x,y:targets[0].y};
@@ -98,11 +102,24 @@ async function main(){
     result=await adapter.abort(p.token);
    }
    const status=await client.status();if(name==='hang-first-move'){assert(status.helper.cumulativeRestartCount>=1);const h=status.helper.history;assert(h.length>=2&&h.at(-2).stoppedConfirmed);assert(h.at(-2).pid!==h.at(-1).pid||h.at(-2).started!==h.at(-1).started);}report.cases.push({name,result,status});console.log('resident-case '+JSON.stringify(report.cases.at(-1)));
-   if(name.startsWith('success')||name==='cached-destination'||showCase){assert(result.ok,JSON.stringify(result));assert.equal(fs.readFileSync(metadata,'utf8'),afterText);for(const [n,i] of items.entries()){assert(!fs.existsSync(i.path));assert(fs.readFileSync(i.dest).equals(contents[n]));}assert.deepEqual(await attributes(items.map(i=>i.dest)),[32,32,32]);}
+   const safeShowAbort=isSafeShowAbort(name,result,status);
+   if(safeShowAbort){
+    assert.equal(fs.readFileSync(metadata,'utf8'),beforeText);
+    for(const [n,i] of items.entries()){if(i.path!==i.dest)assert(!fs.existsSync(i.dest));const r=await observer.request('readHiddenFile',{path:i.path});assert(r.ok&&r.result.ok);for(const k of ['identity','size','mtime','attributes'])assert.equal(r.result[k],originals[n].native[k]);assert.equal(hash(fs.readFileSync(i.path)),originals[n].hash);const parent=fs.statSync(path.dirname(i.path),{bigint:true});assert.deepEqual([String(parent.dev),String(parent.ino)],originals[n].parent);}
+    const current=await stable();assert.equal(current.folderFlags,before.folderFlags);for(const i of before.icons)assert(current.icons.some(n=>n.identity===i.identity&&n.x===i.x&&n.y===i.y));
+    report.cases.at(-1).outcome='safe-aborted-external-show-change';
+   }
+   else if(name.startsWith('success')||name==='cached-destination'||showCase){assert(result.ok,JSON.stringify(result));assert.equal(fs.readFileSync(metadata,'utf8'),afterText);for(const [n,i] of items.entries()){assert(!fs.existsSync(i.path));assert(fs.readFileSync(i.dest).equals(contents[n]));}assert.deepEqual(await attributes(items.map(i=>i.dest)),[32,32,32]);}
    else{if(name.startsWith('fault-')||name==='hang-first-move')assert(!result.ok&&result.resolution?.state==='aborted',JSON.stringify(result));else assert(result.ok&&result.state==='aborted',JSON.stringify(result));assert.equal(fs.readFileSync(metadata,'utf8'),beforeText);for(const [n,i] of items.entries()){assert(!fs.existsSync(i.dest));assert(fs.readFileSync(i.path).equals(contents[n]));}assert.deepEqual(await attributes(items.map(i=>i.path)),[attrs,attrs,attrs]);}
    if(cachedGuard){const now=await stable();assert(now.icons.some(i=>i.identity===cachedGuard.identity&&i.x===cachedGuard.x&&i.y===cachedGuard.y),'cached guard displaced');assert.equal(status.helper.generation,1);report.cachedGuardUnchanged=true;}
+   let stoppedProof=null;if(safeShowAbort){const pid=client.diagnostics().pid;const started=(await run('powershell.exe',['-NoProfile','-NonInteractive','-Command',"$p=[Diagnostics.Process]::GetProcessById([int]$env:OKIBA_CHILD_PID);$null=$p.Handle;$p.StartTime.ToUniversalTime().Ticks.ToString()"],{windowsHide:true,env:{...process.env,OKIBA_CHILD_PID:String(pid)}})).stdout.trim();stoppedProof=[{pid,started},...status.helper.history];}
    assert((await client.close()).ok);client=null;
-   if(showCase){policy.stage=JSON.parse(fs.readFileSync(policy.proofPath,'utf8').replace(/^\uFEFF/,''));assert(policy.stage.visible&&policy.stage.hidden&&policy.stage.oldUnchanged);await stable();await attributes([items[0].dest],34);policy.beforeRestore=await sentinelVisible(items[0].dest,true);policy.restore=await showPolicy('set',true,false);policy.afterRestore=await sentinelVisible(items[0].dest,false);assert.equal((await showPolicy('read')).value,false);policy.restored=true;await attributes([items[0].dest],32);assert(fs.readFileSync(items[0].dest).equals(contents[0]));}
+   if(stoppedProof){const proof=JSON.parse((await run('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(root,'tools/wait-owned-processes-ci.ps1')],{windowsHide:true,timeout:40000,env:{...process.env,OKIBA_CHILDREN:JSON.stringify(stoppedProof)}})).stdout);assert(proof.ok&&proof.processes.every(p=>p.stopConfirmed));report.cases.at(-1).processExit=proof;}
+   if(showCase&&safeShowAbort){
+    policy.stage=JSON.parse(fs.readFileSync(policy.proofPath,'utf8').replace(/^\uFEFF/,''));assert.equal((await showPolicy('read')).value,true);await stable();
+    const sentinel=path.join(desktop,tag+'-show-restore-sentinel.txt');assert(!fs.existsSync(sentinel));owned.push(sentinel);const source=path.join(dir,'restore-sentinel-source.txt');fs.writeFileSync(source,'owned ShowHidden restoration sentinel');await attributes([source],32);const snap=await stable(),entry={name:path.basename(sentinel),path:source,dest:sentinel,offset:[0,0]},sentinelPlan=planDesktop({snapshot:snap,items:[entry],automatic:true});assert(sentinelPlan.ok);client=createDesktopLeaseClient({journalDir:path.join(dir,'sentinel-journal'),helperTimeoutMs:30000,helper:{command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(root,'scripts/shell-helper.ps1')]}});assert((await client.ready()).ok);policy.sentinelPlacement=await runSentinelResident({client,items:[entry],plan:sentinelPlan,snapshot:snap,desktop,metadata:path.join(dir,'sentinel-metadata.json'),runLease});assert((await client.close()).ok);client=null;await attributes([sentinel],34);policy.beforeRestore=await sentinelVisible(sentinel,true);policy.restore=await showPolicy('set',true,false);policy.afterRestore=await sentinelVisible(sentinel,false);assert.equal((await showPolicy('read')).value,false);policy.restored=true;fs.unlinkSync(sentinel);
+   }
+   else if(showCase){policy.stage=JSON.parse(fs.readFileSync(policy.proofPath,'utf8').replace(/^\uFEFF/,''));assert(policy.stage.visible&&policy.stage.hidden&&policy.stage.oldUnchanged);await stable();await attributes([items[0].dest],34);policy.beforeRestore=await sentinelVisible(items[0].dest,true);policy.restore=await showPolicy('set',true,false);policy.afterRestore=await sentinelVisible(items[0].dest,false);assert.equal((await showPolicy('read')).value,false);policy.restored=true;await attributes([items[0].dest],32);assert(fs.readFileSync(items[0].dest).equals(contents[0]));}
    if(cachedGuard){assert.equal(fs.readFileSync(cachedGuard.dest,'utf8'),'owned cached-cell guard');fs.unlinkSync(cachedGuard.dest);}for(const i of items){if(fs.existsSync(i.dest)){assert.equal(path.dirname(i.dest),desktop);assert(path.basename(i.dest).startsWith(tag));fs.unlinkSync(i.dest);}}
    await returnedToBaseline({cleanup:true});
   }
