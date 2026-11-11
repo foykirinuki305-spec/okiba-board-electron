@@ -16,6 +16,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - name: Canonical lease geometry pure checks
+        shell: pwsh
+        run: pwsh -NoProfile -File ./tools/snap-lease-geometry-selftest.ps1
       - name: Isolated hidden-link watchdog faults, never production
         shell: pwsh
         run: |
