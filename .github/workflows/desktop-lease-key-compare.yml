@@ -1,0 +1,43 @@
+name: desktop-lease-key-compare
+on:
+  push:
+    paths:
+      - 'tools/desktop-lease-key-compare-ci.ps1'
+      - '.github/workflows/desktop-lease-key-compare.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        order: [baseline-first, candidate-first]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: study
+      - uses: actions/checkout@v4
+        with:
+          ref: 2a55eeebc649a41804cb9e618fc8629e8730af7a
+          path: key-baseline
+      - uses: actions/checkout@v4
+        with:
+          ref: 705fc7c88d8b5534fa224671c5c8d759792308d3
+          path: key-candidate
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Sequential pinned comparison with cleanup gate
+        shell: pwsh
+        working-directory: study
+        run: |
+          & pwsh -NoProfile -File ./tools/desktop-lease-key-compare-ci.ps1 -Order '${{ matrix.order }}'
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-lease-key-${{ matrix.order }}-evidence
+          path: study/desktop-lease-key-evidence/**
