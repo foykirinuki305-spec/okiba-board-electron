@@ -13,8 +13,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [none, attributes]
-        poll: [strict, inventory]
+        mode: [attributes, updateitem, attributes-then-updateitem]
+        poll: [strict]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

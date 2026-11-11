@@ -6,7 +6,7 @@ const {createShellHelperClient}=require('../lib/shellhelper');
 const {planDesktop,sameSnapshot}=require('../lib/safe-desktop');
 const {createAttribRunner}=require('../lib/links');
 const root=path.resolve(__dirname,'..'),desktop=path.resolve(process.argv[2]),attrs=createAttribRunner();
-const mode=process.argv[3]||'none';assert(['none','attributes'].includes(mode));
+const mode=process.argv[3]||'none';assert(['none','attributes','updateitem','attributes-then-updateitem'].includes(mode));
 const poll=process.argv[4]||'strict';assert(['strict','inventory'].includes(poll));
 const report={mode,poll,scope:'RESEARCH ONLY: temporary snap OFF on GitHub-hosted single-monitor Windows, AUTOARRANGE always OFF; no production change, NOT mixed-DPI proof',passed:false,events:[]};
 const note=(phase,data)=>{report.events.push({phase,data});console.log(phase+' '+JSON.stringify(data));};
@@ -18,6 +18,25 @@ async function main(){
  const tag='OkibaDense-'+crypto.randomBytes(5).toString('hex'),temp=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'okiba-dense-ci-'))),owned=[];
  const production=fs.readFileSync(path.join(root,'scripts/shell-helper.ps1'),'utf8');
  let helperSource=production;
+ // CI-only extension of the handle-bound mutation; identical path for all modes.
+ const coreSignature='static Snapshot SetRecordedCore(string path,string expectedIdentity,bool expectedHidden,bool hidden,string expectedSize,string expectedMtime,uint expectedOtherAttributes,bool notify){';
+ assert(helperSource.includes(coreSignature),'Native identity-bound mutation anchor missing');
+ helperSource=helperSource.replace(coreSignature,`public static Snapshot SetRecordedNotifyForCI(string path,Snapshot expected,uint events) {
+  if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true"||Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT")!="github-hosted")throw new InvalidOperationException("CI only");
+  string full=Path.GetFullPath(path),desktop=Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory));
+  if(!String.Equals(Path.GetDirectoryName(full),desktop,StringComparison.OrdinalIgnoreCase)||!Path.GetFileName(full).StartsWith("OkibaDense-",StringComparison.Ordinal)||events>3||!expected.hidden)throw new InvalidOperationException("Invalid CI fixture mutation");
+  return SetRecordedCore(full,expected.identity,true,false,expected.size,expected.mtime,expected.attributes,false,events);
+ }
+ static Snapshot SetRecordedCore(string path,string expectedIdentity,bool expectedHidden,bool hidden,string expectedSize,string expectedMtime,uint expectedOtherAttributes,bool notify,uint ciEvents=0){`);
+ const notifyAnchor='if(notify&&before.hidden!=after.hidden)NotifyAttributes(0x800u,0x1005u,path,IntPtr.Zero);';
+ assert(helperSource.includes(notifyAnchor),'Native notify anchor missing');
+ helperSource=helperSource.replace(notifyAnchor,notifyAnchor+`
+   if(before.hidden!=after.hidden){
+    if((ciEvents&1)!=0)NotifyAttributes(0x800u,0x1005u,path,IntPtr.Zero);
+    if((ciEvents&2)!=0)NotifyAttributes(0x2000u,0x1005u,path,IntPtr.Zero);
+   }
+   var checkedAfter=Capture(h);
+   if(checkedAfter.identity!=after.identity||checkedAfter.attributes!=after.attributes||checkedAfter.size!=after.size||checkedAfter.mtime!=after.mtime)throw new InvalidOperationException("CI notification changed file identity or metadata");`);
  const attrsInjection=fs.readFileSync(path.join(__dirname,'hidden-attributes-injection-ci.cs'),'utf8');
  const attrsAnchor=' public static long[] ReadState()';assert(helperSource.includes(attrsAnchor),'Attribute injection anchor missing');helperSource=helperSource.replace(attrsAnchor,attrsInjection+'\n'+attrsAnchor);
  const batchStart=helperSource.indexOf(' public static void PositionNewItems('),batchEnd=helperSource.indexOf(' // Never exposed through the normal helper protocol.',batchStart);
@@ -39,7 +58,7 @@ async function main(){
         $result=@{ok=$true}
       }
 `;
- helperSource=helperSource.replace("      'resolveDrop'         {","      'ciUnhideAttributes' {\n        if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'CI only'}\n        $before=[OkibaFolderView]::ReadState();if(($before[0] -band 5) -ne 0 -or $before[1] -ne 0){throw 'snap and autoarrange must remain OFF'}\n        $w=[Diagnostics.Stopwatch]::StartNew();$changed=@();foreach($p in @($req.paths)){$a=[OkibaFolderView]::UnhideAttributesCI([string]$p,[bool]$req.notify);$changed+=@{path=$p;before=$a[0];after=$a[1]}};$w.Stop();$after=[OkibaFolderView]::ReadState();if(($before|ConvertTo-Json -Compress) -cne ($after|ConvertTo-Json -Compress)){throw 'attribute operation changed Shell flags'}\n        $result=@{ok=$true;nativeMs=$w.Elapsed.TotalMilliseconds;changes=$changed;flagsBefore=$before;flagsAfter=$after}\n      }\n"+ciCommand+"      'resolveDrop'         {");
+ helperSource=helperSource.replace("      'resolveDrop'         {","      'ciUnhideAttributes' {\n        if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'CI only'}\n        $before=[OkibaFolderView]::ReadState();if(($before[0] -band 5) -ne 0 -or $before[1] -ne 0){throw 'snap and autoarrange must remain OFF'}\n        $w=[Diagnostics.Stopwatch]::StartNew();$changed=@();foreach($p in @($req.paths)){$prior=[OkibaFileAttributes]::Read([string]$p);$next=[OkibaFileAttributes]::SetRecordedNotifyForCI([string]$p,$prior,[uint32]$req.events);$changed+=@{path=$p;before=$prior;after=$next}};$w.Stop();$after=[OkibaFolderView]::ReadState();if(($before|ConvertTo-Json -Compress) -cne ($after|ConvertTo-Json -Compress)){throw 'attribute operation changed Shell flags'}\n        $result=@{ok=$true;nativeMs=$w.Elapsed.TotalMilliseconds;changes=$changed;flagsBefore=$before;flagsAfter=$after}\n      }\n"+ciCommand+"      'resolveDrop'         {");
  helperSource=helperSource.replace("@('resolveDrop','cursorState'","@('ciUnhideAttributes','ciSnapFlags','ciSnapPosition','resolveDrop','cursorState'");
  // Research-only observability. Never relax a failing geometry/identity guard.
  const txStart=helperSource.indexOf('function Get-StrictTransactionState('),txEnd=helperSource.indexOf('\n# One transaction-local proof',txStart);
@@ -126,7 +145,7 @@ async function main(){
     const off=await req('ciSnapFlags',{flags:0});assert(off.ok,'Could not switch snap OFF without enabling auto arrange');
     const offSnapshot=await stable('snap-off-'+cycle,before);assert(!offSnapshot.snap&&!offSnapshot.autoArrange);
     const arrivalStart=performance.now();const nativeStart=performance.now();
-    const native=await req('ciUnhideAttributes',{paths:selected.map(i=>i.dest),notify:mode==='attributes'});assert(native.ok,'native unhide/notification failed');
+    const native=await req('ciUnhideAttributes',{paths:selected.map(i=>i.dest),events:({none:0,attributes:1,updateitem:2,'attributes-then-updateitem':3})[mode]});assert(native.ok,'native unhide/notification failed');
     const nativeRoundTripMs=performance.now()-nativeStart;
     const arrival=await arrivalMeasured(selected.map(i=>i.name),'snap-off-arrival-'+cycle,before);
     note('snap-off-arrival',{cycle,mode,unhideToArrivalMs:performance.now()-arrivalStart,nativeRoundTripMs,native,snapshot:arrival,differences:differences(before,arrival)});

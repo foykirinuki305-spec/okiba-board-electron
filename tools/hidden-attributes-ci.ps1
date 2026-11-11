@@ -1,4 +1,4 @@
-param([ValidateSet('none','attributes')][string]$Mode='none',[ValidateSet('strict','inventory')][string]$Poll='strict')
+param([ValidateSet('none','attributes','updateitem','attributes-then-updateitem')][string]$Mode='none',[ValidateSet('strict','inventory')][string]$Poll='strict')
 # Only a disposable GitHub-hosted Windows runner may execute this test.
 $ErrorActionPreference='Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
