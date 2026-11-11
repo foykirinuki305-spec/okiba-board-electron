@@ -1,0 +1,23 @@
+'use strict';
+const assert=require('assert');
+const c=require('../lib/dragcoords');
+let passed=0;function check(name,fn){fn();console.log('ok - '+name);passed++;}
+const screen={dipToScreenPoint(p){return p.x>=1920?{x:1920+(p.x-1920)*1.5,y:p.y*1.5}:{...p}},screenToDipPoint(p){return p.x>=1920?{x:1920+(p.x-1920)/1.5,y:p.y/1.5}:{...p}}};
+const dip={x:2320,y:400},physical={x:2520,y:600};
+check('right 150% converts relative to monitor origin',()=>assert.deepStrictEqual(c.dipToPhysical(screen,dip,'win32'),physical));
+check('right physical converts to DIP bounds coordinates',()=>assert.deepStrictEqual(c.physicalToDip(screen,physical,'win32'),dip));
+check('primary 100% unchanged',()=>assert.deepStrictEqual(c.dipToPhysical(screen,{x:500,y:700},'win32'),{x:500,y:700}));
+check('negative left monitor 100% unchanged',()=>assert.deepStrictEqual(c.dipToPhysical(screen,{x:-1200,y:300},'win32'),{x:-1200,y:300}));
+check('DIP bounds do not reject physical cursor actually inside',()=>assert.strictEqual(c.outsideDipBounds(screen,physical,{x:2200,y:300,width:300,height:200},'win32'),false));
+check('outside remains outside',()=>assert.strictEqual(c.outsideDipBounds(screen,{x:2700,y:900},{x:2200,y:300,width:300,height:200},'win32'),true));
+check('missing bounds remains outside',()=>assert.strictEqual(c.outsideDipBounds(screen,physical,null,'win32'),true));
+check('release copies payload once without mutating cells or original',()=>{const p={screenX:dip.x,screenY:dip.y,layout:[{cell:[2,3]}]};const q=c.physicalDropPayload(screen,p,'win32');assert.strictEqual(q.screenX,physical.x);assert.strictEqual(q.screenY,physical.y);assert.strictEqual(p.screenX,dip.x);assert.strictEqual(q.layout,p.layout)});
+check('release agrees with helper physical cache point',()=>{const q=c.physicalDropPayload(screen,{screenX:dip.x,screenY:dip.y},'win32');assert.strictEqual(Math.hypot(q.screenX-physical.x,q.screenY-physical.y),0)});
+check('invalid input fails closed',()=>assert.throws(()=>c.physicalDropPayload(screen,{screenX:NaN,screenY:4},'win32')));
+check('failed native conversion never silently sends DIP',()=>assert.throws(()=>c.dipToPhysical({dipToScreenPoint(){throw Error('native unavailable')}},dip,'win32')));
+check('non Windows compatibility unchanged',()=>assert.deepStrictEqual(c.dipToPhysical({},dip,'darwin'),dip));
+check('cold fallback allowed only verified all100',()=>assert.strictEqual(c.coldResolveSafe({getAllDisplays:()=>[{scaleFactor:1},{scaleFactor:1}]},'win32'),true));
+check('mixed DPI cold fallback blocked',()=>assert.strictEqual(c.coldResolveSafe({getAllDisplays:()=>[{scaleFactor:1},{scaleFactor:1.5}]},'win32'),false));
+check('uniform scaled cold fallback also uncertain',()=>assert.strictEqual(c.coldResolveSafe({getAllDisplays:()=>[{scaleFactor:1.5}]},'win32'),false));
+check('unknown display state fails closed',()=>assert.strictEqual(c.coldResolveSafe({getAllDisplays(){throw Error('offline')}},'win32'),false));
+console.log('dragcoords: '+passed+' checks passed');

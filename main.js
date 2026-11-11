@@ -12,6 +12,7 @@ const sh = require('./lib/shellhelper');
 const mh = require('./lib/movehistory');
 const cu = require('./lib/cleanup');
 const pr = require('./lib/preresolve');
+const dragCoords = require('./lib/dragcoords');
 
 // Hidden-attribute runner for linked items (v2.0). Real attrib.exe
 // in production; OKIBA_TEST_ATTRIB=stub swaps in the counting stub.
@@ -745,6 +746,8 @@ function registerIpc() {
     if(desktopBusy) return desktopBlocked('busy');
     desktopBusy=true;
     const started=Date.now();let planMs=0,positionMs=0;
+    const diagnosticId=process.pid+'-'+started;
+    const diagnostic=(phase,detail)=>{try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop diagnostic '+JSON.stringify({id:diagnosticId,phase,...detail})+'\n');}catch(_){}};
     try {
       if(!payload?.boardName || !target?.path) return desktopBlocked('unknown-board');
       const folder=guardBoard(payload.boardName), data=bf.loadBoard(folder);
@@ -779,6 +782,7 @@ function registerIpc() {
       const point=payload.automatic?null:{x:Number(payload.screenX)+Number(snap.origin?.x),y:Number(payload.screenY)+Number(snap.origin?.y)};
       const plan=safeDesk.planDesktop({snapshot:snap,items:planned,point,automatic:!!payload.automatic});
       planMs=Date.now()-started;
+      diagnostic('plan',{automatic:!!payload.automatic,screenPoint:{x:payload.screenX,y:payload.screenY},clientPoint:point,anchor,geometry:{origin:snap.origin,sx:snap.sx,sy:snap.sy,gx:snap.gx,gy:snap.gy,areas:snap.areas,autoArrange:snap.autoArrange,snap:snap.snap,iconCount:snap.icons?.length},displays:screen.getAllDisplays().map(d=>({id:d.id,bounds:d.bounds,workArea:d.workArea,scaleFactor:d.scaleFactor})),items:planned.map(i=>({name:i.name,source:i.path,destination:i.dest,isLink:i.isLink,hidden:i.hidden,samePath:ln.samePath(i.path,i.dest),crossVolume:i.crossVolume,cell:i.cell,offset:i.offset})),plan});
       if(!plan.ok)return desktopBlocked(plan.reason);
       const tx=await safeDesk.executeDesktop({items:planned,plan,snapshot:snap,adapter:{
         snapshot:desktopSnapshot,
@@ -811,7 +815,8 @@ function registerIpc() {
           const posStart=Date.now();
           const r=await shellHelper.request('positionDesktopPlan',{snapshot,targets:p.targets.map(t=>({...t,path:planned.find(i=>i.path===t.path).dest})),buffer:p.buffer},{timeoutMs:60000});
           positionMs=Date.now()-posStart;
-          if(!r.ok){const stopped=await shellHelper.stopAndWait();if(!stopped)desktopUnsafe=true;return {ok:false,reason:'position-unavailable',unsafe:!stopped};}
+          diagnostic('position-result',{elapsedMs:positionMs,transportOk:r.ok,transportError:r.error,result:r.result});
+          if(!r.ok){const stopped=await shellHelper.stopAndWait();if(!stopped)desktopUnsafe=true;diagnostic('helper-stop',{stopped});return {ok:false,reason:'position-unavailable',unsafe:!stopped,detail:r.error};}
           return r.result||{ok:false,reason:'position-unavailable'};
         },
         async commit() {
@@ -830,6 +835,7 @@ function registerIpc() {
           await rollbackDesktopFile(item,{stat:fs.statSync,exists:fs.existsSync,move:atomicDesktopMove,setHidden:attrib.setHidden});
         }
       }});
+      diagnostic('transaction-result',{result:tx});
       if(!tx.ok){try{fs.appendFileSync(path.join(BASE,'okiba.log'),new Date().toISOString()+' safe-desktop '+JSON.stringify(tx)+'\n');}catch(_){}return desktopBlocked(tx.reason,tx.recovery);}
       const warnings=[];
       for(const item of planned)if(item.crossTx){try{const cleaned=await item.crossTx.cleanup();if(!cleaned.ok)warnings.push(cleaned);}catch(e){warnings.push({warning:String(e.message||e),recovery:item.crossTx.recoveryPaths});}}
@@ -1010,6 +1016,8 @@ function registerIpc() {
       // transport failure only: an authoritative 'unknown' from the
       // helper is returned as-is (the cold script would agree).
     }
+    // Legacy cold process has no verified mixed-DPI awareness. Never move using uncertain coordinates.
+    if (!dragCoords.coldResolveSafe(screen)) return {type:'unknown',reason:'native-coordinate-unavailable',error:'画面の座標を確認できなかったため移動を中止しました。OkibaBoardを再起動してもう一度お試しください。'};
     return coldResolveDrop(x, y);
   }
 
@@ -1063,8 +1071,7 @@ function registerIpc() {
       if (dragWatch !== session || !cs) return;
       const now = Date.now();
       const b = (win && !win.isDestroyed()) ? win.getBounds() : null;
-      const outside = !b || cs.x < b.x || cs.y < b.y ||
-        cs.x >= b.x + b.width || cs.y >= b.y + b.height;
+      const outside = dragCoords.outsideDipBounds(screen, cs, b);
       if (outside) session.cache.observe(cs.x, cs.y, now);
       // Button-up seen by the OS witness: the release happened
       // (usually a beat before the renderer's own pointerup lands),
@@ -1255,6 +1262,10 @@ function registerIpc() {
   // even though a real OS drop gesture cannot be automated.
   const dropLog = [];
   ipcMain.handle('resolve-drop-move', async (_e, payload) => {
+    // Renderer screenX/Y and cursor-point are DIP; native cache/resolve/plan are physical.
+    // Do not resample the live cursor: the user may already have moved it.
+    try { payload = dragCoords.physicalDropPayload(screen, payload); }
+    catch (e) { stopDragWatch(); return {moved:[],skipped:[],failed:[],error:'invalid-screen-point'}; }
     // Stage timings for the v2.2.2 latency work: one summary line
     // per real drag-out lands in <base>\okiba.log —
     //   dragout ms release=<epoch> resolve=<ms|pre> move=<ms>
@@ -1316,6 +1327,7 @@ function registerIpc() {
         resolveMs = Date.now() - rs;
       }
       result.resolved = target;
+      if (target?.error) result.error = target.error;
       dropLog.push({ kind: 'resolve', x, y, target, pre: resolveStage === 'pre' });
       if(target?.type==='desktop' && target.path) {
         const tm=Date.now();const strict=await safeDesktopMove(payload,target);moveMs=Date.now()-tm;

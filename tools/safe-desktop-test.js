@@ -97,7 +97,7 @@ async function main(){
   const mix=seed.map(i=>({...i,path:i.dest,hidden:true}));
   const resident={name:mixNames[2],path:path.join(temp,mixNames[2]),dest:path.join(desktop,mixNames[2]),offset:[1,1],hidden:false};
   fs.writeFileSync(resident.path,resident.name);owned.push(resident.dest);mix.push(resident);
-  const waitVisibility=async(visible)=>{for(let n=0;n<60;n++){const s=await stable();if(linkedNames.every(name=>s.icons.some(i=>matches(i.label,name))===visible))return s;await sleep(100);}throw Error('linked visibility not reflected in Explorer');};
+  const waitVisibility=async(visible)=>{for(let n=0;n<60;n++){const s=await stable();if(mixNames.every(name=>s.icons.some(i=>matches(i.label,name))===visible))return s;await sleep(100);}throw Error('mixed item visibility not reflected in Explorer');};
   const hideLinked=async()=>{for(const item of mix.filter(i=>i.hidden)){assert((await attrs.setHidden(item.path,true)).ok);assert((await attrs.readHidden(item.path)).hidden);}};
   await hideLinked();await waitVisibility(false);
   // Occupy a hidden item's previous Shell-cached cell before unhiding it.

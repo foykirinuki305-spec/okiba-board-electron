@@ -1,4 +1,4 @@
-# Warm shell helper (v2.2): ONE long-lived PowerShell process that
+﻿# Warm shell helper (v2.2): ONE long-lived PowerShell process that
 # serves the shell-interop requests the app used to cold-spawn per
 # operation (scripts/resolve-drop.ps1, scripts/position-desktop-icons.ps1).
 # Protocol: JSON lines on stdin -> JSON lines on stdout, matched by
@@ -52,6 +52,36 @@ using System.Runtime.InteropServices;
 using System.Text;
 
 public static class OkibaWin32 {
+  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
+  [DllImport("user32.dll",SetLastError=true)] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+  public static IntPtr EnterPhysicalScope() {
+    IntPtr previous=SetThreadDpiAwarenessContext(new IntPtr(-4));
+    if(previous==IntPtr.Zero)throw new InvalidOperationException("physical-dpi-context-unavailable");
+    return previous;
+  }
+  public static void LeavePhysicalScope(IntPtr previous) {
+    if(previous!=IntPtr.Zero && SetThreadDpiAwarenessContext(previous)==IntPtr.Zero)
+      throw new InvalidOperationException("dpi-context-restore-failed");
+  }
+  [StructLayout(LayoutKind.Sequential)] public struct RECT {public int Left,Top,Right,Bottom;}
+  [StructLayout(LayoutKind.Sequential)] struct MONITORINFO {public int cbSize;public RECT monitor,work;public uint flags;}
+  delegate bool MonitorProc(IntPtr monitor,IntPtr dc,ref RECT rect,IntPtr data);
+  [DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr dc,IntPtr clip,MonitorProc callback,IntPtr data);
+  [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr monitor,ref MONITORINFO info);
+  [DllImport("shcore.dll")] static extern int GetScaleFactorForMonitor(IntPtr monitor,out int scale);
+  public static int[][] MonitorAreas() {
+    var rows=new System.Collections.Generic.List<int[]>(); bool valid=true;
+    MonitorProc callback=delegate(IntPtr monitor,IntPtr dc,ref RECT rect,IntPtr data){
+      MONITORINFO info=new MONITORINFO();info.cbSize=Marshal.SizeOf(typeof(MONITORINFO));
+      if(!GetMonitorInfo(monitor,ref info)){valid=false;return false;}
+      int scale;if(GetScaleFactorForMonitor(monitor,out scale)!=0)scale=0;
+      rows.Add(new int[]{info.work.Left,info.work.Top,info.work.Right,info.work.Bottom,info.monitor.Left,info.monitor.Top,scale});return true;
+    };
+    if(!EnumDisplayMonitors(IntPtr.Zero,IntPtr.Zero,callback,IntPtr.Zero)||!valid)throw new InvalidOperationException("monitor-geometry-unavailable");
+    rows.Sort(delegate(int[]a,int[]b){int c=a[0].CompareTo(b[0]);return c!=0?c:a[1].CompareTo(b[1]);});
+    return rows.ToArray();
+  }
+
   [StructLayout(LayoutKind.Sequential)]
   public struct POINT { public int X; public int Y; }
 
@@ -71,14 +101,14 @@ public static class OkibaWin32 {
   // coordinates) plus whether the left button is currently down
   // (GetAsyncKeyState's high bit = key is down right now).
   [DllImport("user32.dll")]
-  public static extern bool GetCursorPos(out POINT pt);
+  public static extern bool GetPhysicalCursorPos(out POINT pt);
 
   [DllImport("user32.dll")]
   public static extern short GetAsyncKeyState(int vKey);
 
   public static int[] CursorState() {
     POINT pt;
-    if (!GetCursorPos(out pt)) return null;
+    if (!GetPhysicalCursorPos(out pt)) return null;
     bool lbtn = (GetAsyncKeyState(0x01) & 0x8000) != 0; // VK_LBUTTON
     return new int[] { pt.X, pt.Y, lbtn ? 1 : 0 };
   }
@@ -759,6 +789,14 @@ function Get-DesktopPositions([string[]]$Names) {
 # Only the new transaction commands use these rules. They never set the
 # position of an icon belonging to the pre-move snapshot.
 Add-Type -AssemblyName System.Windows.Forms
+# ListView spacing is valid only for the actual view-window DPI. A single
+# icon on another-DPI monitor cannot establish that monitor's spacing.
+function Strict-InferAreaGrid($members,[int]$sx,[int]$sy,[int]$scale,[int]$viewDpi) {
+  if($sx -le 0 -or $sy -le 0 -or $scale -le 0 -or $viewDpi -le 0 -or $scale*96 -ne $viewDpi*100){return $null}
+  $residues=@($members | ForEach-Object { '{0},{1}' -f (($_.x%$sx+$sx)%$sx),(($_.y%$sy+$sy)%$sy) } | Select-Object -Unique)
+  if($residues.Count -ne 1){return $null}
+  $xy=$residues[0].Split(',');return @{gx=[int]$xy[0];gy=[int]$xy[1];sx=$sx;sy=$sy}
+}
 function Get-RawStrictDesktopSnapshot {
   $lv = Find-BestListView
   if ($lv -eq [IntPtr]::Zero) { return @{ok=$false; reason='no-listview'} }
@@ -767,6 +805,7 @@ function Get-RawStrictDesktopSnapshot {
     try { $shellState=[OkibaFolderView]::ReadState() } catch { return @{ok=$false;reason='shell-folder-state-unavailable'} }
     $sx = [OkibaDesk]::GetSpacingX($lv); $sy = [OkibaDesk]::GetSpacingY($lv)
     if ($sx -le 0 -or $sy -le 0) { return @{ok=$false;reason='unknown-spacing'} }
+    $viewDpi=[int][OkibaWin32]::GetDpiForWindow($lv)
     $count = [OkibaDesk]::GetItemCount($lv)
     $icons = New-Object 'System.Collections.Generic.List[object]'
     for ($i=0; $i -lt $count; $i++) {
@@ -779,21 +818,28 @@ function Get-RawStrictDesktopSnapshot {
     if ([OkibaDesk]::GetItemCount($lv) -ne $count) { return @{ok=$false;reason='desktop-changing'} }
     $grid = [OkibaDesk]::ReadGridOrigin($reader,$count,$sx,$sy,[int[]]@())
     $origin = [OkibaDesk]::ToClient($lv,0,0)
-    $areas = @([System.Windows.Forms.Screen]::AllScreens | Sort-Object DeviceName | ForEach-Object {
-      $r=$_.WorkingArea
-      $tl=[OkibaDesk]::ToClient($lv,$r.Left,$r.Top); $br=[OkibaDesk]::ToClient($lv,$r.Right,$r.Bottom)
-      @{left=[int]$tl[0];top=[int]$tl[1];right=[int]$br[0];bottom=[int]$br[1]}
+    $areas = @([OkibaWin32]::MonitorAreas() | ForEach-Object {
+      $r=$_
+      $tl=[OkibaDesk]::ToClient($lv,$r[0],$r[1]); $br=[OkibaDesk]::ToClient($lv,$r[2],$r[3])
+      $monitorOrigin=[OkibaDesk]::ToClient($lv,$r[4],$r[5])
+      $members=@($icons.ToArray() | Where-Object {$_.x -ge $tl[0] -and $_.x -lt $br[0] -and $_.y -ge $tl[1] -and $_.y -lt $br[1]})
+      $areaGrid=Strict-InferAreaGrid $members $sx $sy ([int]$r[6]) $viewDpi
+      @{left=[int]$tl[0];top=[int]$tl[1];right=[int]$br[0];bottom=[int]$br[1];grid=$areaGrid;scale=[int]$r[6];monitorOrigin=@{x=$monitorOrigin[0];y=$monitorOrigin[1]}}
     })
     if ($areas.Count -eq 0) { return @{ok=$false;reason='unknown-monitors'} }
     return @{ok=$true;autoArrange=($shellState[1] -ne 0 -or ($shellState[0] -band 1) -ne 0 -or ([OkibaDesk]::GetWindowLong($lv,-16) -band 0x0100) -ne 0);
-      snap=(($shellState[0] -band 4) -ne 0);folderFlags=$shellState[0];shellAutoArrange=($shellState[1] -ne 0);sx=$sx;sy=$sy;gx=$grid[0];gy=$grid[1];
+      snap=(($shellState[0] -band 4) -ne 0);viewDpi=$viewDpi;folderFlags=$shellState[0];shellAutoArrange=($shellState[1] -ne 0);sx=$sx;sy=$sy;gx=$grid[0];gy=$grid[1];
       origin=@{x=$origin[0];y=$origin[1]};areas=$areas;icons=@($icons.ToArray())}
   } finally { $reader.Dispose() }
 }
 function Strict-IconKey($i) { return (@([string]$i.label,[int]$i.x,[int]$i.y) | ConvertTo-Json -Compress) }
 function Strict-GeometryKey($s) {
-  $areas=@($s.areas | ForEach-Object { @([int]$_.left,[int]$_.top,[int]$_.right,[int]$_.bottom) })
-  return (@([bool]$s.autoArrange,[bool]$s.snap,[int]$s.sx,[int]$s.sy,[int]$s.gx,[int]$s.gy,[int]$s.origin.x,[int]$s.origin.y,$areas) | ConvertTo-Json -Compress -Depth 8)
+  $areas=@($s.areas | ForEach-Object { @([int]$_.left,[int]$_.top,[int]$_.right,[int]$_.bottom,$_.grid,$_.scale,$_.monitorOrigin) })
+  return (@([bool]$s.autoArrange,[bool]$s.snap,[int]$s.sx,[int]$s.sy,[int]$s.origin.x,[int]$s.origin.y,$areas) | ConvertTo-Json -Compress -Depth 8)
+}
+function Strict-AreaGrid($area,$s) {
+  if(($area -is [System.Collections.IDictionary] -and $area.Contains('grid')) -or $null -ne $area.PSObject.Properties['grid']) {return $area.grid}
+  return @{gx=$s.gx;gy=$s.gy;sx=$s.sx;sy=$s.sy}
 }
 function Strict-IconsKey($s) { return (@($s.icons | ForEach-Object { Strict-IconKey $_ } | Sort-Object) | ConvertTo-Json -Compress) }
 function Get-StrictDesktopSnapshot {
@@ -815,7 +861,8 @@ function Strict-PointValid($p) {
 }
 function Strict-PointInside($p,$s) {
   foreach($r in $s.areas) {
-    if ($p.x -ge $r.left -and $p.y -ge $r.top -and $p.x+$s.sx -le $r.right -and $p.y+$s.sy -le $r.bottom) { return $true }
+    $g=Strict-AreaGrid $r $s
+    if($null -ne $g -and $p.x -ge $r.left -and $p.y -ge $r.top -and $p.x+$g.sx -le $r.right -and $p.y+$g.sy -le $r.bottom) { return $true }
   }
   return $false
 }
@@ -852,10 +899,20 @@ function Position-DesktopPlan($baseline,$targets,$buffer) {
   $targets=@($targets)
   if(-not $baseline.ok -or $baseline.autoArrange -or -not $baseline.snap -or $targets.Count -eq 0 -or -not (Strict-PointValid $buffer)) {return @{ok=$false;reason='invalid-plan'}}
   $all=@($targets)+@($buffer)
+  $selectedArea=$null
+  foreach($area in $baseline.areas){
+    $g=Strict-AreaGrid $area $baseline
+    if($null -eq $g){continue}
+    $fits=$true
+    foreach($p in $all){if(-not (Strict-PointValid $p) -or $p.x -lt $area.left -or $p.y -lt $area.top -or $p.x+$g.sx -gt $area.right -or $p.y+$g.sy -gt $area.bottom){$fits=$false;break}}
+    if($fits){$selectedArea=$area;break}
+  }
+  if($null -eq $selectedArea){return @{ok=$false;reason='unknown-or-cross-monitor-grid'}}
+  $selectedGrid=Strict-AreaGrid $selectedArea $baseline
   for($n=0;$n -lt $all.Count;$n++) {
     $p=$all[$n]
     if(-not (Strict-PointValid $p) -or -not (Strict-PointInside $p $baseline)) {return @{ok=$false;reason='outside-desktop'}}
-    if((($p.x-$baseline.gx)%$baseline.sx) -ne 0 -or (($p.y-$baseline.gy)%$baseline.sy) -ne 0) {return @{ok=$false;reason='off-grid'}}
+    if((($p.x-$selectedGrid.gx)%$selectedGrid.sx) -ne 0 -or (($p.y-$selectedGrid.gy)%$selectedGrid.sy) -ne 0) {return @{ok=$false;reason='off-grid'}}
     foreach($old in $baseline.icons){if(Strict-Overlap $p $old $baseline){return @{ok=$false;reason='occupied'}}}
     for($j=0;$j -lt $n;$j++){if(Strict-Overlap $p $all[$j] $baseline){return @{ok=$false;reason='overlapping-plan'}}}
   }
@@ -952,10 +1009,12 @@ while ($true) {
   if ($null -eq $line) { break }
   if ($line.Trim() -eq '') { continue }
   $id = $null
+  $dpiPrevious=[IntPtr]::Zero
   try {
     $req = $line | ConvertFrom-Json
     $id = $req.id
     $result = $null
+    if(@('resolveDrop','cursorState','desktopSnapshot','positionDesktopPlan') -contains $req.cmd){$dpiPrevious=[OkibaWin32]::EnterPhysicalScope()}
     switch ($req.cmd) {
       'resolveDrop'         { $result = Resolve-DropTarget ([int]$req.x) ([int]$req.y) }
       'positionIcons'       { $result = Position-Icons ([int]$req.x) ([int]$req.y) ([string[]]@($req.names)) }
@@ -972,6 +1031,8 @@ while ($true) {
     $resp = @{ id = $id; result = $result }
   } catch {
     $resp = @{ id = $id; error = "$($_.Exception.Message)" }
+  } finally {
+    if($dpiPrevious -ne [IntPtr]::Zero){[OkibaWin32]::LeavePhysicalScope($dpiPrevious)}
   }
   try {
     [Console]::Out.WriteLine(($resp | ConvertTo-Json -Compress -Depth 8))

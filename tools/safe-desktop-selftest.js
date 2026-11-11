@@ -36,6 +36,23 @@ denied('no spare buffer cell cancels conservatively',Object.assign(snapshot(),{a
 check('automatic placement keeps relative shape',()=>{const p=plan(snapshot(),items([[0,0],[2,1]]),null,true);assert(p.ok);assert.equal(p.targets[1].x-p.targets[0].x,200);assert.equal(p.targets[1].y-p.targets[0].y,100);});
 check('snapshot comparison ignores icon enumeration order',()=>{const a=snapshot();a.icons.push({label:'z',x:200,y:100});const b=clone(a);b.icons.reverse();assert(sameSnapshot(a,b));});
 for(const [name,mutate] of [['existing icon moved',s=>s.icons[0].x++],['icon appeared',s=>s.icons.push({label:'new',x:800,y:700})],['origin changed',s=>s.origin.x--],['workarea changed',s=>s.areas[0].right--],['grid changed',s=>s.gx++],['snap changed',s=>s.snap=false]]) check(name+' invalidates preflight',()=>{const a=snapshot(),b=clone(a);mutate(b);assert(!sameSnapshot(a,b));});
+
+const multi=()=>({...snapshot(),icons:[],areas:[
+ {left:0,top:71,right:1920,bottom:1103,grid:{sx:101,sy:67,gx:42,gy:6}},
+ {left:1920,top:0,right:3840,bottom:1032,grid:{sx:101,sy:67,gx:43,gy:2}},
+ {left:3840,top:0,right:5760,bottom:1032,grid:null}]});
+check('primary monitor uses its own grid, not left grid',()=>{const p=plan(multi(),items([[0,0],[0,1]]),{x:2110,y:180});assert(p.ok);for(const t of p.targets){assert.equal(t.x%101,43);assert.equal(t.y%67,2);}assert.equal(p.targets[1].y-p.targets[0].y,67);});
+check('left monitor uses shifted workarea grid',()=>{const p=plan(multi(),items([[0,0],[1,0]]),{x:350,y:250});assert(p.ok);for(const t of p.targets){assert.equal(t.x%101,42);assert.equal(t.y%67,6);}});
+check('unknown empty monitor is blocked without guessing',()=>assert(!plan(multi(),items([[0,0]]),{x:4100,y:300}).ok));
+check('empty monitor with evidenced derived grid is permitted',()=>{const s=multi();s.areas[2].grid={sx:101,sy:67,gx:44,gy:2};assert(plan(s,items([[0,0]]),{x:4100,y:300}).ok);});
+check('monitor crossing is rejected rather than moved to another grid',()=>assert(!plan(multi(),items([[0,0],[1,0]]),{x:1890,y:200}).ok));
+check('all targets and spare buffer stay inside the chosen monitor',()=>{const s=multi(),p=plan(s,items([[0,0],[0,1]]),{x:2110,y:180});assert(p.ok);for(const t of [...p.targets,p.buffer])assert(t.x>=1920&&t.x+101<=3840&&t.y>=0&&t.y+67<=1032);});
+check('negative-coordinate monitor has valid relative placement',()=>{const s=multi();s.areas=[{left:-1920,top:-200,right:0,bottom:900,grid:{sx:100,sy:80,gx:-1870,gy:-170}}];const p=plan(s,items([[0,0],[1,2]]),{x:-1500,y:100});assert(p.ok);assert.equal(p.targets[1].x-p.targets[0].x,100);assert.equal(p.targets[1].y-p.targets[0].y,160);});
+check('different monitor spacing is respected',()=>{const s=multi();s.areas[1].grid={sx:150,sy:100,gx:1970,gy:20};const p=plan(s,items([[0,0],[1,1]]),{x:2300,y:300});assert(p.ok);assert.equal(p.targets[1].x-p.targets[0].x,150);assert.equal(p.targets[1].y-p.targets[0].y,100);});
+check('mixed new schema does not fall back to global for missing grid',()=>{const s=multi();delete s.areas[1].grid;assert(!plan(s,items([[0,0]]),{x:2300,y:300}).ok);});
+check('monitor grid change invalidates preflight',()=>{const a=multi(),b=clone(a);b.areas[1].grid.gy++;assert(!sameSnapshot(a,b));});
+check('automatic skips unknown area and uses known area',()=>{const s=multi();s.areas[0].grid=null;const p=plan(s,items([[0,0],[0,1]]),null,true);assert(p.ok);assert(p.targets.every(t=>t.x>=1920&&t.x<3840));});
+
 async function transactions() {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-safe-unit-'));
   try {
@@ -51,6 +68,7 @@ async function transactions() {
     reset();calls=[];r=await executeDesktop({items:it,plan:p,snapshot:s,adapter:adapter({snapshot:async()=>({...s,icons:[...s.icons,{label:'raced',x:900,y:700}]})})});check('desktop race cancels before any mutation',()=>{assert(!r.ok&&r.blocked);assert.deepEqual(calls,[]);unchanged();});
     reset();calls=[];r=await executeDesktop({items:it,plan:p,snapshot:s,adapter:adapter({snapshot:async()=>{throw Error('snapshot failed');}})});check('snapshot exception blocks before every mutation',()=>{assert(!r.ok&&r.blocked);assert.deepEqual(calls,[]);unchanged();});
     reset();calls=[];r=await executeDesktop({items:it,plan:p,snapshot:s,adapter:adapter({position:async()=>({ok:false,unsafe:true})})});check('unconfirmed helper exit prevents rollback and surfaces destinations',()=>{assert(!r.ok);assert.equal(r.reason,'helper-not-stopped');assert.equal(r.recovery.length,2);assert.deepEqual(calls,['move','move']);assert.deepEqual(r.recovery.map(x=>x.path),it.map(x=>x.dest));assert.equal(fs.readFileSync(metadata,'utf8'),originals.metadata);assert.equal(fs.readFileSync(history,'utf8'),originals.history);for(const i of it){assert(fs.existsSync(i.dest));assert(!fs.existsSync(i.path));}});
+    reset();calls=[];const detail={ok:false,reason:'existing-icon-changed',phase:'arrival',detail:'test',changed:{label:'guard',before:{x:0,y:0},after:[{x:100,y:0}]}};r=await executeDesktop({items:it,plan:p,snapshot:s,adapter:adapter({position:async()=>detail})});check('helper phase and changed coordinates survive rollback',()=>{assert.deepEqual(r.position,detail);unchanged();});
     reset();calls=[];r=await executeDesktop({items:it,plan:p,snapshot:s,adapter:adapter({position:async()=>({ok:false,reason:'unstable'})})});check('failed placement rolls back every source and preserves metadata/history',()=>{assert(!r.ok);assert.equal(r.recovery.length,0);unchanged();});
     reset();calls=[];let moved=0;r=await executeDesktop({items:it,plan:p,snapshot:s,adapter:adapter({move:async i=>{fs.renameSync(i.path,i.dest);if(++moved===2)throw Error('injected move failure');}})});check('partial move failure rolls back including the throwing item',()=>{assert(!r.ok);unchanged();});
     reset();calls=[];r=await executeDesktop({items:it,plan:p,snapshot:s,adapter:adapter()});check('metadata commits only after successful strict placement',()=>{assert(r.ok);assert.deepEqual(calls,['move','move','position','commit']);assert.equal(fs.readFileSync(metadata,'utf8'),'committed');});
