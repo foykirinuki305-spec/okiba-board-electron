@@ -25,6 +25,9 @@ jobs:
       - name: Read-only native Shell session identity verification
         shell: pwsh
         run: powershell -NoProfile -File ./tools/lease-session-read-selftest.ps1
+      - name: Truthful attribute notification contract without Shell events
+        shell: pwsh
+        run: powershell -NoProfile -File ./tools/hidden-notify-stub-selftest.ps1
       - name: Atomic journal replacement pure checks
         shell: pwsh
         run: powershell -NoProfile -File ./tools/snap-lease-json-selftest.ps1

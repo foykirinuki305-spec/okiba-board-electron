@@ -91,6 +91,7 @@ public static class OkibaFileAttributes {
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFile(string path,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle h,out Info info);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetFileInformationByHandle(SafeFileHandle h,int type,ref Basic info,uint size);
+ [DllImport("shell32.dll",EntryPoint="SHChangeNotify",CharSet=CharSet.Unicode,ExactSpelling=true)] static extern void NotifyAttributes(uint eventId,uint flags,string path,IntPtr second);
  public sealed class Snapshot {public string identity,size,mtime;public bool hidden;public uint attributes;public bool directory;}
  static string CheckPath(string path) {
   path=Path.GetFullPath(path);
@@ -118,7 +119,9 @@ public static class OkibaFileAttributes {
  }
  public static Snapshot Read(string path){path=CheckPath(path);using(var h=Open(path,false))return Capture(h);}
  public static Snapshot Set(string path,string expectedIdentity,bool expectedHidden,bool hidden){return SetRecorded(path,expectedIdentity,expectedHidden,hidden,null,null,0);}
- public static Snapshot SetRecorded(string path,string expectedIdentity,bool expectedHidden,bool hidden,string expectedSize,string expectedMtime,uint expectedOtherAttributes){
+ public static Snapshot SetRecorded(string path,string expectedIdentity,bool expectedHidden,bool hidden,string expectedSize,string expectedMtime,uint expectedOtherAttributes){return SetRecordedCore(path,expectedIdentity,expectedHidden,hidden,expectedSize,expectedMtime,expectedOtherAttributes,false);}
+ public static Snapshot SetRecordedAndNotify(string path,string expectedIdentity,bool expectedHidden,bool hidden,string expectedSize,string expectedMtime,uint expectedOtherAttributes){return SetRecordedCore(path,expectedIdentity,expectedHidden,hidden,expectedSize,expectedMtime,expectedOtherAttributes,true);}
+ static Snapshot SetRecordedCore(string path,string expectedIdentity,bool expectedHidden,bool hidden,string expectedSize,string expectedMtime,uint expectedOtherAttributes,bool notify){
   path=CheckPath(path);using(var h=Open(path,true)){
    var before=Capture(h);
    if(String.IsNullOrEmpty(expectedIdentity)||!String.Equals(before.identity,expectedIdentity,StringComparison.Ordinal))throw new InvalidOperationException("file-identity-changed");
@@ -134,6 +137,9 @@ public static class OkibaFileAttributes {
    }
    var after=Capture(h);
    if(after.identity!=before.identity||after.hidden!=hidden||((after.attributes^before.attributes)&~130u)!=0)throw new InvalidOperationException("attribute-verification-failed");
+   // Truthful attribute event only after a real, verified mutation. No Refresh or fake delete.
+   // Keep the identity handle open through notification so the path cannot be replaced here.
+   if(notify&&before.hidden!=after.hidden)NotifyAttributes(0x800u,0x1005u,path,IntPtr.Zero);
    return after;
   }
  }

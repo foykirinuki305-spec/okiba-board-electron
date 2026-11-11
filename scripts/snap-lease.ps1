@@ -66,7 +66,7 @@ function Lease-CheckRecord($record) {
 }
 function Lease-SetHidden($record,[bool]$hidden){
  $n=Lease-CheckRecord $record
- Measure-LeaseStep 'attributes' {$null=[OkibaFileAttributes]::SetRecorded($record.path,$record.identity,$n.hidden,$hidden,$record.size,$record.mtime,[uint32]$record.attributes)}
+ Measure-LeaseStep 'attributes' {$null=[OkibaFileAttributes]::SetRecordedAndNotify($record.path,$record.identity,$n.hidden,$hidden,$record.size,$record.mtime,[uint32]$record.attributes)}
 }
 function Lease-SetSnap($r,$current,[bool]$enabled){
  $script:LeasePhase=if($enabled){'native-snap-enable'}else{'native-snap-disable'}
