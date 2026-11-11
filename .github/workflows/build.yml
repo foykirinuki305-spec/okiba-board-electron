@@ -226,6 +226,20 @@ jobs:
           }
           Write-Host 'Data directory survived the uninstall, as required'
 
+      - name: Preserve forward-compatible home fields (pure regression)
+        run: node tools/home-fields-selftest.js
+
+      - name: Installer update preserves existing layouts on normal startup
+        run: node tools/installer-layout-ci.js
+
+      - name: Upload installer layout evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-layout-evidence
+          path: installer-layout-evidence/
+          if-no-files-found: ignore
+
       - uses: actions/upload-artifact@v4
         with:
           name: OkibaBoard-exe
