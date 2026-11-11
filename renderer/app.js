@@ -4,7 +4,7 @@
 const api = { ...window.okiba };
 let boardEpoch = 0, boardReadSeq = 0, boardOperation = 0;
 // Invalidate old reads at both boundaries; block a second UI mutation until completion.
-for (const name of ['saveBoard','linkFiles','unlinkItems','renameLinked','trashLinked','trashItem','renameItem','safeTakeout','moveToDesktop','dropFiles','resolveDropMove','moveLinkedToDesktop','restoreHistoryGroup','restoreHistoryItem','renameBoard','trashBoard']) {
+for (const name of ['repairMissingMaterial','saveBoard','linkFiles','unlinkItems','renameLinked','trashLinked','trashItem','renameItem','safeTakeout','moveToDesktop','dropFiles','resolveDropMove','moveLinkedToDesktop','restoreHistoryGroup','restoreHistoryItem','renameBoard','trashBoard']) {
   const original = api[name]; if (typeof original !== 'function') continue;
   api[name] = async (...args) => {
     if (boardOperation) throw Error('処理中です。完了してから操作してください。');
@@ -634,10 +634,9 @@ function renderBoard() {
       } else if (itemKind === 'linked') {
         const link = opts.link;
         if (missing) {
-          // The original is gone from its path: the ONLY sensible
-          // action is cleaning the reference off the board. Nothing
-          // file-destructive is offered.
+          // Search repairs a reference only, never the material itself.
           showMenu(e.clientX, e.clientY, [
+            { label: '素材を探す', action: () => findMissingFlow(fullPath) },
             { label: 'ボードから外す', action: () => unlinkFlow([fullPath]) },
           ]);
         } else {
@@ -1078,6 +1077,28 @@ async function editNoteFlow(key) {
   renderBoard();
 }
 
+let rescueRequest=0;
+function closeRescue(){rescueRequest++;$('rescueOverlay').hidden=true;busy=false;boardEpoch++;}
+$('rescueClose').addEventListener('click',closeRescue);
+async function findMissingFlow(oldPath){
+  if(!boardData||boardOperation)return;
+  const name=boardData.name,request=++rescueRequest;
+  busy=true;boardEpoch++;$('rescueOverlay').hidden=false;$('rescueNote').textContent='戻し先・移動履歴・デスクトップ付近を探しています。';$('rescueList').replaceChildren();
+  try{
+    const result=await api.findMissingMaterial(name,oldPath);
+    if(request!==rescueRequest)return;
+    if(result.status==='source-present'){$('rescueNote').textContent='元の場所に素材があります。閉じると表示を更新します。';refreshBoard();return;}
+    $('rescueNote').textContent=result.candidates.length?'使う素材を選んでください。実ファイルは動かさず、元のマスの参照だけ直します。':'この範囲では候補が見つかりませんでした。';
+    if(result.truncated)$('rescueNote').textContent+=' 検索範囲または時間の上限に達したため、全ては調べていません。';
+    for(const candidate of result.candidates){
+      const row=document.createElement('div');row.className='rescue-candidate';
+      const label=document.createElement('div');label.textContent=(candidate.match==='identity'?'履歴のIDが一致':'名前などが一致（別の素材の可能性あり）')+'\n'+candidate.path;label.style.whiteSpace='pre-wrap';label.style.overflowWrap='anywhere';
+      const button=document.createElement('button');button.className='pill pill-accent';button.textContent='この素材を使う';button.dataset.rescueToken=candidate.token;
+      button.onclick=async()=>{button.disabled=true;try{const r=await api.repairMissingMaterial(candidate.token);if(r.saved){closeRescue();await refreshBoard();toast('元のマスで素材の参照を直しました。');}else{closeRescue();await refreshBoard();toast('内容が変わったため修復を止めました。もう一度探してください。',15000);}}catch(e){button.disabled=false;toast('修復できませんでした。もう一度探してください。 '+String(e.message||e),15000);}};
+      row.append(label,button);$('rescueList').appendChild(row);
+    }
+  }catch(e){if(request===rescueRequest)$('rescueNote').textContent='検索できませんでした。 '+String(e.message||e);}
+}
 async function refreshBoard() {
   if (!boardData || boardOperation || dragging) return;
   const name = boardData.name, epoch = boardEpoch, request = ++boardReadSeq;

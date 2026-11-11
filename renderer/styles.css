@@ -302,3 +302,5 @@ body {
   border: 1px solid rgba(255, 255, 255, .14); border-radius: 999px;
   padding: 9px 18px; font-size: 13px; box-shadow: 0 12px 30px rgba(0, 0, 0, .5);
 }
+
+.rescue-candidate {display:flex; flex-direction:column; gap:8px; padding:12px; border:1px solid #39435c; border-radius:12px;} .rescue-candidate button {align-self:flex-end;}

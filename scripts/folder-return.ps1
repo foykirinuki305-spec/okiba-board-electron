@@ -13,6 +13,15 @@ try {
  if($null -eq $line -or $line.Length -gt 4194304){throw 'return-invalid-request-size'}
  $request=$line|ConvertFrom-Json
  if($request.action -eq 'ping'){Write-ReturnJson @{ok=$true;ready=$true};return}
+ # Read-only exact-path metadata inspection. Never enumerate or mutate files.
+ if($request.action -eq 'inspect') {
+  if($request.paths -isnot [array] -or $request.paths.Count -lt 1 -or $request.paths.Count -gt 1000){throw 'inspect-invalid-paths'}
+  $seen=@{}
+  foreach($p in $request.paths){if($p -isnot [string] -or [string]::IsNullOrEmpty($p) -or $seen.ContainsKey($p.ToLowerInvariant())){throw 'inspect-invalid-or-duplicate-path'};$seen[$p.ToLowerInvariant()]=$true}
+  $records=@();$failed=@()
+  foreach($p in $request.paths){try{$records+= [OkibaFolderReturnFiles]::Read($p)}catch{$failed+=@{path=$p;reason=$_.Exception.Message}}}
+  Write-ReturnJson @{ok=$true;records=$records;failed=$failed};return
+ }
  if($request.action -notin @('prepare','execute','probe','finalize')){throw 'return-invalid-action'}
  if($request.action -eq 'prepare') {
   if($request.sources -isnot [array] -or $request.sources.Count -lt 1 -or $request.sources.Count -gt 1000 -or $request.destDir -isnot [string]){throw 'return-invalid-request'}

@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('okiba', {
 
   copySelectedOut: (payload) => ipcRenderer.invoke('copy-selected-out', payload),
 
+  findMissingMaterial: (name,oldPath) => ipcRenderer.invoke('find-missing-material',name,oldPath),
+  repairMissingMaterial: token => ipcRenderer.invoke('repair-missing-material',token),
   getHome: () => ipcRenderer.invoke('get-home'),
   getBoard: (name) => ipcRenderer.invoke('get-board', name),
   watchHome: () => ipcRenderer.invoke('watch-home'),

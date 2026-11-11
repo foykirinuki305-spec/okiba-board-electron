@@ -340,7 +340,33 @@ function guardBoard(name) {
 
 function registerIpc() {
   // Desktop drops go to a user-selected normal folder; no copies or icon placement.
-  let folderReturnBusy=false;
+  let folderReturnBusy=false,rescueRepairOwned=false;
+  const rescue=require('./lib/material-rescue');
+  const returnScript=()=>path.join(app.isPackaged?process.resourcesPath:__dirname,'scripts','folder-return.ps1');
+  async function probeMaterial(p){
+    try{fs.lstatSync(p);}catch(e){if(e.code==='ENOENT'||e.code==='ENOTDIR')return null;throw e;}
+    const r=await require('./lib/folder-return').nativeCall(returnScript(),{action:'inspect',paths:[p]});
+    if(r.records?.length===1)return r.records[0];
+    try{fs.lstatSync(p);}catch(e){if(e.code==='ENOENT'||e.code==='ENOTDIR')return null;throw e;}
+    throw Error(r.failed?.[0]?.reason||'identity-inspection-failed');
+  }
+  function recordReturned(j,done){
+    if(!done.length)return;
+    const old=JSON.parse(j.before),folder=guardBoard(j.boardName);
+    const operationId=j.operationId||require('crypto').createHash('sha256').update(JSON.stringify(j.items)+j.before).digest('hex');
+    rescue.recordMoves(BASE,{operationId,boardFolder:folder,items:done.map(i=>{
+      const c=i.kind==='linked'?(old.links||[]).find(l=>l.path===i.src):old.positions?.[path.basename(i.src)];
+      return {...i,type:(i.attributes&16)?'directory':'file',col:Array.isArray(c)?c[0]:c?.col,row:Array.isArray(c)?c[1]:c?.row};
+    })});
+  }
+  const rescueController=require('./lib/material-rescue-controller').createController({
+    base:BASE,guardBoard,probe:probeMaterial,isBusy:()=>folderReturnBusy&&!rescueRepairOwned,
+    roots:(_folder,oldPath)=>{let dest;try{dest=JSON.parse(fs.readFileSync(path.join(BASE,'.folder-return.json'),'utf8')).destination;}catch(_){}return [dest,path.dirname(oldPath),app.getPath('desktop'),BASE].filter(Boolean);},
+    withLock:async(_folder,fn)=>{if(folderReturnBusy)throw Error('処理中です。完了してから操作してください。');folderReturnBusy=true;rescueRepairOwned=true;try{return await fn();}finally{rescueRepairOwned=false;folderReturnBusy=false;}},
+    notify:()=>{if(win&&!win.isDestroyed())win.webContents.send('fs-changed');}
+  });
+  ipcMain.handle('find-missing-material',(_e,name,oldPath)=>rescueController.find(name,oldPath));
+  ipcMain.handle('repair-missing-material',(_e,token)=>rescueController.repair(token));
   async function returnToFolder(payload){
     const empty={moved:[],destinations:[],failed:[],skipped:[],metadataCommitted:true};
     if(folderReturnBusy)return {...empty,error:'移動処理中です。完了まで待ってください。'};
@@ -361,6 +387,7 @@ function registerIpc() {
       if(process.env.OKIBA_TEST_HOOKS!=='1')require('./lib/folder-return').atomic(config,JSON.stringify({destination:canonical},null,2));
       const run=require('./lib/folder-return').createFolderReturn({base:BASE,guardBoard,destination:canonical,forbidden,
         scriptPath:path.join(app.isPackaged?process.resourcesPath:__dirname,'scripts','folder-return.ps1'),
+        onRecord:recordReturned,
         onDone:async target=>{if(win&&!win.isDestroyed())win.webContents.send('fs-changed');if(process.env.OKIBA_TEST_HOOKS!=='1')await shell.openPath(target);},
       });
       return await run(payload);

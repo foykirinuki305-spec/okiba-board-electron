@@ -17,6 +17,11 @@ jobs:
       - run: npm run selftest
       - name: Renderer stale reads and metadata CAS race regression
         run: node tools/renderer-board-race-selftest.js
+      - name: Missing-material search and candidate token regressions
+        run: |
+          node tools/test-material-rescue.js
+          node tools/test-material-rescue-controller.js
+          node tools/folder-return-inspect-selftest.js
       - name: Native rename and forced-interruption recovery
         run: powershell -NoProfile -NonInteractive -File tools/folder-return-native-selftest.ps1
       - name: Real C to D and D to C moves are refused without copying
