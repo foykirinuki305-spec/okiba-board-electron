@@ -50,11 +50,22 @@ async function main(){
   for(const [i,item]of items.entries()){assert(!fs.existsSync(item.path));assert.equal(fs.readFileSync(item.dest,'utf8'),'source-'+i);}
   note('PASS sparse group: all original icons unchanged; independent cold reads equal exact planned grid cells; relative layout preserved');
   const batchBefore=await stable();
+  const existingDiff=(baseline,current)=>baseline.icons.map(old=>{
+    const matchesNow=(current.icons||[]).filter(i=>i.label===old.label);
+    const kind=matches(old.label,guardName)?'guard':names.some(n=>matches(old.label,n))?'previous-3-files':'original-OS-icon';
+    return {label:old.label,kind,before:{x:old.x,y:old.y},after:matchesNow.map(i=>({x:i.x,y:i.y})),unchanged:matchesNow.some(i=>i.x===old.x&&i.y===old.y)};
+  }).filter(i=>!i.unchanged);
+  note('10-file before create '+JSON.stringify({snapshot:batchBefore,diffSinceFirstBatch:existingDiff(after,batchBefore)}));
   const batch=Array.from({length:10},(_,i)=>{const name=tag+'-batch'+i+'.txt';return {name,path:path.join(temp,name),dest:path.join(desktop,name),offset:[Math.floor(i/5),i%5]};});
   for(const item of batch){fs.writeFileSync(item.path,item.name);owned.push(item.dest);}
   const batchPlan=planDesktop({snapshot:batchBefore,items:batch,automatic:true});assert(batchPlan.ok,'runner has no safe 10-file group space');
   const batchStart=Date.now();
-  const batchResult=await executeDesktop({items:batch,plan:batchPlan,snapshot:batchBefore,adapter:{...adapter,position:async(s,p)=>request('positionDesktopPlan',{snapshot:s,targets:p.targets.map(t=>({...t,path:batch.find(i=>i.name===t.name).dest})),buffer:p.buffer})}});
+  const batchResult=await executeDesktop({items:batch,plan:batchPlan,snapshot:batchBefore,adapter:{...adapter,position:async(s,p)=>{
+    const justCreated=await snap();note('10-file after create, before position '+JSON.stringify({snapshot:justCreated,diff:existingDiff(s,justCreated)}));
+    const result=await request('positionDesktopPlan',{snapshot:s,targets:p.targets.map(t=>({...t,path:batch.find(i=>i.name===t.name).dest})),buffer:p.buffer});
+    if(!result.ok&&!result.unsafe){const current=await snap();note('10-file failure diagnostics '+JSON.stringify({result,before:s,current,plan:p,diff:existingDiff(s,current)}));}
+    return result;
+  }}});
   note('10-file strict transaction elapsed_ms='+(Date.now()-batchStart));assert(batchResult.ok,'10-file placement failed '+JSON.stringify(batchResult));
   const batchAfter=await stable();
   assert.deepEqual(batchAfter.icons.filter(i=>!batch.some(t=>matches(i.label,t.name))).map(i=>JSON.stringify([i.label,i.x,i.y])).sort(),signature(batchBefore),'10-file transaction moved an existing icon');
