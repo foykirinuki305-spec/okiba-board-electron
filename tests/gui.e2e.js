@@ -1157,14 +1157,32 @@ async function main() {
   await page.waitForSelector('#boardView:not([hidden]) .item');
   const g1 = page.locator('.item', { hasText: '履歴グループ1' }).first();
   const g2 = page.locator('.item', { hasText: '履歴グループ2' }).first();
-  const g1Box = await boxOf(g1, 'group item 1 box');
-  await page.mouse.click(g1Box.x + g1Box.width / 2, g1Box.y + g1Box.height / 2);
-  const g2Box = await boxOf(g2, 'group item 2 box');
-  await page.keyboard.down('Control');
-  await page.mouse.click(g2Box.x + g2Box.width / 2, g2Box.y + g2Box.height / 2);
-  await page.keyboard.up('Control');
-  await waitFor(async () => (await selectedNames(page)).length === 2,
-    'history group: both items selected');
+  // Locator clicks (live elements, scroll-into-view) rather than
+  // raw coordinates: a background re-render between measuring a
+  // box and clicking it can shift what sits under fixed coords.
+  await g1.click();
+  await g2.click({ modifiers: ['Control'] });
+  try {
+    await waitFor(async () => (await selectedNames(page)).length === 2,
+      'history group: both items selected');
+  } catch (e) {
+    const diag = await page.evaluate(() => {
+      const a = document.getElementById('boardArea');
+      return {
+        items: [...document.querySelectorAll('.item')].map((el) => ({
+          name: el.querySelector('.name').textContent,
+          cls: el.className, left: el.style.left, top: el.style.top,
+        })),
+        area: {
+          clientWidth: a.clientWidth, clientHeight: a.clientHeight,
+          scrollWidth: a.scrollWidth, scrollHeight: a.scrollHeight,
+          scrollTop: a.scrollTop, scrollLeft: a.scrollLeft,
+        },
+      };
+    }).catch(() => null);
+    console.log('  [diag] selection state:', JSON.stringify(diag));
+    throw e;
+  }
   await dragOutSynthetic(g1);
   await waitFor(() => fs.existsSync(path.join(landing, '履歴グループ1.txt')) &&
     fs.existsSync(path.join(landing, '履歴グループ2.txt')),
