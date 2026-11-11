@@ -93,7 +93,8 @@ async function main(){
   async function ownerMessage(child,timeout=120000){return new Promise((resolve,reject)=>{const t=setTimeout(()=>{child.off('message',f);reject(Error('owner message timeout'));},timeout);function f(m){clearTimeout(t);child.off('message',f);if(m.phase==='error')reject(Error(m.error));else resolve(m);}child.on('message',f);});}
   async function killOwner(child){if(child.exitCode!==null||child.signalCode!==null)return;const exited=new Promise(r=>child.once('exit',r));child.kill();await Promise.race([exited,sleep(5000)]);if(child.exitCode===null&&child.signalCode===null){unsafe=true;throw Error('owner stop unconfirmed');}}
   async function journalTerminal(dir){for(let n=0;n<300;n++){const files=fs.existsSync(dir)?fs.readdirSync(dir).filter(x=>/^[a-f0-9]{32}\.json$/.test(x)):[];for(const f of files){const j=JSON.parse(fs.readFileSync(path.join(dir,f),'utf8'));if(['released','aborted','blocked'].includes(j.phase))return j;}await sleep(100);}throw Error('journal recovery timeout');}
-  for(const [index,commitCase] of ['success','success','kill-reveal','ack-lost','disconnect-alive','helper-hang','release-target-shift','release-file-changed'].entries()){
+  const protocolCases=['success','success','kill-reveal','ack-lost','disconnect-alive','helper-hang','release-target-shift','release-file-changed','post-restore-off','restore-reply-loss'];
+  for(const [index,commitCase] of protocolCases.entries()){
    const name=index+'-'+commitCase,caseDir=path.join(temp,name);fs.mkdirSync(caseDir);
    const before=await stable('protocol-before',remaining),plan=planDesktop({snapshot:before,items:selected,automatic:true});assert(plan.ok);
    const targets=plan.targets.map(t=>({...t,path:selected.find(i=>i.name===t.name).dest}));
@@ -113,6 +114,17 @@ async function main(){
     const fault=commitCase==='release-target-shift'?once+"$s=($s|ConvertTo-Json -Depth 50 -Compress|ConvertFrom-Json);foreach($i in $s.icons){if($i.path -ieq $r.targets[0].path){$i.x=[int]$i.x+1}}}":once+"throw 'lease-selected-file-changed'}";
     fragment=fragment.replace(guard," $s=Lease-Snapshot;\n"+fault+"\n $selected=Lease-Guard $r $s $visible");lease=lease.slice(0,begin)+fragment+lease.slice(end);fs.writeFileSync(path.join(hd,'snap-lease.ps1'),lease);
    }
+   if(['post-restore-off','restore-reply-loss'].includes(commitCase)){
+    const hd=path.join(caseDir,'helper');fs.mkdirSync(hd);helperPath=path.join(hd,'shell-helper.ps1');fs.copyFileSync(path.join(root,'scripts','shell-helper.ps1'),helperPath);
+    let lease=fs.readFileSync(path.join(root,'scripts','snap-lease.ps1'),'utf8');
+    if(commitCase==='post-restore-off'){
+     const anchor="$s=Measure-LeaseStep 'restoreCheck' {Lease-Snapshot};$null=Lease-Guard";assert.equal(lease.split(anchor).length-1,1);
+     lease=lease.replace(anchor,"$s=Measure-LeaseStep 'restoreCheck' {Lease-Snapshot};if($r.restored -eq $true -and -not $script:PostRestoreInjected){$script:PostRestoreInjected=$true;$s=($s|ConvertTo-Json -Depth 50 -Compress|ConvertFrom-Json);$s.folderFlags=[uint32]$r.originalFlags -band ([uint32]::MaxValue -bxor 4);$s.snap=$false};$null=Lease-Guard");
+    }else{
+     const anchor=" return @{ok=$true;snapRestored=$true;oldUnchanged=$true;targetsExact=$true;restoreMode='changed-and-settled'}";assert.equal(lease.split(anchor).length-1,1);lease=lease.replace(anchor," Start-Sleep -Seconds 60\n"+anchor);
+    }
+    fs.writeFileSync(path.join(hd,'snap-lease.ps1'),lease);
+   }
    const journalDir=index===1?warmJournal:path.join(caseDir,'journal');
    const spec={desktop,caseDir,journalDir,commitCase,helperPath,baseline:before,selected:selected.map(i=>({path:i.dest})),targets,targetAreaIndex,receipts};
    let ownerChild=index===1?warmOwner:fork(path.join(root,'tools','desktop-lease-protocol-host-ci.js'),[],{windowsHide:true,stdio:['ignore','ignore','ignore','ipc']});
@@ -123,7 +135,8 @@ async function main(){
     let expected;
     if(commitCase==='success'){assert(message.result.ok);assert.equal(message.status.helper.spawns,1,'normal transactions must reuse one warm helper');expected='released';}
     else if(commitCase.startsWith('release-')){assert(message.result.ok&&message.result.recovered,'failed terminal must be reverified before recovered success');const attempts=message.status.nativeTimings.filter(t=>t.command==='leaseRelease');assert(attempts.length>=2&&attempts[0].nativeOk===false&&attempts[attempts.length-1].nativeOk===true);assert.equal(message.status.helper.spawns,1);expected='released';}
-    else if(commitCase==='helper-hang'){assert(!message.result.ok);assert.equal(message.result.resolution?.state,'aborted');const h=message.status.helper;assert(h.cumulativeRestartCount>=1);assert(h.history.length>=2);const old=h.history[h.history.length-2],fresh=h.history[h.history.length-1];assert(old.stoppedConfirmed&&old.stopCause==='restart');assert.equal(old.pid,old.spawnPid);assert.equal(fresh.pid,fresh.spawnPid);assert(old.pid!==fresh.pid||old.started!==fresh.started,'native helper PID/birth must differ after confirmed termination');expected='aborted';}
+    else if(commitCase==='post-restore-off'){assert(!message.result.ok);assert.equal(message.result.resolution?.state,'aborted');assert.equal(message.status.lastNativeError?.detail,'lease-post-restore-flags-changed');assert.equal(fs.readFileSync(p,'utf8'),beforeText);expected='aborted';}
+    else if(commitCase==='helper-hang'||commitCase==='restore-reply-loss'){assert(!message.result.ok);assert.equal(message.result.resolution?.state,'aborted');const h=message.status.helper;assert(h.cumulativeRestartCount>=1);assert(h.history.length>=2);const old=h.history[h.history.length-2],fresh=h.history[h.history.length-1];assert(old.stoppedConfirmed&&old.stopCause==='restart');assert.equal(old.pid,old.spawnPid);assert.equal(fresh.pid,fresh.spawnPid);assert(old.pid!==fresh.pid||old.started!==fresh.started,'native helper PID/birth must differ after confirmed termination');expected='aborted';}
     else{
      if(commitCase==='disconnect-alive'){
       assert.equal(message.phase,'disconnected-live');
@@ -161,7 +174,7 @@ async function main(){
    finally{fs.cpSync(caseDir,path.join(evidenceDir,name),{recursive:true});}
    for(const i of selected)assert((await attrs.setHidden(i.dest,true)).ok);await visible(selected.map(i=>i.name),false,'protocol-between',before);
   }
-  report.passed=true;note('NODE_LEASE_PROTOCOL_PASS',{cases:6,dense:42,selectedHidden:6,oldCellGuards:3,watchdogDeathAndOSShutdown:'not covered; recovery journal only'});
+  report.passed=true;note('NODE_LEASE_PROTOCOL_PASS',{cases:protocolCases.length,dense:42,selectedHidden:6,oldCellGuards:3,watchdogDeathAndOSShutdown:'not covered; recovery journal only'});
  }finally{
   // Stop known fixture host/watchdog processes before any test cleanup. Never restore old coordinates.
   for(const entry of children){if(entry.child.exitCode===null&&entry.child.signalCode===null){try{entry.child.kill();await Promise.race([new Promise(r=>entry.child.once('exit',r)),sleep(5000)]);if(entry.child.exitCode===null&&entry.child.signalCode===null){unsafe=true;note('cleanup-process-unconfirmed',{kind:entry.kind,pid:entry.child.pid});}}catch(e){unsafe=true;note('cleanup-stop-error',{kind:entry.kind,error:String(e)});}}}

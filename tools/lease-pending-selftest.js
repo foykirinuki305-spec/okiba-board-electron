@@ -9,6 +9,13 @@ const good={ok:true,state:'committed',snapRestored:true,oldUnchanged:true,target
 async function resolution(owner,current,fail=false){const calls=[];const ctx={active:{token:'t',permit:'p',receipts:r,scope:{metadataPaths:[r[0].path]}},terminal:()=>null,ownerState:async()=>({state:owner}),allHash:(rr,c,k)=>rr.every(x=>c.some(v=>x.path===v.path&&x[k]===v.hash)),receiptsNow:()=>[{path:r[0].path,hash:current}],finishVisible:async()=>{calls.push('verify-native-and-release');if(fail)throw Error('transient-native');return good;},classifyReceipt:receipts.classifyReceipt,save:()=>calls.push('save'),globalLock:{release:async()=>calls.push('global-release')},native:async cmd=>{calls.push(cmd);return {ok:true};},rollback:async()=>{throw Error('ordinary rollback forbidden');}};const fn=vm.runInNewContext(resolveBody+';resolve',ctx);return {calls,run:fn};}
 (async()=>{
  for(const owner of ['alive','exited','unknown'])for(const h of [before,after,'foreign']){const f=await resolution(owner,h);const result=await f.run();if(h===after&&owner!=='unknown'){check(result.state==='committed');check(f.calls.includes('verify-native-and-release'));}else if(owner==='exited'&&h===before){check(f.calls.includes('leaseRollback'));}else{check(!f.calls.includes('leaseRollback'));check(!f.calls.includes('verify-native-and-release'));check(['pending','blocked'].includes(result.state));}}
+ const verifyBody=src.slice(src.indexOf('async function verifyVisible(){'),src.indexOf('async function finishVisible(){'));
+ for(const fail of [false,true]){
+  const observations=[],ctx={active:{token:'t'},save:()=>observations.push({attempted:ctx.active.restoreAttempted,restored:ctx.active.restored}),native:async()=>{check(ctx.active.restoreAttempted===true&&observations.length===1);if(fail)throw Error('lost-restore-response');return {snapRestored:true,oldUnchanged:true,targetsExact:true};}};
+  const verify=vm.runInNewContext(verifyBody+';verifyVisible',ctx);
+  if(fail){await assert.rejects(verify,/lost-restore-response/);n++;check(ctx.active.restoreAttempted&&!ctx.active.restored&&observations.length===1);}
+  else{await verify();check(ctx.active.restored&&observations.length===2&&observations[1].restored);}
+ }
  const finishBody=src.slice(src.indexOf('async function finishVisible(){'),src.indexOf('function terminal(){'));
  for(const fail of [false,true]){
   const calls=[],ctx={active:{token:'t',receipts:r},verifyVisible:async()=>calls.push('verify'),allHash:()=>true,receiptsNow:()=>[],save:()=>calls.push('save'),globalLock:{release:async()=>calls.push('global-release')},native:async(cmd,p)=>{check(cmd==='leaseRelease'&&p.expectedOutcome==='visible');calls.push('release');if(fail)throw Error('lease-target-not-exact');return {ok:true};}};

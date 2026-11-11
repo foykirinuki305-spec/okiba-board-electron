@@ -35,6 +35,7 @@ function Lease-Guard($r,$current,[bool]$exact=$false) {
  if(-not $current.ok -or (Lease-PhysicalKey $r.snapshot) -cne (Lease-PhysicalKey $current)){throw 'lease-physical-changed'}
  if($current.autoArrange -or $current.shellAutoArrange){throw 'lease-autoarrange-changed'}
  $on=[uint32]$r.originalFlags;$off=$on -band ([uint32]::MaxValue -bxor 4)
+ if($r.restored -eq $true -and ([uint32]$current.folderFlags -ne $on -or -not $current.snap)){throw 'lease-post-restore-flags-changed'}
  if([uint32]$current.folderFlags -ne $on -and [uint32]$current.folderFlags -ne $off){throw 'lease-flags-changed'}
  $old=@{};foreach($i in $r.snapshot.icons){if([string]::IsNullOrEmpty($i.identity) -or $old.ContainsKey($i.identity)){throw 'lease-invalid-baseline'};$old[$i.identity]=$i}
  $seen=@{};$selected=@{}
@@ -181,6 +182,20 @@ function Lease-RevealPlace([string]$token){
  if([uint32]$s.folderFlags -ne $off){throw 'lease-flags-changed'}
  return @{ok=$true;oldUnchanged=$true;targetsExact=$true;snapRestored=$false}
 }
+function Lease-MarkRestored($r){
+ if($r -is [Collections.IDictionary]){$r['restored']=$true}else{$r|Add-Member -NotePropertyName restored -NotePropertyValue $true -Force}
+}
+function Lease-AdoptRestoration($r,$current,[string]$state){
+ if($state -notin @('not-attempted','attempted','verified')){throw 'lease-restoration-state-unknown'}
+ if($state -eq 'not-attempted'){
+  if($r.restored -eq $true){throw 'lease-restoration-state-conflict'}
+  return
+ }
+ # A timed-out restore may have completed before its response was lost. OFF is
+ # ambiguous after that boundary: do not overwrite a possible user's new choice.
+ if([uint32]$current.folderFlags -ne [uint32]$r.originalFlags -or -not $current.snap){throw 'lease-restoration-outcome-unknown'}
+ Lease-MarkRestored $r
+}
 function Lease-RestoreVerify([string]$token){
  $script:LeasePhase='restore-preflight'
  $r=Lease-Require $token;$s=Measure-LeaseStep 'restoreCheck' {Lease-Snapshot};$null=Lease-Guard $r $s $true;Lease-AllGrid $r.snapshot $s
@@ -190,12 +205,14 @@ function Lease-RestoreVerify([string]$token){
  if([uint32]$s.folderFlags -eq [uint32]$r.originalFlags){
   if(-not $s.snap){throw 'lease-restore-unverified'}
   Add-LeasePerf 'restoreAlreadyEnabled' ([Diagnostics.Stopwatch]::StartNew())
+  Lease-MarkRestored $r
   return @{ok=$true;snapRestored=$true;oldUnchanged=$true;targetsExact=$true;restoreMode='already-enabled-fresh-verification'}
  }
  Lease-SetSnap $r $s $true
  Measure-LeaseStep 'restoreSettle' {Start-Sleep -Milliseconds 250}
  $s=Measure-LeaseStep 'afterguard' {Lease-Snapshot};Measure-LeaseStep 'exactGuard' {$null=Lease-Guard $r $s $true}
  if([uint32]$s.folderFlags -ne [uint32]$r.originalFlags -or -not $s.snap){throw 'lease-restore-unverified'}
+ Lease-MarkRestored $r
  return @{ok=$true;snapRestored=$true;oldUnchanged=$true;targetsExact=$true;restoreMode='changed-and-settled'}
 }
 function Lease-Rollback([string]$token){
@@ -208,6 +225,7 @@ function Lease-Rollback([string]$token){
  Measure-LeaseStep 'restoreSettle' {Start-Sleep -Milliseconds 250}
  $s=Lease-Snapshot;$selected=Lease-Guard $r $s
  if($selected.Count -ne 0 -or [uint32]$s.folderFlags -ne [uint32]$r.originalFlags){throw 'lease-rollback-unverified'}
+ Lease-MarkRestored $r
  return @{ok=$true;snapRestored=$true;oldUnchanged=$true;selectedHidden=$true}
 }
 function Lease-Release([string]$token,[string]$expectedOutcome){
@@ -238,7 +256,7 @@ function Invoke-SnapLeaseRequestCore($req){
    'leaseRevealPlace' {return Lease-RevealPlace $req.token}
    'leaseRestoreVerify' {return Lease-RestoreVerify $req.token}
    'leaseRollback' {return Lease-Rollback $req.token}
-   'leaseAdopt' {if($null -ne $script:SnapLease){throw 'lease-already-active'};$r=$req.recovery;$owner=[OkibaLeaseOwner]::Read();if($owner.state -eq 'unknown' -or $owner.pid -ne $r.owner.pid -or $owner.started -cne $r.owner.started){throw 'lease-owner-mismatch'};$s=Lease-Snapshot;Lease-ValidateRecovery $r $s;$script:SnapLease=$r;return @{ok=$true}}
+   'leaseAdopt' {if($null -ne $script:SnapLease){throw 'lease-already-active'};$r=$req.recovery;$owner=[OkibaLeaseOwner]::Read();if($owner.state -eq 'unknown' -or $owner.pid -ne $r.owner.pid -or $owner.started -cne $r.owner.started){throw 'lease-owner-mismatch'};$s=Lease-Snapshot;Lease-AdoptRestoration $r $s $req.restorationState;Lease-ValidateRecovery $r $s;$script:SnapLease=$r;return @{ok=$true}}
    'leaseRelease' {return Lease-Release $req.token $req.expectedOutcome}
    default {throw 'lease-unknown-command'}
   }

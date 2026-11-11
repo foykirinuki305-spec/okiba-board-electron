@@ -38,6 +38,7 @@ function Lease-SetSnap($r,$s,[bool]$enabled){if(-not $enabled){throw 'unexpected
 function Lease-CheckRecord($r){$script:fileChecks++;return @{hidden=$script:mockHidden}}
 function Start-Sleep {param([int]$Milliseconds);$script:sleepMs+=$Milliseconds}
 function Reset-RestoreMocks($snapshots){
+ $r.restored=$false
  $script:readQueue=[Collections.Queue]::new();foreach($v in $snapshots){$script:readQueue.Enqueue($v)}
  $script:readCount=0;$script:setCount=0;$script:fileChecks=0;$script:sleepMs=0;$script:mockHidden=$false;$script:LeasePerf=@{}
 }
@@ -85,6 +86,24 @@ $script:releaseFileChanged=$false;$script:SnapLease=$r;Reset-RestoreMocks @($vis
 Reject {Lease-Release $r.token ''} 'lease-release-outcome-required'
 $script:SnapLease=$r;Reset-RestoreMocks @($visible,$visible);$script:mockHidden=$true
 Reject {Lease-Release $r.token 'hidden'} 'lease-release-visibility-changed'
+# Post-restoration OFF is an external/ambiguous setting, never permission to set ON.
+$script:SnapLease=$r;Reset-RestoreMocks @($visible)
+$null=Lease-RestoreVerify $r.token
+Pass ($r.restored -eq $true) 'successful ON verification records restored boundary'
+$script:readQueue.Enqueue($off);$script:setCount=0
+Reject {Lease-RestoreVerify $r.token} 'lease-post-restore-flags-changed'
+Pass ($script:setCount -eq 0) 'post-restored OFF does not call setting writer'
+foreach($state in @('attempted','verified')){
+ $x=Clone-Data $r;$x.restored=$false
+ Reject {Lease-AdoptRestoration $x $off $state} 'lease-restoration-outcome-unknown'
+ Lease-AdoptRestoration $x $visible $state
+ Pass ($x.restored -eq $true) ('adopt '+$state+' pins observed ON')
+ Reject {Lease-Guard $x $off} 'lease-post-restore-flags-changed'
+}
+$x=Clone-Data $r;$x.restored=$false;Lease-AdoptRestoration $x $off 'not-attempted'
+Pass (-not $x.restored) 'pre-restore owned OFF remains recoverable'
+Reject {Lease-AdoptRestoration $x $off 'unknown'} 'lease-restoration-state-unknown'
+$x.restored=$true;Reject {Lease-AdoptRestoration $x $visible 'not-attempted'} 'lease-restoration-state-conflict'
 $script:SnapLease=$null;$script:LeasePerf=$null
 Write-Host ('snap lease pure: '+$n+' passed; no desktop mutations')
 
