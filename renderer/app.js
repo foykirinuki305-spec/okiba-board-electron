@@ -1089,6 +1089,9 @@ async function findMissingFlow(oldPath){
     if(request!==rescueRequest)return;
     if(result.status==='source-present'){$('rescueNote').textContent='元の場所に素材があります。閉じると表示を更新します。';refreshBoard();return;}
     $('rescueNote').textContent=result.candidates.length?'使う素材を選んでください。実ファイルは動かさず、元のマスの参照だけ直します。':'この範囲では候補が見つかりませんでした。';
+    if(result.status==='source-unavailable')$('rescueNote').textContent='元の場所にアクセスできないため、安全に確認できませんでした。接続やアクセス権を確認してください。';
+    else if(result.status==='board-changed')$('rescueNote').textContent='検索中にボードが変わりました。閉じてからもう一度探してください。';
+    else if(result.errors?.length)$('rescueNote').textContent+=' 一部の場所はアクセスできず、確認していません。';
     if(result.truncated)$('rescueNote').textContent+=' 検索範囲または時間の上限に達したため、全ては調べていません。';
     for(const candidate of result.candidates){
       const row=document.createElement('div');row.className='rescue-candidate';
