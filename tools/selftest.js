@@ -436,6 +436,11 @@ function iconposMain() {
       'parsePos: no-listview passes through');
     ok(ip.parsePositionOutput('{"status":"set-unverified","positioned":0}').status === 'set-unverified',
       'parsePos: set-unverified passes through');
+    const timed = ip.parsePositionOutput('{"status":"ok","positioned":2,"appearMs":12,"workMs":0}');
+    ok(timed.appearMs === 12 && timed.workMs === 0, 'parsePos: valid stage timings including zero');
+    const invalidTiming = ip.parsePositionOutput('{"status":"ok","appearMs":-1,"workMs":"20"}');
+    ok(!('appearMs' in invalidTiming) && !('workMs' in invalidTiming), 'parsePos: invalid timings ignored');
+    ok(!('appearMs' in o1) && !('workMs' in o1), 'parsePos: legacy shape unchanged');
     const oErr = ip.parsePositionOutput('{"status":"script-error","positioned":0,"detail":"boom"}');
     ok(oErr.status === 'script-error' && oErr.detail === 'boom',
       'parsePos: script-error keeps its detail');
@@ -488,7 +493,9 @@ async function linksMain() {
     fs.writeFileSync(file, 'video');
     const stub = ln.createStubAttribRunner();
 
-    const r1 = await ln.addLink({ base, boardFolder: boardA, targetPath: file, attrib: stub });
+    const intakeTimings = {};
+    const r1 = await ln.addLink({ base, boardFolder: boardA, targetPath: file, attrib: stub, timings: intakeTimings });
+    ok(['loadMs', 'registryMs', 'attribMs', 'saveMs'].every(k => Number.isFinite(intakeTimings[k]) && intakeTimings[k] >= 0), 'link: intake stage metrics are nonnegative');
     ok(r1.added && !r1.duplicate && r1.attribOk, 'link: first intake registers');
     ok(stub.count('+H') === 1, 'link: +H called exactly once at intake');
     ok(stub.isHidden(file), 'link: original is hidden after intake');

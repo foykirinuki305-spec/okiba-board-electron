@@ -1247,7 +1247,15 @@ async function main() {
   const app19 = await electron.launch({
     args: [ROOT, '--no-sandbox'], env: env13, timeout: 60000,
   });
+  // Both cursor witnesses must use the same scripted coordinates. The
+  // renderer backup otherwise reads the user's real OS mouse on multi-monitor
+  // PCs and can override this test's synthetic release point.
   page = await app19.firstWindow();
+  await app19.evaluate(({ ipcMain, BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0].setPosition(100, 100);
+    ipcMain.removeHandler('cursor-point');
+    ipcMain.handle('cursor-point', () => ({ x: -40, y: 200 }));
+  });
   await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
   await page.click(`#boardGrid .board-card[data-name="${placeBoard}"]`);
   await page.waitForSelector('#boardView:not([hidden]) .item');
@@ -1261,7 +1269,7 @@ async function main() {
   // (a) resolution happens DURING the drag, before any release:
   await waitFor(async () => {
     const log = await page.evaluate(() => window.okiba.dropLog());
-    return log.some((e) => e.kind === 'preresolve' && e.type === 'desktop');
+    return log.some((e) => e.kind === 'preresolve' && e.type === 'desktop' && e.x === -40 && e.y === 200);
   }, 'pre-resolve: a resolveDrop fired during the drag (dropLog)', 15000);
   assert(true, 'pre-resolve: drop target resolved DURING the drag');
   // synthetic OUTSIDE release at exactly the scripted cursor point
@@ -1298,7 +1306,7 @@ async function main() {
   const timingLine = readLog().slice(logBefore.length)
     .split(/\r?\n/).find((l) => l.includes('dragout ms'));
   const tm = timingLine.match(
-    /dragout ms release=(\d+) resolve=pre move=(\d+) position=(\d+) total=(\d+)/);
+    /dragout ms release=(\d+) resolve=pre move=(\d+) position=(\d+) appear=(?:\d+|unknown) work=(?:\d+|unknown) total=(\d+)/);
   assert(!!tm, 'timing: line carries release/resolve=pre/move/position/total');
   assert(parseInt(tm[3], 10) >= 1000,
     'timing: position stage shows the scripted 4s delay (the card did not wait for it)');

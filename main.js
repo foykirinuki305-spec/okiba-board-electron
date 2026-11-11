@@ -564,66 +564,86 @@ function registerIpc() {
   // becomes the offsets — read BEFORE any hiding happens, because
   // hiding is exactly what makes those icons vanish.
   ipcMain.handle('link-files', async (_e, boardName, paths, placeOpts) => {
-    const folder = guardBoard(boardName);
-    const result = { added: [], duplicates: [], skipped: [], attribFailed: [] };
-    const candidates = [];
-    for (const p of paths || []) {
-      if (!p || !fs.existsSync(p)) { result.skipped.push(p); continue; }
-      // A file already physically inside this board folder is a
-      // resident — it is already on the board, nothing to link.
-      if (path.resolve(path.dirname(p)) === path.resolve(folder)) {
-        result.skipped.push(p);
-        continue;
+    const intakeStart = Date.now();
+    const timings = { layoutMs: 0, placementMs: 0, loadMs: 0, registryMs: 0, attribMs: 0, saveMs: 0 };
+    let intakeStatus = 'error';
+    try {
+      const folder = guardBoard(boardName);
+      const result = { added: [], duplicates: [], skipped: [], attribFailed: [] };
+      const candidates = [];
+      for (const p of paths || []) {
+        if (!p || !fs.existsSync(p)) { result.skipped.push(p); continue; }
+        // A file already physically inside this board folder is a
+        // resident — it is already on the board, nothing to link.
+        if (path.resolve(path.dirname(p)) === path.resolve(folder)) {
+          result.skipped.push(p);
+          continue;
+        }
+        candidates.push(p);
       }
-      candidates.push(p);
-    }
-    const anchor = (placeOpts && Array.isArray(placeOpts.anchor)) ? placeOpts.anchor : null;
-    const rows = (placeOpts && placeOpts.rows > 0) ? placeOpts.rows | 0 : 8;
-    let ordered = candidates;
-    let offsets = (placeOpts && Array.isArray(placeOpts.offsets)) ? placeOpts.offsets : null;
-    if (anchor && !offsets && candidates.length) {
-      const deskDirs = new Set(
-        [bf.desktopDir(), shellDesktopDir()].filter(Boolean)
-          .map((d) => path.resolve(d).toLowerCase()));
-      const allOnDesktop = candidates.every(
-        (p) => deskDirs.has(path.resolve(path.dirname(p)).toLowerCase()));
-      if (allOnDesktop) {
+      const anchor = (placeOpts && Array.isArray(placeOpts.anchor)) ? placeOpts.anchor : null;
+      const rows = (placeOpts && placeOpts.rows > 0) ? placeOpts.rows | 0 : 8;
+      let ordered = candidates;
+      let offsets = (placeOpts && Array.isArray(placeOpts.offsets)) ? placeOpts.offsets : null;
+      if (anchor && !offsets && candidates.length) {
+        const deskDirs = new Set(
+          [bf.desktopDir(), shellDesktopDir()].filter(Boolean)
+            .map((d) => path.resolve(d).toLowerCase()));
+        const allOnDesktop = candidates.every(
+          (p) => deskDirs.has(path.resolve(path.dirname(p)).toLowerCase()));
+        if (allOnDesktop) {
+          const layoutStart = Date.now();
+          try {
+            const plan = await desktopLayoutPlan(candidates);
+            if (plan) { ordered = plan.paths; offsets = plan.offsets; }
+          } catch (e) { /* layout lookup is best-effort: strip order */ }
+          finally { timings.layoutMs += Date.now() - layoutStart; }
+        }
+      }
+      let cells = null;
+      if (anchor && ordered.length) {
+        const placementStart = Date.now();
         try {
-          const plan = await desktopLayoutPlan(candidates);
-          if (plan) { ordered = plan.paths; offsets = plan.offsets; }
-        } catch (e) { /* layout lookup is best-effort: strip order */ }
+          const data = bf.loadBoard(folder);
+          const { occupied } = pl.computeCells({
+            entries: bf.scanFolder(folder),
+            positions: data.positions, notes: data.notes, links: data.links,
+            rowsPerCol: rows,
+          });
+          cells = pl.placeItems({
+            occupied, anchor, offsets, count: ordered.length, rowsPerCol: rows,
+          });
+        } catch (e) { cells = null; /* placement is best-effort */ }
+        finally { timings.placementMs += Date.now() - placementStart; }
       }
-    }
-    let cells = null;
-    if (anchor && ordered.length) {
+      for (let i = 0; i < ordered.length; i++) {
+        const p = ordered[i];
+        const r = await ln.addLink({
+          base: BASE, boardFolder: folder, targetPath: p, attrib,
+          cell: cells ? cells[i] : undefined, timings,
+        });
+        if (r.duplicate) result.duplicates.push(p);
+        else {
+          result.added.push(p);
+          if (!r.attribOk) result.attribFailed.push(p);
+        }
+      }
+      if (result.added.length && win && !win.isDestroyed()) {
+        win.webContents.send('fs-changed');
+      }
+      intakeStatus = 'ok';
+      return result;
+    } finally {
       try {
-        const data = bf.loadBoard(folder);
-        const { occupied } = pl.computeCells({
-          entries: bf.scanFolder(folder),
-          positions: data.positions, notes: data.notes, links: data.links,
-          rowsPerCol: rows,
-        });
-        cells = pl.placeItems({
-          occupied, anchor, offsets, count: ordered.length, rowsPerCol: rows,
-        });
-      } catch (e) { cells = null; /* placement is best-effort */ }
+        fs.appendFileSync(path.join(BASE, 'okiba.log'),
+          new Date().toISOString() + ' intake ms' +
+          ' release=' + intakeStart + ' count=' + (Array.isArray(paths) ? paths.length : 0) +
+          ' layout=' + timings.layoutMs + ' placement=' + timings.placementMs +
+          ' load=' + timings.loadMs + ' registry=' + timings.registryMs +
+          ' attrib=' + timings.attribMs + ' save=' + timings.saveMs +
+          ' total=' + (Date.now() - intakeStart) + ' status=' + intakeStatus + '\n');
+      } catch (e) { /* diagnostics must never break intake */ }
     }
-    for (let i = 0; i < ordered.length; i++) {
-      const p = ordered[i];
-      const r = await ln.addLink({
-        base: BASE, boardFolder: folder, targetPath: p, attrib,
-        cell: cells ? cells[i] : undefined,
-      });
-      if (r.duplicate) result.duplicates.push(p);
-      else {
-        result.added.push(p);
-        if (!r.attribOk) result.attribFailed.push(p);
-      }
-    }
-    if (result.added.length && win && !win.isDestroyed()) {
-      win.webContents.send('fs-changed');
-    }
-    return result;
   });
   ipcMain.handle('unlink-items', async (_e, boardName, paths) => {
     const folder = guardBoard(boardName);
@@ -1124,6 +1144,8 @@ function registerIpc() {
     let resolveMs = 0;
     let moveMs = 0;
     let positionMs = null; // null -> 'skip' in the timing line
+    let appearMs = null;
+    let workMs = null;
     const writeTiming = () => {
       const totalMs = Date.now() - t0;
       try {
@@ -1133,10 +1155,12 @@ function registerIpc() {
           ' resolve=' + (resolveStage === 'pre' ? 'pre' : resolveMs) +
           ' move=' + moveMs +
           ' position=' + (positionMs === null ? 'skip' : positionMs) +
+          ' appear=' + (appearMs === null ? 'unknown' : appearMs) +
+          ' work=' + (workMs === null ? 'unknown' : workMs) +
           ' total=' + totalMs + '\n');
       } catch (e) { /* diagnostics must never break a move */ }
       dropLog.push({
-        kind: 'timing', resolveStage, resolveMs, moveMs, positionMs, totalMs,
+        kind: 'timing', resolveStage, resolveMs, moveMs, positionMs, appearMs, workMs, totalMs,
       });
     };
     const paths = (payload && Array.isArray(payload.paths)) ? payload.paths : [];
@@ -1261,6 +1285,8 @@ function registerIpc() {
                 };
               }
               positionMs = Date.now() - tp;
+              appearMs = Number.isFinite(pos.appearMs) && pos.appearMs >= 0 ? pos.appearMs : null;
+              workMs = Number.isFinite(pos.workMs) && pos.workMs >= 0 ? pos.workMs : null;
               dropLog.push({
                 kind: 'position', x, y, names,
                 status: pos.status,

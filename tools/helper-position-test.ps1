@@ -106,6 +106,7 @@ $desktop = [Environment]::GetFolderPath('Desktop')
 Diag "shell desktop folder: $desktop"
 $name = 'OkibaHelperTest-' + [guid]::NewGuid().ToString('N').Substring(0, 10) + '.txt'
 $dummy = Join-Path $desktop $name
+$batchDummies = @()
 Diag "dummy file: $dummy"
 
 try {
@@ -138,8 +139,28 @@ try {
   if ($sx -le 0) { $sx = 100 }
   if ($sy -le 0) { $sy = 100 }
 
+  # Compile ONLY the C# interop declarations, never the helper request loop.
+  $helperSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\scripts\shell-helper.ps1') -Raw
+  $blocks = [regex]::Matches($helperSource, "(?ms)^Add-Type -TypeDefinition @'\r?\n(.*?)^'@")
+  if ($blocks.Count -lt 2) { Fail 'helper interop declarations missing' }
+  foreach ($block in $blocks) { Add-Type -TypeDefinition $block.Groups[1].Value -ErrorAction Stop }
+  $metricLv = [IntPtr]::Zero; $metricCount = -1
+  foreach ($candidate in [OkibaDesk]::FindDesktopListViews()) {
+    $count = [OkibaDesk]::GetItemCount($candidate)
+    if ($count -gt $metricCount) { $metricCount = $count; $metricLv = $candidate }
+  }
+  if ($metricLv -eq [IntPtr]::Zero) { Fail 'geometry desktop listview missing' }
+  $clientRect = New-Object OkibaDesk+RECT
+  if (-not [OkibaDesk]::GetClientRect($metricLv, [ref]$clientRect)) { Fail 'GetClientRect failed' }
+  $clientWidth = $clientRect.Right - $clientRect.Left
+  $clientHeight = $clientRect.Bottom - $clientRect.Top
+  $clientZero = [OkibaDesk]::ToClient($metricLv, 0, 0)
+  $clientOriginX = -$clientZero[0]; $clientOriginY = -$clientZero[1]
+  Diag "desktop client geometry: size=$clientWidth,$clientHeight origin=$clientOriginX,$clientOriginY"
+
   # ---- 2. position it THROUGH THE HELPER at screen (420, 260) ----
   $targetX = 420; $targetY = 260
+  $clientTarget = [OkibaDesk]::ToClient($metricLv, $targetX, $targetY)
   $placed = Invoke-HelperPosition $name $targetX $targetY
   if (-not $placed) { Fail 'helper positionIcons produced no result' }
   if ($placed.status -eq 'autoarrange') {
@@ -220,14 +241,48 @@ public static class OkibaTestWin {
     Start-Sleep -Milliseconds 500
   }
   if (-not $back -or $back.status -ne 'ok') { Fail 'read-back after helper positioning failed' }
-  $dx = [Math]::Abs([int]$back.x - $targetX)
-  $dy = [Math]::Abs([int]$back.y - $targetY)
+  $dx = [Math]::Abs([int]$back.x - $clientTarget[0])
+  $dy = [Math]::Abs([int]$back.y - $clientTarget[1])
   Diag "read-back position: x=$($back.x) y=$($back.y) (target $targetX,$targetY; dx=$dx dy=$dy; tolerance sx=$sx sy=$sy)"
   if ($dx -gt $sx -or $dy -gt $sy) {
     Fail "icon landed at ($($back.x),$($back.y)), more than one icon spacing away from the target ($targetX,$targetY) — HELPER PATH DIVERGES from the cold script"
   }
 
   Write-Host ''
+  # ---- 4. three icons, including Unicode/spaces, twice in one helper ----
+  # Use actual listview geometry, including multi-monitor client origin.
+  $tag = [guid]::NewGuid().ToString('N').Substring(0, 10)
+  $batchNames = @("OkibaBatch-$tag.txt", "Okiba Batch $tag.txt", (([string][char]0x65E5) + ([char]0x672C) + " $tag.txt"))
+  foreach ($batchName in $batchNames) {
+    $file = Join-Path $desktop $batchName
+    $batchDummies += $file
+    Set-Content -LiteralPath $file -Value 'okibaboard batch test' -Encoding ASCII
+  }
+  $batchLines = & node $driver --batch $sx $sy $clientWidth $clientHeight $clientOriginX $clientOriginY @batchNames
+  $batchJson = $batchLines | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1
+  if (-not $batchJson) { Fail 'batch helper produced no JSON' }
+  Diag "batch helper (timings and cold readback): $batchJson"
+  try { $batch = $batchJson | ConvertFrom-Json } catch { Fail "invalid batch JSON: $batchJson" }
+  if ($batch.status -ne 'ok' -or $batch.positioned -ne 3 -or @($batch.rounds).Count -ne 2) {
+    Fail "three-icon repeated helper test failed: $batchJson"
+  }
+
+  # ---- 5. ten-icon regression (one round, ten independent cold reads) ----
+  $manyNames = @(1..10 | ForEach-Object { "OkibaTen-$tag-$_.txt" })
+  foreach ($manyName in $manyNames) {
+    $file = Join-Path $desktop $manyName
+    $batchDummies += $file
+    Set-Content -LiteralPath $file -Value 'okibaboard ten icon regression' -Encoding ASCII
+  }
+  $manyLines = & node $driver --batch-once $sx $sy $clientWidth $clientHeight $clientOriginX $clientOriginY @manyNames
+  $manyJson = $manyLines | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1
+  if (-not $manyJson) { Fail 'ten-icon helper produced no JSON' }
+  Diag "ten-icon helper (timings and cold readback): $manyJson"
+  try { $many = $manyJson | ConvertFrom-Json } catch { Fail "invalid ten-icon JSON: $manyJson" }
+  if ($many.status -ne 'ok' -or $many.positioned -ne 10 -or @($many.rounds).Count -ne 1) {
+    Fail "ten-icon helper regression failed: $manyJson"
+  }
+
   Write-Host "HELPER POSITION TEST PASSED: icon placed at ($($back.x),$($back.y)) via shell-helper.ps1, target ($targetX,$targetY), tolerance ($sx,$sy)"
   Diag "RESULT: PASS - helper read-back ($($back.x),$($back.y)) within one spacing of ($targetX,$targetY)"
   Flush-Diag
@@ -239,6 +294,8 @@ public static class OkibaTestWin {
       Diag 'restored the original desktop listview style'
     } catch {}
   }
-  try { Remove-Item $dummy -Force -ErrorAction SilentlyContinue } catch {}
+  foreach ($file in @($dummy) + $batchDummies) {
+    try { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue } catch {}
+  }
   Flush-Diag
 }

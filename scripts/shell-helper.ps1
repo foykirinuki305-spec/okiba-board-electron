@@ -36,10 +36,9 @@
 #     never clamped into the client area; set verification used a
 #     strict < spacing test after a 60ms settle (cold: <= spacing
 #     after 180ms).
-# All of those now match the cold script exactly. The only
-# deliberate difference left is the icon-appear poll: it still
-# starts immediately and runs at ~50ms (the speed fix that was the
-# point of the warm helper), instead of the cold script's 200ms.
+# Matching/layout remain identical to the cold script. The warm path
+# reuses process buffers, polls at 50ms, and batch-verifies at 40ms
+# with the proven sequential 180ms retry for grid-layout conflicts.
 $ErrorActionPreference = 'Stop'
 try {
   [Console]::InputEncoding = [System.Text.Encoding]::UTF8
@@ -173,6 +172,34 @@ public static class OkibaDesk {
   const uint MEM_RELEASE = 0x8000;
   const uint PAGE_RW = 0x04;
 
+  // Tell Explorer that the Desktop directory changed. This does not invent
+  // per-file shell events and does not force a synchronous Explorer refresh.
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+  static extern void SHChangeNotify(uint eventId, uint flags, string path, IntPtr item2);
+  public static void NotifyDesktopDirectory() {
+    string path = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+    if (!String.IsNullOrEmpty(path)) SHChangeNotify(0x00001000, 0x0005 | 0x2000, path, IntPtr.Zero);
+  }
+
+  public static void NotifyDesktopItems(string[] names) {
+    string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+    foreach (string name in names) {
+      try {
+        if (String.IsNullOrEmpty(name) || System.IO.Path.GetFileName(name) != name) continue;
+        string item = System.IO.Path.Combine(desktop, name);
+        uint evt;
+        if (System.IO.Directory.Exists(item)) evt = 0x00000008; // MKDIR
+        else if (System.IO.File.Exists(item)) evt = 0x00000002; // CREATE
+        else continue;
+        // PATHW | FLUSH: notify only an actual existing dropped item. This
+        // avoids Explorer's delayed directory-wide refresh/coalescing.
+        SHChangeNotify(evt, 0x0005u | 0x1000u, item, IntPtr.Zero);
+      } catch {
+        // Notifications are advisory. Normal appearance polling still runs.
+      }
+    }
+  }
+
   public static int GetItemCount(IntPtr hwnd) {
     return (int)SendMessage(hwnd, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero);
   }
@@ -200,62 +227,72 @@ public static class OkibaDesk {
   // state@12, stateMask@16, pszText@24, cchTextMax@32. The struct
   // is 88 bytes and the text buffer is a SEPARATE allocation
   // (v2.2 used a 48-byte struct with the buffer inside it).
-  public static string GetItemText(IntPtr hwnd, int item) {
+  // One session per request: reuse the Explorer handle and separate remote
+  // buffers across the entire label scan, appear polls and verification.
+  // Dispose even on failure; never retain an Explorer handle between requests.
+  public sealed class Reader : IDisposable {
     const int MAXCHARS = 260;
     const int ITEMSIZE = 88;
-    uint pid;
-    GetWindowThreadProcessId(hwnd, out pid);
-    IntPtr proc = OpenProcess(PROCESS_VM, false, pid);
-    if (proc == IntPtr.Zero) return null;
-    IntPtr remoteItem = IntPtr.Zero, remoteText = IntPtr.Zero;
-    try {
-      remoteItem = VirtualAllocEx(proc, IntPtr.Zero, ITEMSIZE, MEM_COMMIT_RESERVE, PAGE_RW);
-      remoteText = VirtualAllocEx(proc, IntPtr.Zero, MAXCHARS * 2, MEM_COMMIT_RESERVE, PAGE_RW);
-      if (remoteItem == IntPtr.Zero || remoteText == IntPtr.Zero) return null;
-      byte[] data = new byte[ITEMSIZE];
-      BitConverter.GetBytes((uint)0x0001).CopyTo(data, 0);           // mask = LVIF_TEXT
-      BitConverter.GetBytes(item).CopyTo(data, 4);                    // iItem
-      BitConverter.GetBytes((int)0).CopyTo(data, 8);                  // iSubItem = 0 (the label)
-      BitConverter.GetBytes(remoteText.ToInt64()).CopyTo(data, 24);   // pszText
-      BitConverter.GetBytes(MAXCHARS).CopyTo(data, 32);               // cchTextMax
-      UIntPtr written;
+    readonly IntPtr hwnd;
+    IntPtr proc, remoteItem, remoteText, remotePoint;
+    readonly byte[] data = new byte[ITEMSIZE];
+    readonly byte[] textBuf = new byte[MAXCHARS * 2];
+    readonly byte[] pointBuf = new byte[8];
+    public Reader(IntPtr hwnd) {
+      this.hwnd = hwnd;
+      uint pid;
+      GetWindowThreadProcessId(hwnd, out pid);
+      proc = OpenProcess(PROCESS_VM, false, pid);
+      if (proc == IntPtr.Zero) return;
+      try {
+        remoteItem = VirtualAllocEx(proc, IntPtr.Zero, ITEMSIZE, MEM_COMMIT_RESERVE, PAGE_RW);
+        remoteText = VirtualAllocEx(proc, IntPtr.Zero, MAXCHARS * 2, MEM_COMMIT_RESERVE, PAGE_RW);
+        remotePoint = VirtualAllocEx(proc, IntPtr.Zero, 8, MEM_COMMIT_RESERVE, PAGE_RW);
+        if (remoteItem == IntPtr.Zero || remoteText == IntPtr.Zero || remotePoint == IntPtr.Zero) {
+          Dispose(); return;
+        }
+        BitConverter.GetBytes((uint)0x0001).CopyTo(data, 0);
+        BitConverter.GetBytes(remoteText.ToInt64()).CopyTo(data, 24);
+        BitConverter.GetBytes(MAXCHARS).CopyTo(data, 32);
+      } catch { Dispose(); throw; }
+    }
+    public string GetText(int item) {
+      if (proc == IntPtr.Zero) return null;
+      BitConverter.GetBytes(item).CopyTo(data, 4);
+      UIntPtr written, read;
       if (!WriteProcessMemory(proc, remoteItem, data, ITEMSIZE, out written)) return null;
-      SendMessage(hwnd, LVM_GETITEMTEXTW, new IntPtr(item), remoteItem);
-      byte[] textBuf = new byte[MAXCHARS * 2];
-      UIntPtr read;
-      if (!ReadProcessMemory(proc, remoteText, textBuf, (uint)textBuf.Length, out read)) return null;
-      string text = Encoding.Unicode.GetString(textBuf, 0, (int)read.ToUInt32());
+      // Reset the first character so a failed label request cannot reuse a
+      // previous item's text. The return value is the actual character count.
+      if (!WriteProcessMemory(proc, remoteText, new byte[2], 2, out written)) return null;
+      int chars = (int)SendMessage(hwnd, LVM_GETITEMTEXTW, new IntPtr(item), remoteItem);
+      if (chars <= 0) return "";
+      int bytes = Math.Min(chars, MAXCHARS - 1) * 2;
+      if (!ReadProcessMemory(proc, remoteText, textBuf, (uint)bytes, out read)) return null;
+      string text = Encoding.Unicode.GetString(textBuf, 0, Math.Min(bytes, (int)read.ToUInt32()));
       int nul = text.IndexOf('\0');
       return nul >= 0 ? text.Substring(0, nul) : text;
-    } finally {
+    }
+    public int[] GetPosition(int item) {
+      if (proc == IntPtr.Zero) return null;
+      if (SendMessage(hwnd, LVM_GETITEMPOSITION, new IntPtr(item), remotePoint) == IntPtr.Zero) return null;
+      UIntPtr read;
+      if (!ReadProcessMemory(proc, remotePoint, pointBuf, 8, out read) || read.ToUInt32() != 8) return null;
+      return new int[] { BitConverter.ToInt32(pointBuf, 0), BitConverter.ToInt32(pointBuf, 4) };
+    }
+    public void Dispose() {
+      if (proc == IntPtr.Zero) return;
       if (remoteItem != IntPtr.Zero) VirtualFreeEx(proc, remoteItem, 0, MEM_RELEASE);
       if (remoteText != IntPtr.Zero) VirtualFreeEx(proc, remoteText, 0, MEM_RELEASE);
+      if (remotePoint != IntPtr.Zero) VirtualFreeEx(proc, remotePoint, 0, MEM_RELEASE);
       CloseHandle(proc);
+      proc = remoteItem = remoteText = remotePoint = IntPtr.Zero;
     }
   }
-
-  // Read an item's current position (client coords of its
-  // top-left); null when the read fails. Same cross-process
-  // technique and minimal rights as the cold script.
+  public static string GetItemText(IntPtr hwnd, int item) {
+    using (var reader = new Reader(hwnd)) { return reader.GetText(item); }
+  }
   public static int[] GetItemPosition(IntPtr hwnd, int item) {
-    uint pid;
-    GetWindowThreadProcessId(hwnd, out pid);
-    IntPtr proc = OpenProcess(PROCESS_VM, false, pid);
-    if (proc == IntPtr.Zero) return null;
-    IntPtr remote = IntPtr.Zero;
-    try {
-      remote = VirtualAllocEx(proc, IntPtr.Zero, 8, MEM_COMMIT_RESERVE, PAGE_RW);
-      if (remote == IntPtr.Zero) return null;
-      IntPtr res = SendMessage(hwnd, LVM_GETITEMPOSITION, new IntPtr(item), remote);
-      if (res == IntPtr.Zero) return null;
-      byte[] buf = new byte[8];
-      UIntPtr read;
-      if (!ReadProcessMemory(proc, remote, buf, (uint)buf.Length, out read)) return null;
-      return new int[] { BitConverter.ToInt32(buf, 0), BitConverter.ToInt32(buf, 4) };
-    } finally {
-      if (remote != IntPtr.Zero) VirtualFreeEx(proc, remote, 0, MEM_RELEASE);
-      CloseHandle(proc);
-    }
+    using (var reader = new Reader(hwnd)) { return reader.GetPosition(item); }
   }
 
   public static void SetItemPosition(IntPtr lv, int index, int x, int y) {
@@ -293,10 +330,10 @@ function Test-NameMatch($text, $name, $strategy) {
   return $false
 }
 
-function Find-Matches([IntPtr]$lv, [string[]]$Names, [int]$count) {
+function Find-Matches([IntPtr]$lv, [string[]]$Names, [int]$count, $reader) {
   $texts = @{}
   for ($i = 0; $i -lt $count; $i++) {
-    $t = [OkibaDesk]::GetItemText($lv, $i)
+    $t = $reader.GetText($i)
     if ($null -ne $t) { $texts[$i] = $t }
   }
   $slots = @{}
@@ -354,13 +391,14 @@ function Resolve-DropTarget([int]$X, [int]$Y) {
 # ScreenToClient conversion, clamped layout anchored at the drop
 # point, rowsPerCol from the height REMAINING below the anchor,
 # auto-arrange gate on LVS_AUTOARRANGE (0x0100), and set ->
-# read-back -> retry verification with the cold script's 180ms
-# settle and <= spacing tolerance. X/Y arrive as SCREEN
+# read-back -> retry verification with batched 40ms
+# settle and the cold script's <= spacing tolerance. X/Y arrive as SCREEN
 # coordinates (exactly what main passes the cold script).
-# Only the icon-appear poll differs: immediate first poll, then
+# Icon-appear polling remains immediate first poll, then
 # ~50ms (the warm-helper speed point), capped at ~8s like cold.
 function Position-Icons([int]$X, [int]$Y, [string[]]$Names) {
-  $result = @{ status = 'ok'; positioned = 0; detail = '' }
+  $result = @{ status = 'ok'; positioned = 0; detail = ''; appearMs = 0; workMs = 0 }
+  $timer = [System.Diagnostics.Stopwatch]::StartNew()
   $lv = Find-BestListView
   if ($lv -eq [IntPtr]::Zero) { $result.status = 'no-listview'; $result.detail = 'no desktop listview found'; return $result }
 
@@ -390,52 +428,115 @@ function Position-Icons([int]$X, [int]$Y, [string[]]$Names) {
   $rowsPerCol = [int][Math]::Floor(($ch - $ay) / $sy)
   if ($rowsPerCol -lt 1) { $rowsPerCol = 1 }
 
-  # Wait for the moved icons to appear (first poll immediate,
-  # then ~50ms, ~8s cap — cold polls at 200ms to the same cap).
-  $found = $null
-  $deadline = [DateTime]::UtcNow.AddSeconds(8)
-  while ($true) {
-    $count = [OkibaDesk]::GetItemCount($lv)
-    $found = Find-Matches $lv $Names $count
-    if ($found.Slots.Count -ge $Names.Count) { break }
-    if ([DateTime]::UtcNow -gt $deadline) { break }
-    Start-Sleep -Milliseconds 50
-  }
-  if ($found.Slots.Count -eq 0) {
-    $result.status = 'no-item'
-    $result.detail = "names=[$($Names -join ', ')] icons=$count texts=[$($found.Texts -join ', ')]"
-    return $result
-  }
+  $reader = New-Object OkibaDesk+Reader -ArgumentList $lv
+  try {
+    # Wait for the moved icons to appear (first poll immediate,
+    # then ~50ms, ~8s cap — cold polls at 200ms to the same cap).
+    # Prompt shell directory processing once; the normal poll remains the
+    # authority for actual icon availability. Diagnostic opt-out for A/B tests.
+    try {
+      if ($env:OKIBA_POSITION_NOTIFY -eq 'directory' -or ($Names.Count -gt 3 -and $env:OKIBA_POSITION_NOTIFY -ne '0')) { [OkibaDesk]::NotifyDesktopDirectory() }
+      elseif ($env:OKIBA_POSITION_NOTIFY -ne '0') { [OkibaDesk]::NotifyDesktopItems($Names) }
+    } catch { } # A failed advisory notification must never prevent polling.
+    $found = $null
+    $deadline = [DateTime]::UtcNow.AddSeconds(8)
+    while ($true) {
+      $count = [OkibaDesk]::GetItemCount($lv)
+      $found = Find-Matches $lv $Names $count $reader
+      if ($found.Slots.Count -ge $Names.Count) { break }
+      if ([DateTime]::UtcNow -gt $deadline) { break }
+      Start-Sleep -Milliseconds 50
+    }
+    $result.appearMs = $timer.ElapsedMilliseconds
+    $workStart = $timer.ElapsedMilliseconds
+    if ($found.Slots.Count -eq 0) {
+      $result.status = 'no-item'
+      $result.detail = "names=[$($Names -join ', ')] icons=$count texts=[$($found.Texts -join ', ')]"
+      return $result
+    }
 
-  # Place each icon, then READ BACK and retry until it sticks
-  # (align-to-grid snaps to the grid: within one spacing is a hit).
-  $verified = 0
-  foreach ($entry in $found.Slots.GetEnumerator()) {
-    $slot = [int]$entry.Key
-    $idx = [int]$entry.Value
-    $col = [Math]::Floor($slot / $rowsPerCol)
-    $row = $slot % $rowsPerCol
-    $tx = [int][Math]::Max(0, [Math]::Min($maxX, $ax + $col * $sx))
-    $ty = [int][Math]::Max(0, [Math]::Min($maxY, $ay + $row * $sy))
-    $stuck = $false
-    for ($try = 0; $try -lt 3 -and -not $stuck; $try++) {
-      [OkibaDesk]::SetItemPosition($lv, $idx, $tx, $ty)
-      Start-Sleep -Milliseconds 180
-      $pos = [OkibaDesk]::GetItemPosition($lv, $idx)
-      if ($null -ne $pos -and [Math]::Abs($pos[0] - $tx) -le $sx -and [Math]::Abs($pos[1] - $ty) -le $sy) {
-        $stuck = $true
+    # Batch placement: one settle per pass, not per icon. Retry only
+    # mismatches; preserve the proven <= spacing tolerance for grid snapping.
+    $pending = @{}
+    foreach ($entry in $found.Slots.GetEnumerator()) {
+      $slot = [int]$entry.Key
+      $col = [Math]::Floor($slot / $rowsPerCol)
+      $row = $slot % $rowsPerCol
+      $tx = [int][Math]::Max(0, [Math]::Min($maxX, $ax + $col * $sx))
+      $ty = [int][Math]::Max(0, [Math]::Min($maxY, $ay + $row * $sy))
+      $pending[[int]$entry.Value] = @($tx, $ty)
+    }
+    $targets = $pending.Clone()
+    $verified = 0
+    # Fast path: set the whole group and verify once. Explorer's grid layout
+    # can move other icons while a large batch is settling; unresolved items
+    # use the proven sequential 180ms retry rather than reporting false success.
+    foreach ($idx in @($pending.Keys)) {
+      $target = $pending[$idx]
+      [OkibaDesk]::SetItemPosition($lv, $idx, $target[0], $target[1])
+    }
+    Start-Sleep -Milliseconds 40
+    foreach ($idx in @($pending.Keys)) {
+      $target = $pending[$idx]
+      $pos = $reader.GetPosition($idx)
+      if ($null -ne $pos -and [Math]::Abs($pos[0] - $target[0]) -le $sx -and [Math]::Abs($pos[1] - $target[1]) -le $sy) {
+        $verified++
+        $pending.Remove($idx)
       }
     }
-    if ($stuck) { $verified++ }
-  }
-  $result.positioned = $verified
-  if ($verified -eq 0) {
-    $result.status = 'set-unverified'
-    $result.detail = 'positions did not stick after retries'
-  } elseif ($verified -lt $Names.Count) {
-    $result.status = 'partial'
-  }
-  return $result
+    foreach ($idx in @($pending.Keys)) {
+      $target = $pending[$idx]
+      for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        [OkibaDesk]::SetItemPosition($lv, $idx, $target[0], $target[1])
+        Start-Sleep -Milliseconds 180
+        $pos = $reader.GetPosition($idx)
+        if ($null -ne $pos -and [Math]::Abs($pos[0] - $target[0]) -le $sx -and [Math]::Abs($pos[1] - $target[1]) -le $sy) {
+          $verified++
+          $pending.Remove($idx)
+          break
+        }
+      }
+    }
+    # Later placements can cause Explorer grid layout to move icons that
+    # passed an earlier check. Count only a COMPLETE final read-back, never
+    # accumulate historical per-item successes. Repair mismatches in bounded
+    # rounds, then re-read the whole group after the last repair.
+    for ($round = 0; $round -le 3; $round++) {
+      $verified = 0
+      $mismatches = @{}
+      foreach ($idx in @($targets.Keys)) {
+        $target = $targets[$idx]
+        $pos = $reader.GetPosition($idx)
+        if ($null -ne $pos -and [Math]::Abs($pos[0] - $target[0]) -le $sx -and [Math]::Abs($pos[1] - $target[1]) -le $sy) {
+          $verified++
+        } else {
+          $mismatches[$idx] = $target
+        }
+      }
+      if ($mismatches.Count -eq 0 -or $round -eq 3) { break }
+      foreach ($idx in @($mismatches.Keys)) {
+        $target = $mismatches[$idx]
+        [OkibaDesk]::SetItemPosition($lv, $idx, $target[0], $target[1])
+        Start-Sleep -Milliseconds 180
+      }
+    }
+    $result.workMs = $timer.ElapsedMilliseconds - $workStart
+    $result.positioned = $verified
+    if ($verified -eq 0) {
+      $result.status = 'set-unverified'
+      $result.detail = 'positions did not stick after retries'
+    } elseif ($verified -lt $Names.Count) {
+      $result.status = 'partial'
+      $details = @()
+      foreach ($idx in @($mismatches.Keys)) {
+        $target = $mismatches[$idx]
+        $pos = $reader.GetPosition($idx)
+        $details += "index=$idx target=$($target -join ',') actual=$($pos -join ',')"
+      }
+      $result.detail = $details -join '; '
+    }
+    return $result
+  } finally { $reader.Dispose() }
 }
 
 # ---- getDesktopPositions (intake layout lookup) -------------------
@@ -447,15 +548,18 @@ function Get-DesktopPositions([string[]]$Names) {
   $sy = [OkibaDesk]::GetSpacingY($lv)
   if ($sx -gt 0) { $out.sx = $sx }
   if ($sy -gt 0) { $out.sy = $sy }
-  $count = [OkibaDesk]::GetItemCount($lv)
-  $found = Find-Matches $lv $Names $count
-  foreach ($k in $found.Slots.Keys) {
-    $pos = [OkibaDesk]::GetItemPosition($lv, [int]$found.Slots[$k])
-    if ($null -ne $pos) {
-      $out.positions[$Names[[int]$k]] = @{ x = [int]$pos[0]; y = [int]$pos[1] }
+  $reader = New-Object OkibaDesk+Reader -ArgumentList $lv
+  try {
+    $count = [OkibaDesk]::GetItemCount($lv)
+    $found = Find-Matches $lv $Names $count $reader
+    foreach ($k in $found.Slots.Keys) {
+      $pos = $reader.GetPosition([int]$found.Slots[$k])
+      if ($null -ne $pos) {
+        $out.positions[$Names[[int]$k]] = @{ x = [int]$pos[0]; y = [int]$pos[1] }
+      }
     }
-  }
-  return $out
+    return $out
+  } finally { $reader.Dispose() }
 }
 
 # ---- cursorState (v2.2.2: drag pre-resolution witness) -------------
