@@ -2,7 +2,7 @@
 if(process.platform!=='win32'||process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Windows'||process.env.RUNNER_ENVIRONMENT!=='github-hosted')throw Error('Hosted Windows CI only');
 const fs=require('fs'),path=require('path'),os=require('os'),crypto=require('crypto'),assert=require('assert/strict'),{fork}=require('child_process');const {build,ownedTempDirectory}=require('./unknown-grid-lease-copy-ci');const {createShellHelperClient}=require('../lib/shellhelper');const {planCalibration}=require('../lib/desktop-calibration');const {sameSnapshot}=require('../lib/safe-desktop');
 const {retryableSnapshotRead}=require('./unknown-grid-recovery-policy-ci');
-const root=path.resolve(__dirname,'..'),desktop=path.resolve(process.argv[2]),report={passed:false,cleanupVerified:false,scope:'CI-only N3 sparse success and no-fit abort; known 100%, no mixed-DPI proof',events:[]};const sleep=ms=>new Promise(r=>setTimeout(r,ms));const note=(phase,data)=>{report.events.push({phase,data});console.log(phase+' '+JSON.stringify(data));};const hash=p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+const root=path.resolve(__dirname,'..'),desktop=path.resolve(process.argv[2]),report={passed:false,cleanupVerified:false,scope:'CI-only N3 sparse success, duplicate gate/resolve/commit and no-fit abort (not transport reply loss); known 100%, no mixed-DPI proof',events:[]};const sleep=ms=>new Promise(r=>setTimeout(r,ms));const note=(phase,data)=>{report.events.push({phase,data});console.log(phase+' '+JSON.stringify(data));};const hash=p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 async function main(){const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-unknown-ci-')),copy=path.join(temp,'okiba-unknown-ci-copy');fs.mkdirSync(copy);build(root,copy);let unsafe=false,baseline;const owned=[],children=[];
  const observer=createShellHelperClient({command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(copy,'scripts/shell-helper.ps1')],env:{...process.env,OKIBA_SNAP_LEASE:'1',OKIBA_UNKNOWN_GRID_CI:'1'},timeoutMs:15000});
  const request=async(cmd,data={})=>{const r=await observer.request(cmd,data,{timeoutMs:cmd==='leaseUnknownFixtureHideCleanup'?30000:15000});assert(r.ok,JSON.stringify(r));return r.result;};
@@ -10,7 +10,8 @@ async function main(){const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-unk
  const receive=(child,timeout=120000)=>new Promise((resolve,reject)=>{const timer=setTimeout(()=>{child.off('message',on);reject(Error('owner timeout'));},timeout);function on(m){clearTimeout(timer);child.off('message',on);resolve(m);}child.on('message',on);});
  const stop=async child=>{if(child.exitCode!==null||child.signalCode!==null)return;const ended=new Promise(r=>child.once('exit',r));child.kill();await Promise.race([ended,sleep(5000)]);assert(child.exitCode!==null||child.signalCode!==null);};
  try{baseline=await stable('baseline');assert(baseline.snap&&!baseline.autoArrange);assert.equal(baseline.areas.length,1);assert.equal(baseline.areas[0].scale,100);
- for(const scenario of ['success','no-fit']){
+ for(const scenario of ['success','duplicate-requests','no-fit']){
+  const commits=scenario!=='no-fit';
   const caseDir=path.join(temp,scenario);fs.mkdirSync(caseDir);const selected=[];for(const [index,cell] of [[0,0],[2,0],[1,2]].entries()){
    const name='OkibaUnknown-'+crypto.randomBytes(6).toString('hex')+'.txt',source=path.join(caseDir,name),dest=path.join(desktop,name);fs.writeFileSync(source,'owned sparse fixture '+index);const n=await request('readHiddenFile',{path:source});assert(n.ok);assert((await request('setHiddenFile',{path:source,expectedIdentity:n.identity,expectedHidden:false,hidden:true})).ok);assert((await request('moveNoReplace',{source,destination:dest})).ok);owned.push(dest);const attrs=await request('readHiddenFile',{path:dest});assert(attrs.ok&&attrs.hidden);selected.push({path:dest,destination:dest,hidden:true,fileIdentity:attrs.identity,cell,attrs,hash:hash(dest)});
   }
@@ -28,15 +29,16 @@ async function main(){const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-unk
     }
     throw Error(response.error);
    }
-   assert.equal(response.phase,'done',response.error);assert.equal(response.outcome,scenario==='success'?'committed':'aborted');
-   const after=await stable('after-case');assert.equal(after.icons.length,before.icons.length+(scenario==='success'?3:0));
-   if(scenario==='success'){assert.deepEqual(response.observed.grid,before.areas[0].grid);assert.equal(fs.readFileSync(metadata,'utf8'),'{"committed":true}');for(const t of response.resolved.targets){const icon=after.icons.find(i=>i.path&&path.resolve(i.path).toLowerCase()===t.path.toLowerCase());assert(icon&&icon.x===t.x&&icon.y===t.y);}}
+   assert.equal(response.phase,'done',response.error);assert.equal(response.outcome,commits?'committed':'aborted');
+   if(scenario==='duplicate-requests')assert.deepEqual(response.duplicateChecks,{samePermit:true,resolveCommitted:true,commitDoneCommitted:true});
+   const after=await stable('after-case');assert.equal(after.icons.length,before.icons.length+(commits?3:0));
+   if(commits){assert.deepEqual(response.observed.grid,before.areas[0].grid);assert.equal(fs.readFileSync(metadata,'utf8'),'{"committed":true}');for(const t of response.resolved.targets){const icon=after.icons.find(i=>i.path&&path.resolve(i.path).toLowerCase()===t.path.toLowerCase());assert(icon&&icon.x===t.x&&icon.y===t.y);}}
    else assert.equal(fs.readFileSync(metadata,'utf8'),'{"unchanged":true}');
-   for(const item of selected){const n=await request('readHiddenFile',{path:item.path});for(const key of ['identity','size','mtime'])assert.equal(n[key],item.attrs[key]);assert.equal(n.hidden,scenario!=='success');assert.equal(n.attributes,scenario==='success'?item.attrs.attributes&~2:item.attrs.attributes);assert.equal(hash(item.path),item.hash);}
+   for(const item of selected){const n=await request('readHiddenFile',{path:item.path});for(const key of ['identity','size','mtime'])assert.equal(n[key],item.attrs[key]);assert.equal(n.hidden,!commits);assert.equal(n.attributes,commits?item.attrs.attributes&~2:item.attrs.attributes);assert.equal(hash(item.path),item.hash);}
    const closing=receive(owner,90000);owner.send({cmd:'close'});assert((await closing).result.ok);await stop(owner);
    // Owning watchdog/helper are confirmed stopped. Hide these exact owned files
    // with truthful ATTRIBUTES notification, then verify complete absence before unlink.
-   if(scenario==='success'){
+   if(commits){
     let hidden;const attempts=[];const deadline=Date.now()+20000;
     for(let n=0;n<3;n++){hidden=await request('leaseUnknownFixtureHideCleanup',{snapshot:before,records:selected.map(item=>({...item.attrs,path:item.path}))});attempts.push(hidden);if(hidden.ok)break;if(!retryableSnapshotRead(hidden)||Date.now()>=deadline)break;await sleep(150);}
     note('owned-cleanup-hide',{attempts});assert(hidden?.ok&&hidden.selectedHidden&&hidden.oldUnchanged&&hidden.flagsUnchanged,JSON.stringify(hidden));
@@ -48,7 +50,7 @@ async function main(){const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-unk
  }
  report.passed=true;
  }finally{for(const child of children){if(child.exitCode===null&&child.signalCode===null){try{await stop(child);}catch{unsafe=true;}}}if(!unsafe){for(const file of owned){assert.equal(path.dirname(file),desktop);assert(path.basename(file).startsWith('OkibaUnknown-'));if(fs.existsSync(file))fs.unlinkSync(file);}const end=await stable('cleanup');assert.deepEqual(end.icons.map(i=>[i.identity,i.x,i.y]).sort(),baseline.icons.map(i=>[i.identity,i.x,i.y]).sort());report.cleanupVerified=true;}if(!await observer.stopAndWait(10000))unsafe=true;
-  const out=path.join(root,'unknown-grid-success-journals');fs.mkdirSync(out,{recursive:true});for(const scenario of ['success','no-fit']){const source=path.join(temp,scenario,'journal');if(fs.existsSync(source))fs.cpSync(source,path.join(out,scenario),{recursive:true});}
+  const out=path.join(root,'unknown-grid-success-journals');fs.mkdirSync(out,{recursive:true});for(const scenario of ['success','duplicate-requests','no-fit']){const source=path.join(temp,scenario,'journal');if(fs.existsSync(source))fs.cpSync(source,path.join(out,scenario),{recursive:true});}
   if(unsafe){report.passed=false;report.cleanupError='watchdog recovery unverified; no blind cleanup or flags restoration';}fs.writeFileSync(path.join(root,'unknown-grid-success-ci.json'),JSON.stringify(report,null,2));if(unsafe)throw Error(report.cleanupError);fs.rmSync(ownedTempDirectory(temp),{recursive:true,force:true});
  }
 }

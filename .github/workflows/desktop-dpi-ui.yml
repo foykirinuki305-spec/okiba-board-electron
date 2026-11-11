@@ -1,0 +1,22 @@
+name: desktop-dpi-ui-capability
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/desktop-dpi-ui-ci.ps1'
+      - '.github/workflows/desktop-dpi-ui.yml'
+jobs:
+  display-ui:
+    runs-on: windows-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - name: Actual scale via Windows Settings UI only
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/desktop-dpi-ui-ci.ps1
+      - name: Evidence (blocked is not a DPI test pass)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-dpi-ui-evidence
+          path: desktop-dpi-ui-ci.json

@@ -1203,7 +1203,7 @@ async function preresolveMain() {
 const cu = require('../lib/cleanup');
 
 function cleanupMain() {
-  console.log('\n[cleanup] update auto-cleanup decisions (v2.2.1, Job 2)');
+  console.log('\n[update] non-destructive version stamp');
   // ---------- version gate ----------
   {
     ok(cu.shouldRunCleanup('2.2.1', null) === true, 'cleanup gate: no marker -> run (first run)');
@@ -1211,77 +1211,25 @@ function cleanupMain() {
     ok(cu.shouldRunCleanup('2.2.1', '2.2.1') === false, 'cleanup gate: same version -> no-op');
     ok(cu.shouldRunCleanup('', null) === false, 'cleanup gate: unknown current version -> never run');
   }
-  // ---------- loose exe files ----------
-  {
-    const plan = cu.planCleanup({
-      desktopFiles: [
-        '/desk/OkibaBoard.exe',
-        '/desk/OkibaBoard-Setup-2.0.0.exe',
-        '/desk/other.txt',
-        '/desk/OkibaBoard-Setup.exe', // no "-<version>" part: NOT ours
-        '/desk/okibaboard.exe', // case differs: not an exact name
-      ],
-      downloadsFiles: ['/dl/OkibaBoard.exe', '/dl/OkibaBoard-Setup-2.2.0.exe'],
-      shortcuts: [],
-      execPath: '/apps/installed/OkibaBoard.exe',
-    });
-    ok(plan.deleteFiles.length === 4 &&
-       plan.deleteFiles.includes('/desk/OkibaBoard.exe') &&
-       plan.deleteFiles.includes('/desk/OkibaBoard-Setup-2.0.0.exe') &&
-       plan.deleteFiles.includes('/dl/OkibaBoard.exe') &&
-       plan.deleteFiles.includes('/dl/OkibaBoard-Setup-2.2.0.exe'),
-      'cleanup plan: loose portable + setup exes in both folders are deleted');
-    ok(!plan.deleteFiles.includes('/desk/other.txt') &&
-       !plan.deleteFiles.includes('/desk/OkibaBoard-Setup.exe') &&
-       !plan.deleteFiles.includes('/desk/okibaboard.exe'),
-      'cleanup plan: unrelated and near-miss names are kept');
+  for (const execPath of ['/apps/installed/OkibaBoard.exe','/desk/OkibaBoard.exe']) {
+    const input = {desktopFiles:['/desk/OkibaBoard.exe','/desk/OkibaBoard-Setup-2.0.0.exe'], downloadsFiles:['/dl/OkibaBoard.exe'],shortcuts:[{lnkPath:'/desk/app.lnk',target:'/old/OkibaBoard.exe'},{lnkPath:'/desk/board.lnk',target:'/old/OkibaBoard.exe',args:'--board-path="C:\\boards"'}],execPath};
+    const before=JSON.stringify(input),plan=cu.planCleanup(input);
+    ok(plan.deleteFiles.length===0,'update: all loose executables preserved');
+    ok(plan.deleteShortcuts.length===0,'update: all existing shortcuts preserved');
+    ok(plan.healShortcuts.length===0,'update: no shortcut replacement/healing');
+    ok(JSON.stringify(input)===before,'update: planner inputs untouched');
   }
-  // ---------- portable self-preservation ----------
-  {
-    const plan = cu.planCleanup({
-      desktopFiles: ['/desk/OkibaBoard.exe'],
-      downloadsFiles: ['/dl/OkibaBoard.exe'],
-      shortcuts: [],
-      execPath: '/desk/OkibaBoard.exe', // the portable IS the runner
-    });
-    ok(plan.deleteFiles.length === 1 && plan.deleteFiles[0] === '/dl/OkibaBoard.exe',
-      'cleanup plan: the running portable exe itself is never deleted');
-  }
-  // ---------- shortcuts: stale delete / board heal / current keep ----------
-  {
-    const execPath = '/apps/installed/OkibaBoard.exe';
-    const plan = cu.planCleanup({
-      desktopFiles: [], downloadsFiles: [],
-      shortcuts: [
-        { lnkPath: '/desk/OkibaBoard.lnk', target: '/old/OkibaBoard.exe', args: '' },
-        { lnkPath: '/desk/素材ボード.lnk', target: '/old/OkibaBoard.exe',
-          args: '--board-path="C:\\OkibaBoards\\素材ボード"', icon: '/old/OkibaBoard.exe' },
-        { lnkPath: '/desk/現行ボード.lnk', target: execPath,
-          args: '--board-path="C:\\OkibaBoards\\現行"' },
-        { lnkPath: '/desk/インストーラー.lnk', target: '/dl/OkibaBoard-Setup-2.0.0.exe', args: '' },
-        { lnkPath: '/desk/無関係.lnk', target: '/other/app.exe', args: '--board-path="C:\\x"' },
-        // The shortcut the NSIS installer just created: target IS
-        // the running exe -> keep (v2.2.1 shortcut spec, point 2).
-        { lnkPath: '/desk/OkibaBoard現行.lnk', target: execPath, args: '' },
-      ],
-      execPath,
-    });
-    ok(plan.deleteShortcuts.length === 2 &&
-       plan.deleteShortcuts.includes('/desk/OkibaBoard.lnk') &&
-       plan.deleteShortcuts.includes('/desk/インストーラー.lnk'),
-      'cleanup plan: stale app + installer shortcuts are deleted');
-    ok(plan.healShortcuts.length === 1 &&
-       plan.healShortcuts[0].lnkPath === '/desk/素材ボード.lnk' &&
-       plan.healShortcuts[0].args.includes('--board-path'),
-      'cleanup plan: an old board shortcut is HEALED, args preserved');
-    const touched = [...plan.deleteShortcuts, ...plan.healShortcuts.map((h) => h.lnkPath)];
-    ok(!touched.includes('/desk/現行ボード.lnk') &&
-       !touched.includes('/desk/無関係.lnk') &&
-       !touched.includes('/desk/OkibaBoard現行.lnk'),
-      'cleanup plan: current-exe shortcuts (incl. the installer-made one) and unrelated shortcuts are untouched');
-  }
+  const source=fs.readFileSync(path.join(__dirname,'../main.js'),'utf8');
+  const begin=source.indexOf('function runVersionCleanup() {'),end=source.indexOf('// ------------------------------------------------------------------- IPC',begin);
+  const body=source.slice(begin,end);let saves=0;const positions={A:[7,3]};
+  const denied=new Proxy({}, {get(){throw Error('update must not access filesystem or Shell');}});
+  const ctx={app:{getVersion:()=> 'new'},cu,BASE:'owned-base',fs:denied,shell:denied,bf:{loadHome:()=>({positions,theme:'kept',appVersion:'old'}),saveHome:(base,pos,theme,version)=>{if(base!=='owned-base'||pos!==positions||theme!=='kept'||version!=='new')throw Error('stamp changed layout');saves++;}}};
+  require('vm').runInNewContext(body+';runVersionCleanup();',ctx);
+  ok(saves===1,'update startup stamps only version and preserves layout without external filesystem/Shell access');
+  ctx.bf.loadHome=()=>({positions,theme:'kept',appVersion:'new'});
+  require('vm').runInNewContext(body+';runVersionCleanup();',ctx);
+  ok(saves===1,'same-version startup has no writes');
 }
-
 // ------------------------------------------------ move history (v2.2.1 Job 3)
 const mhist = require('../lib/movehistory');
 

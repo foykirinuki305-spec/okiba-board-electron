@@ -4,7 +4,7 @@
 const fs=require('fs'),path=require('path');
 function generateMixedDriver(copy,source){let s=fs.readFileSync(source,'utf8');
  function replace(a,b,n=1){if(s.split(a).length-1!==n)throw Error('Mixed driver anchor drift '+a);s=s.split(a).join(b);}
- replace("'success32','success34','abort-placed','abort-after-restore','fault-after-hide','fault-first-move','hang-first-move','owner-death','source-occupied','cached-destination','show-hidden-already-on','show-hidden-mid-stage'","'success32','abort-placed','abort-after-restore','fault-first-move','fault-first-reveal','hang-first-move','owner-death','success-dense','cached-destination'");
+ replace("'success32','success34','abort-placed','abort-after-restore','fault-after-hide','fault-first-move','hang-first-move','owner-death','source-occupied','cached-destination','show-hidden-already-on','show-hidden-mid-stage'","'success32','abort-placed','abort-after-restore','fault-first-move','fault-first-reveal','hang-first-move','owner-death','success-dense','cached-destination','show-hidden-mid-stage'");
  replace("kind:'resident-archive-samevolume'","kind:'mixed-hidden-resident-prototype'",2);
  replace("Array.from({length:3}","Array.from({length:6}");
  const item="return {name:base,path:source,dest,offset:[0,n]};";
@@ -19,6 +19,11 @@ function generateMixedDriver(copy,source){let s=fs.readFileSync(source,'utf8');
     fs.writeFileSync(f,code.replace(marker,marker+"\\n if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'CI only'};"+fault));
    }
 `+s.slice(b);
+ // Reuse official ShowHidden fixture, but inject into the mixed first-stage boundary.
+ replace("for(const f of ['shell-helper.ps1','snap-lease.ps1','resident-lease.ps1','resident-file-native.cs'])fs.copyFileSync", "for(const f of ['shell-helper.ps1','snap-lease.ps1','resident-lease.ps1','resident-file-native.cs','mixed-lease-native-ci.ps1','mixed-rename-notify-ci.cs'])fs.copyFileSync");
+ replace("const f=path.join(hd,'resident-lease.ps1');let code=fs.readFileSync(f,'utf8');const anchor='  $null=[OkibaResidentFiles]::Stage($i.source,$i.destination,$i.identity,$i.size,$i.mtime,[uint32]$i.originalAttributes,$i.sourceParentID,$i.destParentID)';", "const f=path.join(hd,'mixed-lease-native-ci.ps1');let code=fs.readFileSync(f,'utf8');const anchor='# CI-MIXED-AFTER-FIRST-STAGE';");
+ replace("if($selected.ContainsKey((Lease-Path $i.destination))){$proof.visible=$true;$proof.hidden=$true;$proof.oldUnchanged=$true;break}","$allLinksVisible=$true;foreach($link in $r.linkRecords){if(-not (Lease-CheckRecord $link).hidden -or -not $selected.ContainsKey((Lease-Path $link.path))){$allLinksVisible=$false}}\n    if($selected.ContainsKey((Lease-Path $i.destination)) -and $allLinksVisible){$proof.visible=$true;$proof.hidden=$true;$proof.oldUnchanged=$true;$proof.linksVisible=$true;$proof.linkCount=@($r.linkRecords).Count;break}");
+ replace("assert(policy.stage.visible&&policy.stage.hidden&&policy.stage.oldUnchanged);", "assert(policy.stage.visible&&policy.stage.hidden&&policy.stage.oldUnchanged&&policy.stage.linksVisible&&policy.stage.linkCount===3);assert.equal((await showPolicy('read')).value,true,'Lease must not reset external ShowHidden');");
  replace("const metadata=path.join(dir,'board.json'),beforeText='{\"resident\":true}',afterText='{\"resident\":false}';",`const metadata=path.join(dir,'board.json'),beforeText=JSON.stringify({positions:Object.fromEntries(items.filter(i=>i.mode==='resident-file').map(i=>[i.name,i.offset])),links:items.filter(i=>i.mode==='hidden-link').map(i=>({path:i.path,extra:'retain until commit'})),future:{unknown:[1,2]}}),afterText=JSON.stringify({positions:{},links:[],future:{unknown:[1,2]}});`);
  replace("assert(!fs.existsSync(i.path));assert(fs.readFileSync(i.dest).equals(contents[n]));","if(i.mode==='resident-file')assert(!fs.existsSync(i.path));assert(fs.readFileSync(i.dest).equals(contents[n]));");
  replace("assert.deepEqual(await attributes(items.map(i=>i.dest)),[32,32,32]);","assert.deepEqual(await attributes(items.map(i=>i.dest)),[32,32,32,32,32,32]);");
@@ -26,7 +31,8 @@ function generateMixedDriver(copy,source){let s=fs.readFileSync(source,'utf8');
  replace("assert.deepEqual(await attributes(items.map(i=>i.path)),[attrs,attrs,attrs]);","assert.deepEqual(await attributes(items.map(i=>i.path)),[34,34,34,32,32,32]);");
  replace('  baseline=await stable();',"  assert.equal((await showPolicy('read')).value,false,'ShowHidden ON unsupported for initial Hidden link group');baseline=await stable();");
  replace("helper:{command:'powershell.exe',args:","helper:{env:{...process.env,OKIBA_MIXED_TRACE_PATH:path.join(dir,'mixed-trace.jsonl')},command:'powershell.exe',args:");
- replace("helperTimeoutMs:name==='hang-first-move'?4000:15000","helperTimeoutMs:name==='hang-first-move'?4000:30000");
+ replace("const {diagnosticCopy}=require('./resident-diagnostic-copy-ci');", "");
+ replace("   helperPath=diagnosticCopy(helperPath,dir);", "");
  replace("const fs=require('fs')","const {runOwnedResidents}=require('./mixed-owned-resident-fixture-ci');\nconst fs=require('fs')");
  replace('let client=null,unsafe=false,baseline,policy=null;','let client=null,unsafe=false,baseline,policy=null,denseState=null;');
  replace("   const dir=path.join(temp,name);",`   if(name==='success-dense'){

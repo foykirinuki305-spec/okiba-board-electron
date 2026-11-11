@@ -21,8 +21,7 @@ const attrib = ln.attribRunnerFromEnv();
 // ------------------------------------------------------------------ paths
 let BASE = null;
 let MIGRATED_COUNT = 0;
-// Files removed/healed by the once-per-version update cleanup
-// (v2.2.1, Job 2); surfaced on the home screen as one status line.
+// Retained response field; automatic update cleanup is disabled.
 let CLEANED_COUNT = 0;
 // Warm shell helper client (v2.2, Job A): one long-lived PowerShell
 // process serving resolveDrop / positionIcons / getDesktopPositions.
@@ -313,102 +312,17 @@ if (!gotSingleInstanceLock) {
   });
 }
 
-// ------------------------------------------- auto-cleanup (v2.2.1)
-// Runs ONCE per version change, after the window is up: loose
-// OkibaBoard exes left in Desktop/Downloads by chat deliveries
-// are deleted, stale app shortcuts are deleted, and board
-// shortcuts from older builds are healed onto the current exe
-// (lib/cleanup.js holds the pure decisions). Failures never block
-// startup; every action lands in <base>\okiba.log, one line each.
-function cleanupScanDirs() {
-  // OKIBA_CLEANUP_DESKTOP / OKIBA_CLEANUP_DOWNLOADS redirect the
-  // scanned folders for the GUI E2E (same pattern as
-  // OKIBA_SHORTCUT_DESKTOP) so tests never touch a real Desktop.
-  let desktop = null;
-  let downloads = null;
-  try { desktop = process.env.OKIBA_CLEANUP_DESKTOP || app.getPath('desktop'); } catch (e) {}
-  try { downloads = process.env.OKIBA_CLEANUP_DOWNLOADS || app.getPath('downloads'); } catch (e) {}
-  return { desktop, downloads };
-}
-
-function listCleanupFiles(dir) {
-  try {
-    return fs.readdirSync(dir, { withFileTypes: true })
-      .filter((e) => { try { return e.isFile(); } catch (err) { return false; } })
-      .map((e) => path.join(dir, e.name));
-  } catch (e) { return []; }
-}
-
+// ------------------------------------------- non-destructive version stamp
+// Updating the app never scans, deletes, heals, or recreates Desktop/Downloads
+// items. Explorer can rearrange icons even when only a shortcut is replaced.
 function runVersionCleanup() {
-  // Development/test runs must never clean the real Desktop or Downloads.
-  // Explicit redirected folders keep the cleanup integration test available.
-  if (!app.isPackaged && (!process.env.OKIBA_CLEANUP_DESKTOP ||
-      !process.env.OKIBA_CLEANUP_DOWNLOADS)) return;
   try {
     const current = app.getVersion();
     const home = bf.loadHome(BASE);
     if (!cu.shouldRunCleanup(current, home.appVersion)) return;
-    const dirs = cleanupScanDirs();
-    const desktopFiles = dirs.desktop ? listCleanupFiles(dirs.desktop) : [];
-    const downloadsFiles = dirs.downloads ? listCleanupFiles(dirs.downloads) : [];
-    const shortcuts = [];
-    for (const lnkPath of desktopFiles.filter((p) => p.toLowerCase().endsWith('.lnk'))) {
-      let info = null;
-      try { info = shell.readShortcutLink(lnkPath); } catch (e) { info = null; }
-      if (info && info.target) {
-        shortcuts.push({
-          lnkPath, target: info.target, args: info.args || '',
-          icon: info.icon || '', iconIndex: info.iconIndex || 0,
-          cwd: info.cwd || '', description: info.description || '',
-        });
-      }
-    }
-    const plan = cu.planCleanup({
-      desktopFiles, downloadsFiles, shortcuts, execPath: process.execPath,
-    });
-    const logLine = (s) => {
-      try {
-        fs.appendFileSync(path.join(BASE, 'okiba.log'),
-          new Date().toISOString() + ' cleanup ' + s + '\n');
-      } catch (e) { /* diagnostics must never break the app */ }
-    };
-    let acted = 0;
-    for (const p of plan.deleteFiles) {
-      try {
-        fs.rmSync(p, { force: true });
-        if (!fs.existsSync(p)) { acted++; logLine('delete ' + p); }
-      } catch (e) { /* locked/in-use files are skipped silently */ }
-    }
-    for (const p of plan.deleteShortcuts) {
-      try {
-        fs.rmSync(p, { force: true });
-        if (!fs.existsSync(p)) { acted++; logLine('delete-shortcut ' + p); }
-      } catch (e) { /* skipped silently */ }
-    }
-    for (const h of plan.healShortcuts) {
-      try {
-        const written = shell.writeShortcutLink(h.lnkPath, 'replace', {
-          target: process.execPath,
-          args: h.args,
-          cwd: h.cwd || undefined,
-          description: h.description || undefined,
-          icon: h.icon || process.execPath,
-          iconIndex: h.iconIndex || 0,
-        });
-        if (written) { acted++; logLine('heal-shortcut ' + h.lnkPath + ' -> ' + process.execPath); }
-      } catch (e) { /* skipped silently */ }
-    }
-    CLEANED_COUNT = acted;
-    // Stamp the marker LAST (positions/theme preserved), so the
-    // cleanup runs exactly once per version change.
-    try {
-      const fresh = bf.loadHome(BASE);
-      bf.saveHome(BASE, fresh.positions, fresh.theme, current);
-    } catch (e) { /* a failed stamp only means a retry next launch */ }
-    if (acted > 0 && win && !win.isDestroyed()) win.webContents.send('fs-changed');
-  } catch (e) { /* cleanup must never block startup */ }
+    bf.saveHome(BASE, home.positions, home.theme, current);
+  } catch (e) { /* a failed version stamp must never block startup */ }
 }
-
 // ------------------------------------------------------------------- IPC
 function guardBoard(name) {
   if (!name || name.includes('/') || name.includes('\\') || name === '.' || name === '..') {

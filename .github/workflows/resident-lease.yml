@@ -26,6 +26,8 @@ jobs:
       - name: Scope and previous coordinator regression
         shell: pwsh
         run: |
+          node tools/resident-diagnostic-copy-selftest.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/resident-scope-selftest.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/desktop-resident-selection-selftest.js

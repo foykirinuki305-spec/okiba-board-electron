@@ -1,6 +1,6 @@
 'use strict';
 if(process.platform!=='win32'||process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Windows'||process.env.RUNNER_ENVIRONMENT!=='github-hosted'||process.env.OKIBA_UNKNOWN_GRID_CI!=='1')throw Error('Hosted unknown success CI only');
-const fs=require('fs'),path=require('path'),crypto=require('crypto'),run=require('util').promisify(require('child_process').execFile);const {collectAdaptive}=require('./unknown-grid-adaptive-driver-ci');let client,token,gateRequested=false;
+const fs=require('fs'),path=require('path'),crypto=require('crypto'),assert=require('assert/strict'),run=require('util').promisify(require('child_process').execFile);const {collectAdaptive}=require('./unknown-grid-adaptive-driver-ci');let client,token,gateRequested=false;
 const send=m=>{if(process.connected)process.send(m);};const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 async function closeVerified(){
  const status=await client.status(),pid=client.diagnostics().pid;
@@ -22,6 +22,13 @@ process.on('message',async m=>{try{
  if(s.scenario==='no-fit'){if(resolved.ok)throw Error('no-fit unexpectedly accepted');const aborted=await checked('abort',token);send({phase:'done',outcome:'aborted',aborted,observed,resolved,status:await client.status()});return;}
  if(!resolved.ok)throw Error(JSON.stringify(resolved));await checked('revealResolvedAndPlace',token);await checked('restoreResolvedAndVerify',token);
  const file=scope.metadataPaths[0],before=fs.readFileSync(file),after=Buffer.from('{"committed":true}');const receipts=[{path:file,beforeHash:hash(before),afterHash:hash(after)}];
- gateRequested=true;const gate=await checked('prepareCommit',token,receipts);fs.writeFileSync(file,after);const committed=await checked('commitDone',token,gate.permit);
- send({phase:'done',outcome:'committed',committed,observed,resolved:resolved.resolved,status:await client.status()});
+ gateRequested=true;const gate=await checked('prepareCommit',token,receipts);const duplicateChecks={};
+ if(s.scenario==='duplicate-requests'){
+  const duplicateGate=await checked('prepareCommit',token,receipts);assert.equal(duplicateGate.permit,gate.permit,'duplicate gate must return the original durable permit');assert.deepEqual(fs.readFileSync(file),before,'duplicate gate must not write metadata');duplicateChecks.samePermit=true;
+ }
+ fs.writeFileSync(file,after);const committed=await checked('commitDone',token,gate.permit);
+ if(s.scenario==='duplicate-requests'){
+  const duplicateResolve=await checked('resolveCommit',token);assert.equal(duplicateResolve.state,'committed');assert.deepEqual(fs.readFileSync(file),after);const duplicateDone=await checked('commitDone',token,gate.permit);assert.equal(duplicateDone.state,'committed');duplicateChecks.resolveCommitted=true;duplicateChecks.commitDoneCommitted=true;
+ }
+ send({phase:'done',outcome:'committed',committed,duplicateChecks,observed,resolved:resolved.resolved,status:await client.status()});
 }catch(e){const primaryError=e.stack;let status=null,recovery=null,closed=null,recoveryError=null;try{status=client?await client.status():null;if(client&&token){recovery=await client.unknown(gateRequested?'resolveCommit':'abort',token);if(recovery.ok&&['aborted','committed'].includes(recovery.state))closed=await closeVerified();}}catch(cleanupError){recoveryError=cleanupError.stack;}send({phase:'error',error:primaryError,status,recovery,closed,recoveryError});}});setInterval(()=>{},1000);

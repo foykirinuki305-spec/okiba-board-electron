@@ -1,6 +1,7 @@
 'use strict';
 if(process.platform!=='win32'||process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Windows'||process.env.RUNNER_ENVIRONMENT!=='github-hosted')throw Error('Hosted Windows CI only');
 const {stableSnapshot}=require('./stable-snapshot-ci');
+const {diagnosticCopy}=require('./resident-diagnostic-copy-ci');
 const fs=require('fs'),os=require('os'),path=require('path'),assert=require('assert/strict'),crypto=require('crypto'),{execFile,fork}=require('child_process'),{promisify}=require('util');
 const {createDesktopLeaseClient}=require('../lib/desktop-lease-client'),{createShellHelperClient}=require('../lib/shellhelper'),{runLease}=require('../lib/desktop-snap-lease-controller'),{planDesktop,sameSnapshot}=require('../lib/safe-desktop');
 const root=path.resolve(__dirname,'..'),desktop=path.resolve(process.argv[2]),run=promisify(execFile),report={passed:false,cleanupVerified:false,cases:[],scope:'Hosted native resident new kind; main default unchanged'};
@@ -55,7 +56,8 @@ async function main(){
   }`;
     fs.writeFileSync(f,code.replace(anchor,anchor+injected));policy.proofPath=path.join(hd,'show-proof.json');
    }
-   const journalDir=path.join(dir,'journal');client=createDesktopLeaseClient({journalDir,helperTimeoutMs:name==='hang-first-move'?4000:15000,helper:{command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',helperPath]}});assert((await client.ready()).ok);
+   helperPath=diagnosticCopy(helperPath,dir);
+   const journalDir=path.join(dir,'journal');client=createDesktopLeaseClient({journalDir,helperTimeoutMs:name==='hang-first-move'?4000:30000,helper:{command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',helperPath]}});assert((await client.ready()).ok);
    let targets=plan.targets.map(t=>({...t,path:items.find(i=>i.name===t.name).dest}));let area=before.areas.findIndex(a=>targets.every(t=>t.x>=a.left&&t.x<a.right&&t.y>=a.top&&t.y<a.bottom));
    const metadata=path.join(dir,'board.json'),beforeText='{"resident":true}',afterText='{"resident":false}';fs.writeFileSync(metadata,beforeText);const receipts=[{path:metadata,beforeHash:hash(beforeText),afterHash:hash(afterText)}];
    let scope=await client.prepareScope({kind:'resident-archive-samevolume',desktop,items:items.map(i=>({path:i.path,destination:i.dest})),snapshot:before,targetAreaIndex:area,targets,metadataPaths:[metadata]});

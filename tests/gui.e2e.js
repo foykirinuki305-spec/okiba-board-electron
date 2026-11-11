@@ -913,12 +913,9 @@ async function main() {
   await app13.close();
 
   // ------------------------------------------------------------ run 10
-  // v2.2.1 auto-cleanup (Job 2): with the version marker bumped,
-  // loose old exes in (redirected) Desktop/Downloads are deleted,
-  // a stale shortcut is deleted, a board shortcut pointing at a
-  // fake old exe is HEALED onto the running exe, keepers survive,
-  // the marker is stamped, and a relaunch changes nothing.
-  step('auto-cleanup (v2.2.1): old versions tidied on version change');
+  // Update is a non-destructive version stamp. Real shortcuts in redirected
+  // owned folders must retain their bytes and mtime, including obsolete targets.
+  step('update: preserve all Desktop/Downloads files and shortcuts');
   const cleanupDesktop = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-clean-desk-'));
   const cleanupDownloads = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-gui-clean-dl-'));
   fs.writeFileSync(path.join(cleanupDownloads, 'OkibaBoard.exe'), 'old portable');
@@ -957,6 +954,12 @@ async function main() {
     homeJson.appVersion = '2.2.0'; // older than the package version
     fs.writeFileSync(homeJsonPath, JSON.stringify(homeJson, null, 2));
   }
+  const updateFiles = [cleanupDesktop, cleanupDownloads].flatMap(dir=>fs.readdirSync(dir).map(name=>path.join(dir,name))).filter(p=>fs.statSync(p).isFile());
+  const updateBefore = updateFiles.map(p=>({path:p,bytes:fs.readFileSync(p),mtime:fs.statSync(p).mtimeMs}));
+  const updateHomeBefore = readJson(path.join(base,'.home.json'));
+  function assertUpdateFilesUnchanged() {
+    for(const f of updateBefore) assert(fs.existsSync(f.path)&&fs.readFileSync(f.path).equals(f.bytes)&&fs.statSync(f.path).mtimeMs===f.mtime,'update: existing file bytes and mtime unchanged '+path.basename(f.path));
+  }
   const pkgVersion = require('../package.json').version;
   const app14 = await launch({
     OKIBA_CLEANUP_DESKTOP: cleanupDesktop,
@@ -964,39 +967,13 @@ async function main() {
   });
   page = await app14.firstWindow();
   await page.waitForSelector('#boardGrid .board-card', { timeout: 20000 });
-  await waitFor(() => !fs.existsSync(path.join(cleanupDownloads, 'OkibaBoard.exe')),
-    'cleanup: old portable exe deleted from Downloads');
-  await waitFor(() => !fs.existsSync(path.join(cleanupDesktop, 'OkibaBoard-Setup-2.1.0.exe')),
-    'cleanup: old Setup exe deleted from Desktop');
-  assert(fs.existsSync(path.join(cleanupDesktop, '関係ない.txt')) &&
-         fs.existsSync(path.join(cleanupDownloads, 'keep.txt')),
-    'cleanup: unrelated files untouched');
-  await waitFor(() => {
-    const h = readJson(path.join(base, '.home.json'));
-    return h.appVersion === pkgVersion;
-  }, 'cleanup: version marker stamped to the current version');
-  if (process.platform === 'win32') {
-    assert(!fs.existsSync(staleLnkPath), 'cleanup: stale app shortcut deleted');
-    assert(fs.existsSync(path.join(cleanupDesktop, 'memo.lnk')),
-      'cleanup: unrelated shortcut untouched');
-    const execPath = await app14.evaluate(() => process.execPath);
-    await waitFor(async () => {
-      const info = await page.evaluate((p) => window.okiba.readShortcut(p), boardLnkPath);
-      return info && info.target === execPath;
-    }, 'cleanup: board shortcut healed onto the running exe');
-    const healed = await page.evaluate((p) => window.okiba.readShortcut(p), boardLnkPath);
-    assert(healed.args.includes('--board-path') && healed.args.includes(asciiBoardDir),
-      'cleanup: healed shortcut kept its --board-path args');
-  } else {
-    console.log('  skip - shortcut heal/delete assertions run on the Windows CI runner');
-  }
-  await waitFor(async () => {
-    const n = await page.evaluate(() => {
-      const el = document.getElementById('cleanupNotice');
-      return { hidden: el.hidden, text: el.textContent };
-    });
-    return !n.hidden && n.text.includes('片付けました');
-  }, 'cleanup: home shows the one-line tidied notice');
+  await waitFor(() => readJson(path.join(base,'.home.json')).appVersion === pkgVersion,
+    'update: version marker stamped');
+  assertUpdateFilesUnchanged();
+  const updateHomeAfter=readJson(path.join(base,'.home.json'));
+  delete updateHomeBefore.appVersion; delete updateHomeAfter.appVersion;
+  assert(JSON.stringify(updateHomeAfter)===JSON.stringify(updateHomeBefore),'update: home positions, theme and other fields preserved');
+  assert(await page.evaluate(()=>document.getElementById('cleanupNotice').hidden),'update: no misleading cleanup notice');
   await app14.close();
 
   step('auto-cleanup (v2.2.1): relaunch with a current marker changes nothing');
@@ -1015,12 +992,7 @@ async function main() {
     'cleanup: no notice on a same-version relaunch');
   assert(fs.existsSync(path.join(cleanupDesktop, '関係ない.txt')),
     'cleanup: keepers still present after relaunch');
-  if (process.platform === 'win32') {
-    const execPath2 = await app15.evaluate(() => process.execPath);
-    const info2 = await page.evaluate((p) => window.okiba.readShortcut(p), boardLnkPath);
-    assert(info2 && info2.target === execPath2,
-      'cleanup: healed shortcut still points at the current exe');
-  }
+  assertUpdateFilesUnchanged();
   await app15.close();
 
   // ------------------------------------------------------------ run 11
