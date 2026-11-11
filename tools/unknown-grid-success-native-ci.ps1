@@ -9,7 +9,7 @@ function Unknown-SuccessInit($r,$scope){
 }
 function Unknown-RecordSample($r,$req,$observed){
  if($null -eq $r.success){return $null}
- $samples=@($r.success.samples);if($samples.Count -ge 44 -or $null -eq $req.id -or [double]$req.id -ne $samples.Count -or $req.axis -notin @('x','y') -or $req.pass -notin @('candidate','forward','reverse')){throw 'unknown-sample-sequence'}
+ $samples=@($r.success.samples);if($samples.Count -ge 44 -or $null -eq $req.sampleId -or [double]$req.sampleId -ne $samples.Count -or $req.axis -notin @('x','y') -or $req.pass -notin @('candidate','forward','reverse')){throw 'unknown-sample-sequence'}
  $b=$r.success.binding;$sample=@{id=$samples.Count;axis=$req.axis;pass=$req.pass;token=$b.token;probeId=$b.probeId;geometryKey=$b.geometryKey;iconsKey=$b.iconsKey;requestX=[int]$req.point.x;requestY=[int]$req.point.y;x=[int]$observed.x;y=[int]$observed.y}
  $r.success.samples=@($samples)+@($sample);return $sample
 }

@@ -1,0 +1,7 @@
+'use strict';const assert=require('assert/strict'),{EventEmitter}=require('events');const {createShellHelperClient}=require('../lib/shellhelper');
+let fake,seen=[];const client=createShellHelperClient({command:'pure-mock',timeoutMs:30,spawnFn:()=>{fake=new EventEmitter();fake.stdout=new EventEmitter();fake.stdin={write(line){const req=JSON.parse(line);seen.push(req);queueMicrotask(()=>fake.stdout.emit('data',JSON.stringify({id:req.id,result:{ok:true,sampleId:req.sampleId}})+'\n'));}};queueMicrotask(()=>fake.stdout.emit('data','{"ready":true}\n'));return fake;}});
+(async()=>{const keepAlive=setInterval(()=>{},100);try{
+ const allocatedId=12,legacyWire=JSON.parse(JSON.stringify({id:allocatedId,cmd:'leaseUnknownCalibrationSample',...{id:0}}));assert.equal(legacyWire.id,0);assert.notEqual(legacyWire.id,allocatedId);
+ const colliding=await client.request('leaseUnknownCalibrationSample',{id:0});assert.equal(colliding.ok,false);assert.equal(colliding.error,'reserved-payload-field');assert.equal(seen.length,0);
+ const fixed=await client.request('leaseUnknownCalibrationSample',{sampleId:0,axis:'x',pass:'candidate'});assert(fixed.ok);assert.equal(fixed.result.sampleId,0);assert.notEqual(seen[0].id,seen[0].sampleId);fake.emit('exit');console.log('PASS real client pure-stream regression: legacy payload id=0 loses correlation; current client rejects reserved id; sampleId=0 preserves transport id; no process/Desktop spawned');
+}finally{clearInterval(keepAlive);}})().catch(e=>{console.error(e);process.exitCode=1;});

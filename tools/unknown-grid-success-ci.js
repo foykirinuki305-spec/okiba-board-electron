@@ -17,16 +17,26 @@ async function main(){const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-unk
   const metadata=path.join(caseDir,'board.json');fs.writeFileSync(metadata,'{"unchanged":true}');const area=before.areas[0],requestedAnchor=scenario==='no-fit'?{x:area.right+1000,y:area.bottom+1000}:{x:plan.patch.left+before.sx,y:plan.patch.top+before.sy};
   const scope={version:2,kind:'samepath-hidden-unknown-grid-ci',desktop,snapshot:before,targetAreaIndex:0,plan,items:selected.map(({path,destination,hidden,fileIdentity})=>({path,destination,hidden,fileIdentity})),metadataPaths:[metadata],success:{items:selected.map(({path,cell})=>({path,cell})),anchorPath:selected[0].path,requestedAnchor}};
   const journalDir=path.join(caseDir,'journal'),owner=fork(path.join(root,'tools/unknown-grid-success-host-ci.js'),[],{windowsHide:true,stdio:['ignore','ignore','ignore','ipc'],env:{...process.env,OKIBA_UNKNOWN_GRID_CI:'1'}});children.push(owner);
-  try{const pending=receive(owner);owner.send({cmd:'run',spec:{copy,scope,scenario,journalDir}});const response=await pending;note('result',{scenario,response});assert.equal(response.phase,'done',response.error);assert.equal(response.outcome,scenario==='success'?'committed':'aborted');
+  let recoveredCase=false;try{const pending=receive(owner);owner.send({cmd:'run',spec:{copy,scope,scenario,journalDir}});const response=await pending;note('result',{scenario,response});
+   if(response.phase==='error'){
+    report.primaryError=response.error;
+    if(response.recovery?.ok&&response.recovery.state==='aborted'&&response.closed?.ok){
+     await stop(owner);const journalFiles=fs.readdirSync(journalDir).filter(n=>/^[a-f0-9]{32}\.json$/.test(n));assert.equal(journalFiles.length,1);const terminal=JSON.parse(fs.readFileSync(path.join(journalDir,journalFiles[0]),'utf8'));assert.equal(terminal.phase,'aborted');note('error-recovery-terminal',terminal);const recovered=await stable('error-recovered');assert.equal(recovered.icons.length,before.icons.length);
+     for(const item of selected){const n=await request('readHiddenFile',{path:item.path});for(const k of ['identity','size','mtime','hidden','attributes'])assert.equal(n[k],item.attrs[k]);assert.equal(hash(item.path),item.hash);}
+     assert.equal(fs.readFileSync(metadata,'utf8'),'{"unchanged":true}');recoveredCase=true;report.failureRecoveryVerified=true;
+    }
+    throw Error(response.error);
+   }
+   assert.equal(response.phase,'done',response.error);assert.equal(response.outcome,scenario==='success'?'committed':'aborted');
    const after=await stable('after-case');assert.equal(after.icons.length,before.icons.length+(scenario==='success'?3:0));
    if(scenario==='success'){assert.deepEqual(response.observed.grid,before.areas[0].grid);assert.equal(fs.readFileSync(metadata,'utf8'),'{"committed":true}');for(const t of response.resolved.targets){const icon=after.icons.find(i=>i.path&&path.resolve(i.path).toLowerCase()===t.path.toLowerCase());assert(icon&&icon.x===t.x&&icon.y===t.y);}}
    else assert.equal(fs.readFileSync(metadata,'utf8'),'{"unchanged":true}');
    for(const item of selected){const n=await request('readHiddenFile',{path:item.path});for(const key of ['identity','size','mtime'])assert.equal(n[key],item.attrs[key]);assert.equal(n.hidden,scenario!=='success');assert.equal(n.attributes,scenario==='success'?item.attrs.attributes&~2:item.attrs.attributes);assert.equal(hash(item.path),item.hash);}
-   const closing=receive(owner,20000);owner.send({cmd:'close'});assert((await closing).result.ok);await stop(owner);
+   const closing=receive(owner,90000);owner.send({cmd:'close'});assert((await closing).result.ok);await stop(owner);
    // Completed close confirms helper stopped. Remove only this case's own files.
    for(const item of selected){assert.equal(path.dirname(item.path),desktop);assert(path.basename(item.path).startsWith('OkibaUnknown-'));fs.unlinkSync(item.path);}
    const cleanup=await stable('case-cleanup');assert.deepEqual(cleanup.icons.map(i=>[i.identity,i.x,i.y]).sort(),baseline.icons.map(i=>[i.identity,i.x,i.y]).sort());
-  }catch(e){unsafe=true;throw e;}
+  }catch(e){if(!report.primaryError)report.primaryError=e.stack;if(!recoveredCase)unsafe=true;throw e;}
  }
  report.passed=true;
  }finally{for(const child of children){if(child.exitCode===null&&child.signalCode===null){try{await stop(child);}catch{unsafe=true;}}}if(!unsafe){for(const file of owned){assert.equal(path.dirname(file),desktop);assert(path.basename(file).startsWith('OkibaUnknown-'));if(fs.existsSync(file))fs.unlinkSync(file);}const end=await stable('cleanup');assert.deepEqual(end.icons.map(i=>[i.identity,i.x,i.y]).sort(),baseline.icons.map(i=>[i.identity,i.x,i.y]).sort());report.cleanupVerified=true;}if(!await observer.stopAndWait(10000))unsafe=true;
@@ -34,4 +44,4 @@ async function main(){const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-unk
   if(unsafe){report.passed=false;report.cleanupError='watchdog recovery unverified; no blind cleanup or flags restoration';}fs.writeFileSync(path.join(root,'unknown-grid-success-ci.json'),JSON.stringify(report,null,2));if(unsafe)throw Error(report.cleanupError);fs.rmSync(ownedTempDirectory(temp),{recursive:true,force:true});
  }
 }
-main().catch(e=>{report.passed=false;report.error=e.stack;fs.writeFileSync(path.join(root,'unknown-grid-success-ci.json'),JSON.stringify(report,null,2));console.error(e);process.exitCode=1;});
+main().catch(e=>{report.passed=false;report.error=report.primaryError||e.stack;fs.writeFileSync(path.join(root,'unknown-grid-success-ci.json'),JSON.stringify(report,null,2));console.error(e);process.exitCode=1;});

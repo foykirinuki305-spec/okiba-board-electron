@@ -21,6 +21,8 @@ jobs:
           if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
           node tools/unknown-grid-adaptive-driver-selftest.js
           if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          node tools/unknown-grid-sample-wire-selftest.js
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
           node tools/unknown-grid-success-flow-selftest.js
           if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
           node tools/unknown-grid-lease-flow-selftest.js

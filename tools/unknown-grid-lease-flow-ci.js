@@ -26,6 +26,7 @@ function createUnknownFlow(io){
    catch(e){/* leaseUnknownPrepare is strictly read-only: uncertain replies may leave helper-local state, never Desktop mutation. The adapter must stop/restart transport failures before throwing. */if(!prepared)await io.release(token);throw e;}
   },
   async step(name,token,payload={}){
+   if(Object.prototype.hasOwnProperty.call(payload,'id')||Object.prototype.hasOwnProperty.call(payload,'cmd'))throw Error('reserved-transport-field');
    const rule=transitions[name];if(!rule)throw Error('unknown-step');const a=await requireLive(token);if(!rule.from.includes(a.phase))throw Error('unknown-phase-invalid');
    a.phase=rule.intent;if(['revealProbe','revealResolvedAndPlace'].includes(name))a.recovery.flagState='off-intent';if(['beginCalibration','restoreResolvedAndVerify'].includes(name))a.recovery.flagState='on-intent';await io.save(); // Before every mutating native request.
    const r=await io.native(rule.command,{...payload,token});if(!r.ok)throw Error(r.reason||'unknown-native-failed');
