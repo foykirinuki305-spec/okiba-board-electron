@@ -19,6 +19,9 @@ jobs:
       - name: Canonical lease geometry pure checks
         shell: pwsh
         run: pwsh -NoProfile -File ./tools/snap-lease-geometry-selftest.ps1
+      - name: Atomic journal replacement pure checks
+        shell: pwsh
+        run: powershell -NoProfile -File ./tools/snap-lease-json-selftest.ps1
       - name: Isolated hidden-link watchdog faults, never production
         shell: pwsh
         run: |

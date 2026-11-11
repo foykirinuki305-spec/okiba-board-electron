@@ -101,7 +101,13 @@ async function main(){
     ids=await waitJson(path.join(caseDir,'host.json'));assert.equal(ids.hostPid,host.pid);
     const ready=await waitJson(path.join(caseDir,'worker-ready.json'));assert.equal(ready.pid,ids.workerPid);assert.equal(ready.started,ids.workerStart);
     watchdog=launch('snap-lease-watchdog-ci.ps1',specPath,path.join(caseDir,'watchdog.log'),'watchdog');
-    const phase=await waitJson(path.join(caseDir,'phase.json'));assert.equal(phase.phase,killPhase);
+    let phase;const phaseDeadline=Date.now()+45000;
+    while(Date.now()<phaseDeadline){
+     const phasePath=path.join(caseDir,'phase.json'), resultPath=path.join(caseDir,'result.json');
+     if(fs.existsSync(resultPath)){const early=JSON.parse(fs.readFileSync(resultPath,'utf8'));throw Error('Watchdog ended before phase: '+JSON.stringify(early));}
+     if(fs.existsSync(phasePath)){phase=JSON.parse(fs.readFileSync(phasePath,'utf8'));break;}await sleep(100);
+    }
+    if(!phase)throw Error('timeout waiting for phase.json');assert.equal(phase.phase,killPhase);
     const interrupted=await observe('lease-interrupted',before);assert(interrupted.ok&&!interrupted.snap&&!interrupted.autoArrange);
     const started=Date.now();await killVerified(ids[victim+'Pid'],ids[victim+'Start']);
     const result=await waitJson(path.join(caseDir,'result.json'),30000);
@@ -109,6 +115,9 @@ async function main(){
     assert(result.ok,'Watchdog recovery blocked: '+JSON.stringify(result));assert.equal(result.cause,victim==='host'?'host-exit':'worker-exit');
     const restored=await stable('lease-restored',before);assert(restored.snap&&!restored.autoArrange);assert.equal(restored.icons.length,before.icons.length);
     for(const i of selected){assert((await attrs.readHidden(i.dest)).hidden);assert.equal(crypto.createHash('sha256').update(fs.readFileSync(i.dest)).digest('hex'),hashes.get(i.dest));}
+   }catch(e){
+    const diagnostics={};for(const file of ['host.json','worker-ready.json','journal.json','result.json','phase.json','host.log','watchdog.log','worker.stdout.log','worker.stderr.log']){try{diagnostics[file]=fs.readFileSync(path.join(caseDir,file),'utf8');}catch{}}
+    note('case-failed',{name,error:String(e),diagnostics});throw e;
    }finally{
     try{
      if(ids){await killVerified(ids.workerPid,ids.workerStart);await killVerified(ids.hostPid,ids.hostStart);}

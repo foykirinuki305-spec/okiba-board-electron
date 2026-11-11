@@ -31,7 +31,7 @@ public static class LeaseFileCI {
 function Read-LeaseJson([string]$p){return (Get-Content -LiteralPath $p -Raw|ConvertFrom-Json)}
 function Save-LeaseJson([string]$p,$value){
  $tmp=$p+'.'+[guid]::NewGuid().ToString('N')+'.tmp';[IO.File]::WriteAllText($tmp,($value|ConvertTo-Json -Depth 24 -Compress),[Text.UTF8Encoding]::new($false))
- if([IO.File]::Exists($p)){[IO.File]::Replace($tmp,$p,$null)}else{[IO.File]::Move($tmp,$p)}
+ if([IO.File]::Exists($p)){[IO.File]::Replace($tmp,$p,[System.Management.Automation.Language.NullString]::Value)}else{[IO.File]::Move($tmp,$p)}
 }
 function Assert-LeasePath($p,$tag){
  $full=[IO.Path]::GetFullPath($p);$desktop=[IO.Path]::GetFullPath([Environment]::GetFolderPath('DesktopDirectory'))
