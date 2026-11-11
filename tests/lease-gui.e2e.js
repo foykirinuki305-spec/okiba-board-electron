@@ -122,7 +122,7 @@ async function scenario(mode){
    for(let i=0;i<files.length;i++)check(fs.readFileSync(files[i],'utf8')==='selected-'+i,'drag keeps original bytes');
    return;
   }
-  await card('first.txt').click({button:'right'});await page.getByText('デスクトップへ移動',{exact:true}).click();
+  await card('first.txt').click({button:'right'});await page.getByText('戻し先フォルダへ移動',{exact:true}).click();
   await wait(()=>records().some(r=>r.cmd==='leasePrepare'),'real Node watchdog reached fake helper');
   if(mode==='reveal-fail'){
    await wait(()=>records().some(r=>r.cmd==='fake-terminal'&&r.visible===false),'rollback terminal');await wait(async()=>(await page.locator('.item .name').allTextContents()).includes('first.txt'),'failure card restored');
@@ -146,7 +146,7 @@ async function scenario(mode){
     }
    }else{
     await wait(()=>fs.existsSync(path.join(base,'.move-history.json')),'success history');check(records().some(r=>r.cmd==='fake-terminal'&&r.visible===true),'success visible terminal');
-    await card('second.txt').click({button:'right'});await page.getByText('デスクトップへ移動',{exact:true}).click();await wait(()=>JSON.parse(fs.readFileSync(meta,'utf8')).links.length===0,'second warm transaction');
+    await card('second.txt').click({button:'right'});await page.getByText('戻し先フォルダへ移動',{exact:true}).click();await wait(()=>JSON.parse(fs.readFileSync(meta,'utf8')).links.length===0,'second warm transaction');
     check(new Set(records().filter(r=>r.cmd==='leasePrepare').map(r=>r.pid)).size===1,'two transactions reuse dedicated helper');
    }
   }
