@@ -28,7 +28,16 @@ if(require.main===module){(async()=>{
   m=JSON.parse(fs.readFileSync(journal,'utf8'));for(const r of m.records){assert(allowed(r.path,common));if(!r.attempted)continue;assert.equal(hash(r.path),r.hash);const n=await call('readHiddenFile',{path:r.path});assert.equal(n.identity,r.identity);assert.equal(n.attributes&~130,r.attributes&~130);if(n.hidden)await call('setHiddenFile',{path:r.path,expectedIdentity:r.identity,expectedHidden:true,hidden:r.hidden});const after=await call('readHiddenFile',{path:r.path});assert.equal(after.attributes,r.attributes);}
   m.phase='attributes-restored';save(m);
  }else if(action==='verify'){
-  m=JSON.parse(fs.readFileSync(journal,'utf8'));m.after=await call('desktopSnapshot');m.oldIconDifferences=m.before.icons.filter(i=>!m.after.icons.some(j=>i.identity===j.identity&&i.x===j.x&&i.y===j.y));m.phase=m.oldIconDifferences.length?'fixture-restoration-unverified':'fixture-restored';save(m);assert.equal(m.oldIconDifferences.length,0,'fixture positions changed; not concealed');
+  m=JSON.parse(fs.readFileSync(journal,'utf8'));m.restoreObservations=[];
+  for(let attempt=0;attempt<20;attempt++){
+   for(const r of m.records){const n=await call('readHiddenFile',{path:r.path});assert(n.identity===r.identity&&n.attributes===r.attributes&&hash(r.path)===r.hash,'restored file changed');}
+   m.after=await call('desktopSnapshot');m.restoreObservations.push(m.after);save(m);
+   const moved=m.before.icons.filter(i=>m.after.icons.some(j=>j.identity===i.identity&&(j.x!==i.x||j.y!==i.y)));
+   if(moved.length)break;
+   if(m.before.icons.every(i=>m.after.icons.some(j=>j.identity===i.identity&&j.x===i.x&&j.y===i.y)))break;
+   await new Promise(r=>setTimeout(r,250));
+  }
+  m.oldIconDifferences=m.before.icons.filter(i=>!m.after.icons.some(j=>i.identity===j.identity&&i.x===j.x&&i.y===j.y));m.phase=m.oldIconDifferences.length?'fixture-restoration-unverified':'fixture-restored';save(m);assert.equal(m.oldIconDifferences.length,0,'fixture positions changed; not concealed');
  }else throw Error('unknown action');
  }catch(e){if(m){m.error=e.stack;save(m);}throw e;}finally{assert(await h.stopAndWait(10000),'helper stop unconfirmed');}
 })().catch(e=>{console.error(e);process.exitCode=1;});}
