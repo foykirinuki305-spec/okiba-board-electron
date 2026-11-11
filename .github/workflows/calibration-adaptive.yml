@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - 'tools/calibration-adaptive-*'
+      - 'tools/calibration-fast-settle-model-selftest.js'
       - '.github/workflows/calibration-adaptive.yml'
   workflow_dispatch:
 jobs:
@@ -17,6 +18,9 @@ jobs:
       - name: Pure adaptive response serialization regression
         shell: pwsh
         run: powershell -NoProfile -File tools/calibration-adaptive-serialization-selftest.ps1
+      - name: Pure forced-change settling model
+        shell: pwsh
+        run: node tools/calibration-fast-settle-model-selftest.js
       - name: Known 100 percent native Shell calibration comparison
         shell: pwsh
         run: |

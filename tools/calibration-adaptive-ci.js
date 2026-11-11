@@ -24,9 +24,36 @@ async function main(){
         $clock=[Diagnostics.Stopwatch]::StartNew();$fresh=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) @($probe)
         if(-not $fresh.ok -or $fresh.new.Count -ne 1){$result=@{ok=$false;reason='sample-precondition';guard=$fresh}}else{
           $i=$fresh.new[0]
+          if($null -ne $req.previous -and ($i.x -ne $req.previous.x -or $i.y -ne $req.previous.y)){throw 'probe changed before sample'}
           [OkibaFolderView]::PositionNewItem([int]$i.index,$dest,[int]$i.x,[int]$i.y,[int]$q.x,[int]$q.y,[string]$i.identity)
-          $after=Wait-CalibrationSettled $baseline $probe $patch $clock
-          $result=@{ok=$after.ok;guard=$after;elapsedMs=$clock.Elapsed.TotalMilliseconds}
+          $readCount=0;$usedFast=$false
+          $axis=[string]$req.axis;$previous=$i;$predictions=@($req.predictions)
+          $eligible=$req.fast -eq $true -and @('x','y') -contains $axis -and $predictions.Count -gt 0 -and @($predictions|Where-Object{$_ -eq $previous.$axis}).Count -eq 0
+          if($eligible){
+            $usedFast=$true;$candidate=$null;$after=@{ok=$false;reason='fast-settle-deadline'}
+            while($clock.ElapsedMilliseconds -lt 2500){
+              $snapshot=Get-StrictDesktopSnapshot;$readCount++
+              if(-not $snapshot.ok){if($snapshot.reason -eq 'desktop-changing'){$candidate=$null;continue};$after=$snapshot;break}
+              $now=Get-StrictTransactionState $baseline $snapshot @($probe)
+              if(-not $now.ok){$after=$now;break}
+              if($now.new.Count -ne 1){$after=@{ok=$false;reason='fast-probe-count';current=$now.current};break}
+              $j=$now.new[0]
+              if($j.x -lt $patch.left -or $j.x -gt $patch.right -or $j.y -lt $patch.top -or $j.y -gt $patch.bottom){$after=@{ok=$false;reason='fast-left-patch'};break}
+              if($j.$axis -eq $previous.$axis -or $predictions -notcontains $j.$axis){$candidate=$null;continue}
+              if($null -ne $candidate -and $j.x -eq $candidate.x -and $j.y -eq $candidate.y){$after=$now;break}
+              $candidate=$j
+            }
+          }else{$after=Wait-CalibrationSettled $baseline $probe $patch $clock}
+          $acceptedAtMs=$clock.Elapsed.TotalMilliseconds;$auditMs=0
+          if($after.ok){
+            $audit=[Diagnostics.Stopwatch]::StartNew();Start-Sleep -Milliseconds 200
+            $later=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) @($probe)
+            if(-not $later.ok -or $later.new.Count -ne 1 -or $later.new[0].x -ne $after.new[0].x -or $later.new[0].y -ne $after.new[0].y){
+              $after=@{ok=$false;reason='delayed-readback-mismatch';acceptedSnapshot=$after.current;laterSnapshot=$later.current}
+            }
+            $audit.Stop();$auditMs=$audit.Elapsed.TotalMilliseconds
+          }
+          $result=@{ok=$after.ok;guard=$after;elapsedMs=$clock.Elapsed.TotalMilliseconds;acceptedAtMs=$acceptedAtMs;auditMs=$auditMs;usedFast=$usedFast;fastReadCount=$readCount}
         }
         if($null -ne $result.guard.new){$wire=@{};foreach($key in $result.guard.new.Keys){$wire[[string]$key]=$result.guard.new[$key]};$result.guard.new=$wire}
       }
@@ -47,19 +74,35 @@ async function main(){
   fs.writeFileSync(dest,'owned adaptive calibration fixture',{flag:'wx'});created=true;
   let appeared;for(let n=0;n<60;n++){appeared=await stable('arrival');if(appeared.icons.some(i=>i.path&&path.resolve(i.path).toLowerCase()===dest.toLowerCase()))break;await sleep(100);}assert.equal(appeared.icons.length,original.icons.length+1);
   const metadata=await req('readHiddenFile',{path:dest});assert(metadata.ok);const hash=crypto.createHash('sha256').update(fs.readFileSync(dest)).digest('hex');
-  for(const strategy of ['dense','adaptive','adaptive','dense']){
-   const started=performance.now();let grid,samples=[];
+  for(const strategy of ['dense','adaptive','adaptive-fast','adaptive-fast','adaptive','dense']){
+   const started=performance.now();let grid,samples=[];let lastProbe=null;
    if(strategy==='dense'){
     const result=await req('calibrateDesktopGrid',{snapshot:unknown,probe:{path:dest,name},plan});note('dense-result',result);assert(result.ok);const inferred=inferCalibration({plan,samples:result.samples});assert(inferred.ok);grid=inferred.grid;samples=result.samples;guard(result.snapshot);
    }else{
+    const initialState=await stable('adaptive-before');lastProbe=initialState.icons.find(i=>i.path&&path.resolve(i.path).toLowerCase()===dest.toLowerCase());assert(lastProbe);
     const center={x:Math.floor((plan.patch.left+plan.patch.right)/2),y:Math.floor((plan.patch.top+plan.patch.bottom)/2)};const axes={};
     for(const axis of ['x','y']){
      const max=maxSpacing[axis];let candidates=[];for(let pitch=8;pitch<=max;pitch++)for(let origin=0;origin<pitch;origin++)candidates.push({s:pitch,o:origin});
      let fixedOther=null;
-     async function measure(value,pass){const q={...center,[axis]:value};assert(q.x>=plan.patch.left+maxSpacing.x&&q.x<=plan.patch.right-maxSpacing.x&&q.y>=plan.patch.top+maxSpacing.y&&q.y<=plan.patch.bottom-maxSpacing.y,'outside reserved request margin');note('adaptive-request',{axis,pass,request:q});const result=await req('ciCalibrationSample',{snapshot:unknown,probe:{path:dest,name},plan,point:q});note('adaptive-sample',{axis,pass,request:q,result});assert(result.ok,JSON.stringify(result));guard(result.guard.current);const observed=result.guard.new['0'];assert(observed);const other=axis==='x'?'y':'x';if(fixedOther===null)fixedOther=observed[other];else assert.equal(observed[other],fixedOther,'cross-axis movement');samples.push({axis,pass,request:q,observed:{x:observed.x,y:observed.y},elapsedMs:result.elapsedMs});return observed[axis];}
+     async function measure(value,pass,noDetour=false){
+      const q={...center,[axis]:value};assert(q.x>=plan.patch.left+maxSpacing.x&&q.x<=plan.patch.right-maxSpacing.x&&q.y>=plan.patch.top+maxSpacing.y&&q.y<=plan.patch.bottom-maxSpacing.y,'outside reserved request margin');
+      let predictions=[...new Set(candidates.map(g=>snap(value,g)))];
+      if(strategy==='adaptive-fast'&&!noDetour&&candidates.length===1&&predictions.includes(lastProbe[axis])){
+       const g=candidates[0],lo=plan.patch[axis==='x'?'left':'top']+maxSpacing[axis],hi=plan.patch[axis==='x'?'right':'bottom']-maxSpacing[axis];
+       const detour=[lastProbe[axis]-g.s,lastProbe[axis]+g.s].find(v=>v>=lo&&v<=hi&&snap(v,g)!==lastProbe[axis]);
+       if(detour!==undefined)await measure(detour,'detour',true);
+      }
+      predictions=[...new Set(candidates.map(g=>snap(value,g)))];const fast=strategy==='adaptive-fast'&&predictions.every(v=>v!==lastProbe[axis]);
+      note('adaptive-request',{axis,pass,request:q,fast,previous:lastProbe,predictions});
+      const result=await req('ciCalibrationSample',{snapshot:unknown,probe:{path:dest,name},plan,point:q,axis,fast,previous:{x:lastProbe.x,y:lastProbe.y},predictions});
+      note('adaptive-sample',{axis,pass,request:q,result});assert(result.ok,JSON.stringify(result));guard(result.guard.current);const observed=result.guard.new['0'];assert(observed);
+      const other=axis==='x'?'y':'x';if(fixedOther===null)fixedOther=observed[other];else assert.equal(observed[other],fixedOther,'cross-axis movement');lastProbe=observed;
+      samples.push({axis,pass,request:q,observed:{x:observed.x,y:observed.y},elapsedMs:result.elapsedMs,acceptedAtMs:result.acceptedAtMs,auditMs:result.auditMs,usedFast:result.usedFast});return observed[axis];
+     }
      for(let n=0;n<12&&candidates.length>1;n++){
       let best=center[axis],score=Infinity;const choices=n===0?[best]:Array.from({length:25},(_,i)=>center[axis]+Math.round((i-12)*max/8));
-      for(const q of choices){const counts=new Map();for(const g of candidates){const v=snap(q,g);counts.set(v,(counts.get(v)||0)+1);}const worst=Math.max(...counts.values());if(worst<score){score=worst;best=q;}}
+      const forced=strategy==='adaptive-fast'?choices.filter(q=>candidates.every(g=>snap(q,g)!==lastProbe[axis])):[];
+      for(const q of forced.length?forced:choices){const counts=new Map();for(const g of candidates){const v=snap(q,g);counts.set(v,(counts.get(v)||0)+1);}const worst=Math.max(...counts.values());if(worst<score){score=worst;best=q;}}
       const observed=await measure(best,'candidate');candidates=candidates.filter(g=>snap(best,g)===observed);assert(candidates.length,'non-model snap; reject rather than guessing');
      }
      assert.equal(candidates.length,1,'ambiguous grid');const g=candidates[0],cell=snap(center[axis],g),delta=Math.max(1,Math.floor(g.s/4)),near=cell>=center[axis]?cell-g.s:cell+g.s,far=cell>=center[axis]?cell+g.s:cell-g.s;
@@ -71,7 +114,7 @@ async function main(){
     grid={sx:axes.x.s,sy:axes.y.s,gx:axes.x.o,gy:axes.y.o};
    }
    assert.deepEqual(grid,known,'algorithm differs from native known grid');const after=await stable('after-run');assert.equal(after.icons.length,original.icons.length+1);const current=await req('readHiddenFile',{path:dest});for(const key of ['identity','hidden','attributes','size','mtime'])assert.equal(current[key],metadata[key]);assert.equal(crypto.createHash('sha256').update(fs.readFileSync(dest)).digest('hex'),hash);
-   const run={strategy,elapsedMs:performance.now()-started,sampleCount:samples.length,grid,samples};report.runs.push(run);note('run',run);
+   const run={strategy,elapsedMs:performance.now()-started,sampleCount:samples.length,detourCount:samples.filter(s=>s.pass==='detour').length,fastCount:samples.filter(s=>s.usedFast).length,auditTotalMs:samples.reduce((n,s)=>n+(s.auditMs||0),0),grid,samples};report.runs.push(run);note('run',run);
   }
   report.passed=true;
  }finally{
