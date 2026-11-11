@@ -4,9 +4,18 @@ on:
   push:
     paths:
       - 'tools/packaged-preview-*'
+      - 'tools/packaged-mixed-preview-*'
+      - 'main.js'
+      - 'lib/desktop-*'
+      - 'scripts/*lease*'
+      - 'scripts/shell-helper.ps1'
       - '.github/workflows/packaged-preview.yml'
 jobs:
   native-packaged-preview:
+    strategy:
+      fail-fast: false
+      matrix:
+        prefix: [packaged-preview, packaged-mixed-preview]
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -15,16 +24,16 @@ jobs:
         with:
           node-version: '20'
       - run: npm ci
-      - run: node tools/packaged-preview-selftest.js
-      - run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/packaged-preview-records-selftest.ps1
+      - run: node tools/${{ matrix.prefix }}-selftest.js
+      - run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/${{ matrix.prefix }}-records-selftest.ps1
       - run: npx electron-builder --win --dir --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       - name: Real packaged native preview IPC (no settings setup)
-        run: node tools/packaged-preview-ci.js
+        run: node tools/${{ matrix.prefix }}-ci.js
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: packaged-preview-evidence
-          path: packaged-preview-evidence/
+          name: ${{ matrix.prefix }}-evidence
+          path: ${{ matrix.prefix }}-evidence/
           if-no-files-found: error

@@ -15,10 +15,10 @@ function buildFormalMixedCopy(destination){
        $result=@{ok=$true;hidden=$n.hidden;identity=$n.identity}
       }
 `+anchor);fs.writeFileSync(helper,s);
- let host=fs.readFileSync(path.join(root,'tools/desktop-lease-protocol-host-ci.js'),'utf8').replace('hidden:true})),snapshot:spec.baseline','hidden:true,mode:i.mode})),snapshot:spec.baseline');if(!host.includes('mode:i.mode'))throw Error('host fixture mode');fs.writeFileSync(path.join(destination,'tools/desktop-lease-protocol-host-ci.js'),host);
+ let host=fs.readFileSync(path.join(root,'tools/desktop-lease-protocol-host-ci.js'),'utf8').replace('hidden:true})),snapshot:spec.baseline','hidden:true,mode:i.mode})),snapshot:spec.baseline');if(!host.includes('mode:i.mode'))throw Error('host fixture mode');host=host.replaceAll('createDesktopLeaseClient({','createDesktopLeaseClient({allowMixed:true,').replaceAll('runLease({','runLease({allowMixed:true,');fs.writeFileSync(path.join(destination,'tools/desktop-lease-protocol-host-ci.js'),host);
  generateMixedDriver(destination,path.join(root,'tools/resident-lease-ci.js'));
  const driver=path.join(destination,'tools/mixed-driver-ci.js');s=fs.readFileSync(driver,'utf8').replaceAll('mixed-hidden-resident-prototype','mixed-hidden-resident').replaceAll('mixed-lease-native-ci.ps1','mixed-lease.ps1').replaceAll('mixed-rename-notify-ci.cs','mixed-rename-notify.cs');
- if(!s.includes(",'show-hidden-mid-stage'"))throw Error('case list');s=s.replace(",'show-hidden-mid-stage'",'');s=s.replace("const {runOwnedResidents}","process.env.OKIBA_MIXED_LEASE='1';\nconst {runOwnedResidents}");fs.writeFileSync(driver,s);
+ if(!s.includes(",'show-hidden-mid-stage'"))throw Error('case list');s=s.replace(",'show-hidden-mid-stage'",'');s=s.replaceAll('createDesktopLeaseClient({','createDesktopLeaseClient({allowMixed:true,').replaceAll('runLease({','runLease({allowMixed:true,');fs.writeFileSync(driver,s);
  const sameFiles=['lib/desktop-snap-lease-controller.js','lib/desktop-lease-watchdog.js','scripts/snap-lease.ps1','scripts/mixed-lease.ps1','scripts/resident-lease.ps1','scripts/mixed-rename-notify.cs'];
  const hashes={};for(const file of sameFiles){const a=fs.readFileSync(path.join(root,file)),b=fs.readFileSync(path.join(destination,file));if(!a.equals(b))throw Error('runtime was patched '+file);hashes[file]=crypto.createHash('sha256').update(a).digest('hex');}
  fs.writeFileSync(path.join(destination,'copy-manifest.json'),JSON.stringify({formalRuntime:true,mainEnabled:false,helperFixtureCommandOnly:true,hashes},null,2));return destination;

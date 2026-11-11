@@ -32,7 +32,7 @@ function Mixed-NotifyRestored($record,[string]$beforeState){
 function Mixed-Is($r){return ($r.kind -ceq 'mixed-hidden-resident')}
 function Mixed-ProjectionSame($a,$b){return ($a.identity -ceq $b.identity -and $a.size -ceq $b.size -and $a.mtime -ceq $b.mtime -and [uint32]$a.attributes -eq [uint32]$b.attributes)}
 function Mixed-Validate($r,$current){
- Mixed-Enabled
+ Mixed-Enabled;Resident-Native
  if($r.version -ne 3 -or -not (Mixed-Is $r) -or $r.token -notmatch '^[A-Za-z0-9_-]{16,128}$' -or -not $r.snapshot.ok -or $r.snapshot.identityVersion -ne 1){throw 'mixed-invalid-recovery'}
  $count=@($r.records).Count
  if(@($r.linkRecords).Count -lt 1 -or @($r.residentRecords).Count -lt 1 -or $count -gt 1000 -or $count -ne (@($r.linkRecords).Count+@($r.residentRecords).Count) -or @($r.targets).Count -ne $count){throw 'mixed-invalid-count'}
@@ -44,6 +44,8 @@ function Mixed-Validate($r,$current){
   if((Lease-Path ([IO.Path]::GetDirectoryName($p))) -ine $desktop -or ($link.attributes -band 2) -eq 0 -or $allPaths.ContainsKey($p) -or [string]::IsNullOrEmpty($link.identity) -or $ids.ContainsKey($link.identity)){throw 'mixed-link-invalid'}
   $allPaths[$p]=$true;$destinations[$p]=$link;$ids[$link.identity]=$true
   $null=Lease-CheckRecord $link
+  $nativeLink=[OkibaResidentFiles]::Read($p)
+  if($nativeLink.identity -cne $link.identity -or $nativeLink.size -cne $link.size -or $nativeLink.mtime -cne $link.mtime -or ([uint32]$nativeLink.attributes -bor 2) -ne ([uint32]$link.attributes -bor 2) -or -not $nativeLink.regularFile -or $nativeLink.reparse -or $nativeLink.linkCount -ne 1){throw 'mixed-link-native-changed'}
  }
  foreach($resident in $r.residentRecords){
   $source=Lease-Path $resident.source;$dest=Lease-Path $resident.destination
@@ -78,7 +80,7 @@ function Mixed-Prepare($req){
  $links=@();$residents=@();$records=@()
  foreach($i in $q.items){$source=Lease-Path $i.path;$dest=Lease-Path $i.destination
   if(($source -ieq $dest -and $i.mode -cne 'hidden-link') -or ($source -ine $dest -and $i.mode -cne 'resident-file')){throw 'mixed-mode-path-mismatch'}
-  if($source -ieq $dest){$record=Lease-ReadRecord $source;if($i.hidden -ne $true -or -not $record.hidden -or $record.identity -cne $i.fileIdentity){throw 'mixed-link-not-hidden-or-replaced'};$links+=,$record;$records+=,$record}
+  if($source -ieq $dest){$record=[OkibaResidentFiles]::Read($source);if(-not $record.regularFile -or $record.reparse -or $record.linkCount -ne 1 -or [uint32]$record.attributes -ne 34){throw 'mixed-link-native-unsupported'};if($i.hidden -ne $true -or -not $record.hidden -or $record.identity -cne $i.fileIdentity){throw 'mixed-link-not-hidden-or-replaced'};$links+=,$record;$records+=,$record}
   else{
    $n=[OkibaResidentFiles]::Read($source);if($n.identity -cne $i.fileIdentity -or [uint32]$n.attributes -notin @(32,34) -or $null -ne [OkibaResidentFiles]::ReadIfMissing($dest)){throw 'mixed-resident-unsupported-or-occupied'}
    $sp=[OkibaResidentFiles]::Parent([IO.Path]::GetDirectoryName($source));$dp=[OkibaResidentFiles]::Parent([IO.Path]::GetDirectoryName($dest))

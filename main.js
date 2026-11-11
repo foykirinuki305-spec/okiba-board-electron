@@ -664,7 +664,7 @@ function registerIpc() {
     const hosted=process.env.GITHUB_ACTIONS==='true'&&process.env.RUNNER_OS==='Windows'&&process.env.RUNNER_ENVIRONMENT==='github-hosted';
     if(!leaseOptIn()||(!leasePreview()&&!fake&&!hosted))throw Error('lease-test-environment-required');
     const helper=fake?{command:process.execPath,args:[path.join(__dirname,'tools','fake-helper.js')],env:{...process.env,ELECTRON_RUN_AS_NODE:'1'}}:{command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',bundledScriptPath('shell-helper.ps1')],...(leasePreview()?{env:desktopPreviewPolicy.nativeEnv(process.env)}:{})};
-    desktopLeaseClient=require('./lib/desktop-lease-client').createDesktopLeaseClient({journalDir:path.join(app.getPath('userData'),'desktop-lease-journals'),helper,owner:{pid:process.pid}});
+    desktopLeaseClient=require('./lib/desktop-lease-client').createDesktopLeaseClient({journalDir:path.join(app.getPath('userData'),'desktop-lease-journals'),helper,allowMixed:leasePreview(),owner:{pid:process.pid}});
     app.once('will-quit',()=>desktopLeaseClient?.disconnect());
     return desktopLeaseClient;
   }
@@ -876,11 +876,11 @@ function registerIpc() {
         const first=plan.targets?.[0];
         const targetAreaIndex=(snap.areas||[]).findIndex(a=>first&&first.x>=a.left&&first.x<a.right&&first.y>=a.top&&first.y<a.bottom);
         const residentCandidate=(leasePreview()||process.env.OKIBA_TEST_RESIDENT_LEASE==='1')&&!calibrationPlan&&planned.every(i=>!i.isLink&&!i.crossVolume&&!ln.samePath(i.path,i.dest));
-        const candidate={kind:residentCandidate?'resident-archive-samevolume':'samepath-hidden',desktop:target.path,items:planned.map(i=>({path:i.path,destination:i.dest,hidden:i.hidden,fileIdentity:String(i.identity.dev)+':'+String(i.identity.ino)})),snapshot:snap,targetAreaIndex,metadataPaths:[meta],targets:(plan.targets||[]).map(t=>({...t,path:planned.find(i=>i.path===t.path)?.dest})),buffer:plan.buffer};
-        const eligible=!calibrationPlan&&(residentCandidate||planned.every(i=>i.isLink&&i.hidden&&ln.samePath(i.path,i.dest)))&&leaseController.validateScope(candidate);
+        const mixedCandidate=leasePreview()&&!calibrationPlan&&planned.some(i=>i.isLink)&&planned.some(i=>!i.isLink)&&planned.every(i=>i.crossVolume===false&&(i.isLink?(i.hidden&&ln.samePath(i.path,i.dest)):!ln.samePath(i.path,i.dest)));
+        const candidate={kind:mixedCandidate?'mixed-hidden-resident':residentCandidate?'resident-archive-samevolume':'samepath-hidden',desktop:target.path,items:planned.map(i=>({path:i.path,destination:i.dest,hidden:i.hidden,...(mixedCandidate?{mode:i.isLink?'hidden-link':'resident-file'}:{}),fileIdentity:String(i.identity.dev)+':'+String(i.identity.ino)})),snapshot:snap,targetAreaIndex,metadataPaths:[meta],targets:(plan.targets||[]).map(t=>({...t,path:planned.find(i=>i.path===t.path)?.dest})),buffer:plan.buffer};
+        const eligible=!calibrationPlan&&(mixedCandidate||residentCandidate||planned.every(i=>i.isLink&&i.hidden&&ln.samePath(i.path,i.dest)))&&leaseController.validateScope(candidate,{allowMixed:leasePreview()});
         if(eligible){
-          const after=residentCandidate?residentSelection.prepareResidentMetadata(before,planned.map(i=>i.path),folder):prepareLeaseMetadata(before,planned.map(i=>i.path),ln.samePath);
-          const receipts=[{path:meta,beforeHash:leaseReceipt.hash(before),afterHash:leaseReceipt.hash(after)}];
+          let after=mixedCandidate?null:residentCandidate?residentSelection.prepareResidentMetadata(before,planned.map(i=>i.path),folder):prepareLeaseMetadata(before,planned.map(i=>i.path),ln.samePath);
           const identity=()=>{const st=fs.statSync(meta);return String(st.dev)+':'+String(st.ino);};
           const metadataIdentity=identity();
           const checkSources=()=>{for(const i of planned){const st=fs.statSync(i.path);if(st.dev!==i.identity.dev||st.ino!==i.identity.ino)throw Error('source-changed');}};
@@ -891,6 +891,14 @@ function registerIpc() {
             // Read-only classification refusal is explicit; never silently use a riskier route.
             if(classified.kind!=='resident-archive-samevolume')return desktopBlocked(classified.reason||'resident-native-scope-unverified');
           }
+          if(mixedCandidate){
+            const nativeItems=planned.map((i,n)=>({...i,fileIdentity:scope.items[n]?.fileIdentity,isFile:scope.items[n]?.nativeFile?.regularFile,reparse:scope.items[n]?.nativeFile?.reparse,linkCount:scope.items[n]?.nativeFile?.linkCount,attributes:scope.items[n]?.nativeFile?.attributes}));
+            const mixedOptions={enabled:true,knownGrid:true,desktop:target.path};
+            const classified=residentSelection.classifyMixedSelection(nativeItems,mixedOptions);
+            if(classified.kind!=='mixed-hidden-resident')return desktopBlocked(classified.reason||'mixed-native-scope-unverified');
+            after=residentSelection.prepareMixedMetadata(before,nativeItems,folder,mixedOptions);
+          }
+          const receipts=[{path:meta,beforeHash:leaseReceipt.hash(before),afterHash:leaseReceipt.hash(after)}];
           // Ordinary executeDesktop rollback is deliberately NOT used after a lease commit gate.
           const commitFn=async()=>commitLeaseMetadata({before,after,expectedIdentity:metadataIdentity,io:{
             read:readMeta,identity,
@@ -899,7 +907,7 @@ function registerIpc() {
             removeTemporary:tmp=>{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}
           }});
           const leaseAdapter=client.adapter(commitFn);
-          leaseTransaction=await leaseController.runLease({scope,receipts,adapter:leaseAdapter});
+          leaseTransaction=await leaseController.runLease({scope,receipts,adapter:leaseAdapter,allowMixed:leasePreview()});
           diagnostic('lease-transaction',{result:leaseTransaction});
           if(leaseTransaction.pendingVerification||(!leaseTransaction.ok&&leaseTransaction.resolution?.state!=='aborted')){
             beginLeaseVerification({result:leaseTransaction,adapter:leaseAdapter,diagnostic,onCommitted:()=>recordHistory(payload.boardName,{folder,positions:data.positions,links:data.links},planned.map(i=>({kind:i.isLink?'linked':'resident',destPath:i.dest,fileName:i.name,col:i.cell[0],row:i.cell[1]})),payload.groupId)});
