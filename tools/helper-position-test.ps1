@@ -253,6 +253,15 @@ public static class OkibaTestWin {
   # Remove it and wait for Explorer to acknowledge removal, otherwise this
   # test itself creates a collision unrelated to group placement.
   Remove-Item -LiteralPath $dummy -Force
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class OkibaTestNotify {
+  [DllImport("shell32.dll", CharSet=CharSet.Unicode)]
+  public static extern void SHChangeNotify(uint evt, uint flags, string item, IntPtr other);
+}
+'@
+  [OkibaTestNotify]::SHChangeNotify(0x00000004, (0x0005 -bor 0x1000), $dummy, [IntPtr]::Zero)
   $gone = $false
   for ($attempt = 0; $attempt -lt 20; $attempt++) {
     $r = [OkibaDesk+Reader]::new($metricLv)
