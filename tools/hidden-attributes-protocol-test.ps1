@@ -1,9 +1,10 @@
-$ErrorActionPreference='Stop'
+﻿$ErrorActionPreference='Stop'
 $root=Join-Path ([IO.Path]::GetTempPath()) ('OkibaHiddenProtocol-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root|Out-Null
 $helper=(Resolve-Path (Join-Path $PSScriptRoot '../scripts/shell-helper.ps1')).Path
 $psi=New-Object Diagnostics.ProcessStartInfo
 $psi.FileName='powershell.exe';$psi.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$helper+'"'
+$psi.EnvironmentVariables['OKIBA_SNAP_LEASE']='1'
 $psi.UseShellExecute=$false;$psi.CreateNoWindow=$true;$psi.RedirectStandardInput=$true;$psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true
 $process=New-Object Diagnostics.Process;$process.StartInfo=$psi
 $n=0;$id=0
@@ -24,6 +25,8 @@ function Request($cmd,$argsObject){
 }
 try {
  [void]$process.Start();$ready=Read-Line;Assert $ready.ready 'helper ready'
+ $owner=Request 'leaseOwnerPin' @{pid=$PID;started=([Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().Ticks.ToString())};Assert ($owner.ok -and $owner.state -eq 'alive') 'dedicated lease owner pinned read-only'
+ $owner=Request 'leaseOwnerState' @{};Assert ($owner.ok -and $owner.state -eq 'alive') 'dedicated owner read-only state'
  $jp=([string][char]0x65e5)+[char]0x672c+[char]0x8a9e+' space.txt'
  foreach($name in @('normal.txt',$jp,'readonly.txt','folder')){
   $p=Join-Path $root $name
@@ -36,6 +39,7 @@ try {
   Assert ([IO.File]::GetLastWriteTimeUtc($p) -eq $mtime) 'mtime unchanged'
   if($name -ne 'folder'){Assert ([IO.File]::ReadAllText($p) -ceq 'kept bytes') 'contents unchanged'}
  }
+ $records=Request 'leaseReadFiles' @{paths=@((Join-Path $root 'normal.txt'),(Join-Path $root $jp))};Assert ($records.ok -and $records.records.Count -eq 2 -and $records.records[0].identity -and $records.records[0].size -and $records.records[0].mtime) 'dedicated lease native metadata read'
  $p=Join-Path $root 'normal.txt';$a=Request 'readHiddenFile' @{path=$p}
  [IO.File]::Move($p,(Join-Path $root 'moved-original.txt'));[IO.File]::WriteAllText($p,'replacement')
  $r=Request 'setHiddenFile' @{path=$p;expectedIdentity=$a.identity;expectedHidden=$false;hidden=$true}

@@ -1,0 +1,41 @@
+name: desktop-lease-protocol
+on:
+  push:
+    paths:
+      - 'tools/snap-lease-*'
+      - 'tools/desktop-lease-protocol-*'
+      - 'lib/desktop-lease-*'
+      - 'scripts/snap-lease.ps1'
+      - 'scripts/shell-helper.ps1'
+      - 'lib/safe-desktop.js'
+      - '.github/workflows/desktop-lease-protocol.yml'
+  workflow_dispatch:
+jobs:
+  node-watchdog:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Canonical lease geometry pure checks
+        shell: pwsh
+        run: pwsh -NoProfile -File ./tools/snap-lease-geometry-selftest.ps1
+      - name: Atomic journal replacement pure checks
+        shell: pwsh
+        run: powershell -NoProfile -File ./tools/snap-lease-json-selftest.ps1
+      - name: Isolated commit permission and receipts, never production
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -File ./tools/desktop-lease-protocol-ci.ps1 2>&1 | Tee-Object -FilePath desktop-lease-protocol-ci.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain journal and fault evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-lease-protocol-evidence
+          path: |
+            desktop-lease-protocol-ci.json
+            desktop-lease-protocol-ci.log
+            desktop-lease-protocol-journals/**

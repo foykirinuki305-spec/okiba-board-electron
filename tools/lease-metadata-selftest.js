@@ -1,0 +1,11 @@
+'use strict';
+const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync(path.join(__dirname,'../main.js'),'utf8').split('// BEGIN tested-lease-metadata')[1].split('// END tested-lease-metadata')[0];
+const {prepareLeaseMetadata,commitLeaseMetadata}=vm.runInNewContext(source+';({prepareLeaseMetadata,commitLeaseMetadata})');
+const same=(a,b)=>a.toLowerCase()===b.toLowerCase();let n=0;const check=x=>{assert.ok(x);n++;};
+const original={version:6,positions:{'素材.mp4':[8,19],other:[2,3]},links:[{path:'C:\\Desktop\\a.lnk',col:5,row:7,wasHidden:false},{path:'D:\\b.mp4',col:1,row:8,extra:42}],notes:[{text:'retain',col:3,row:99}],size_percent:150,theme:'dark',future:{nested:[1,'x']}};
+const before=JSON.stringify(original),after=prepareLeaseMetadata(before,['C:\\Desktop\\a.lnk'],same),json=JSON.parse(after);
+for(const k of Object.keys(original).filter(k=>k!=='links'))check(JSON.stringify(json[k])===JSON.stringify(original[k]));check(JSON.stringify(json.links)===JSON.stringify([original.links[1]]));check(before===JSON.stringify(original));
+for(const [b,sel] of [[null,['a']],['{}',['a']],[before,['missing']],[before,['C:\\Desktop\\a.lnk','c:\\desktop\\A.LNK']]]){assert.throws(()=>prepareLeaseMetadata(b,sel,same));n++;}
+(async()=>{for(const mode of ['normal','changed-before','changed-during-temp','identity-replaced','replace-throws']){let raw=mode==='changed-before'?'user edit':before,id='original',replaced=0,removed=0;const io={read:()=>raw,identity:()=>id,writeTemporary:async()=>{if(mode==='changed-during-temp')raw='user newer';if(mode==='identity-replaced')id='replacement';return 'own-temp';},replace:async()=>{if(mode==='replace-throws')throw Error('denied');replaced++;raw=after;},removeTemporary:async p=>{check(p==='own-temp');removed++;}};let failed=false;try{await commitLeaseMetadata({before,after,expectedIdentity:'original',io});}catch(e){failed=true;}check(failed===(mode!=='normal'));check(replaced===(mode==='normal'?1:0));if(mode==='changed-during-temp')check(raw==='user newer');if(mode==='identity-replaced')check(id==='replacement');if(mode==='normal')check(raw===after);}
+console.log('lease metadata '+n+' checks PASS');})().catch(e=>{console.error(e);process.exitCode=1;});

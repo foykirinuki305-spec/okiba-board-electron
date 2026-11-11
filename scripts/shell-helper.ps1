@@ -48,6 +48,37 @@ try {
 # ---- Resolve interop (same as resolve-drop.ps1) -------------------
 Add-Type -TypeDefinition @'
 using System;
+using System.Runtime.InteropServices;
+public static class OkibaLeaseOwner {
+ public sealed class Status { public bool ok; public string state; public int pid; public string started; public string error; }
+ [StructLayout(LayoutKind.Sequential)] struct FT {public uint low,high;}
+ [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,int pid);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(IntPtr p,out FT creation,out FT exit,out FT kernel,out FT user);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern uint WaitForSingleObject(IntPtr h,uint ms);
+ [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+ static IntPtr handle=IntPtr.Zero; static int ownerPid; static string birth; static string terminal;
+ static Status Result(string state,string error=null){return new Status{ok=state!="unknown",state=state,pid=ownerPid,started=birth,error=error};}
+ public static void Release(){if(handle!=IntPtr.Zero)CloseHandle(handle);handle=IntPtr.Zero;terminal=null;ownerPid=0;birth=null;}
+ public static Status Pin(int pid,string expectedStarted){
+  if(pid<=0)return new Status{ok=false,state="unknown",error="invalid-pid"};
+  Release();ownerPid=pid;birth=expectedStarted;
+  IntPtr h=OpenProcess(0x00101000,false,pid);
+  if(h==IntPtr.Zero){int e=Marshal.GetLastWin32Error();if(e==87&&!String.IsNullOrEmpty(expectedStarted)){terminal="exited";return Result("exited");}return Result("unknown","OpenProcess:"+e);}
+  FT c,e1,k,u;if(!GetProcessTimes(h,out c,out e1,out k,out u)){int e=Marshal.GetLastWin32Error();CloseHandle(h);return Result("unknown","GetProcessTimes:"+e);}
+  long fileTime=((long)c.high<<32)|c.low;string actual=DateTime.FromFileTimeUtc(fileTime).Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+  if(!String.IsNullOrEmpty(expectedStarted)&&actual!=expectedStarted){CloseHandle(h);terminal="exited";return Result("exited");}
+  birth=actual;handle=h;return Read();
+ }
+ public static Status Read(){
+  if(terminal=="exited")return Result("exited");
+  if(handle==IntPtr.Zero)return Result("unknown","owner-not-pinned");
+  uint w=WaitForSingleObject(handle,0);if(w==0){terminal="exited";return Result("exited");}if(w==258)return Result("alive");return Result("unknown","WaitForSingleObject:"+Marshal.GetLastWin32Error());
+ }
+}
+'@
+
+Add-Type -TypeDefinition @'
+using System;
 using System.IO;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -60,7 +91,7 @@ public static class OkibaFileAttributes {
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFile(string path,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle h,out Info info);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetFileInformationByHandle(SafeFileHandle h,int type,ref Basic info,uint size);
- public sealed class Snapshot {public string identity;public bool hidden;public uint attributes;public bool directory;}
+ public sealed class Snapshot {public string identity,size,mtime;public bool hidden;public uint attributes;public bool directory;}
  static string CheckPath(string path) {
   path=Path.GetFullPath(path);
   if(path.StartsWith(@"\\",StringComparison.Ordinal))throw new InvalidOperationException("unsupported-network-path");
@@ -83,14 +114,16 @@ public static class OkibaFileAttributes {
  static Snapshot Capture(SafeFileHandle h){
   Info info;if(!GetFileInformationByHandle(h,out info))throw new Win32Exception(Marshal.GetLastWin32Error());
   if((info.attributes&0x400)!=0)throw new InvalidOperationException("reparse-path");
-  return new Snapshot{identity=info.volume.ToString("X8")+":"+info.indexHigh.ToString("X8")+info.indexLow.ToString("X8"),hidden=(info.attributes&2)!=0,attributes=info.attributes,directory=(info.attributes&16)!=0};
+  return new Snapshot{identity=info.volume.ToString("X8")+":"+info.indexHigh.ToString("X8")+info.indexLow.ToString("X8"),size=(((ulong)info.sizeHigh<<32)|info.sizeLow).ToString(System.Globalization.CultureInfo.InvariantCulture),mtime=(((ulong)info.written.high<<32)|info.written.low).ToString(System.Globalization.CultureInfo.InvariantCulture),hidden=(info.attributes&2)!=0,attributes=info.attributes,directory=(info.attributes&16)!=0};
  }
  public static Snapshot Read(string path){path=CheckPath(path);using(var h=Open(path,false))return Capture(h);}
- public static Snapshot Set(string path,string expectedIdentity,bool expectedHidden,bool hidden){
+ public static Snapshot Set(string path,string expectedIdentity,bool expectedHidden,bool hidden){return SetRecorded(path,expectedIdentity,expectedHidden,hidden,null,null,0);}
+ public static Snapshot SetRecorded(string path,string expectedIdentity,bool expectedHidden,bool hidden,string expectedSize,string expectedMtime,uint expectedOtherAttributes){
   path=CheckPath(path);using(var h=Open(path,true)){
    var before=Capture(h);
    if(String.IsNullOrEmpty(expectedIdentity)||!String.Equals(before.identity,expectedIdentity,StringComparison.Ordinal))throw new InvalidOperationException("file-identity-changed");
    if(before.hidden!=expectedHidden)throw new InvalidOperationException("hidden-state-changed");
+   if(expectedSize!=null&&(before.size!=expectedSize||before.mtime!=expectedMtime||(before.attributes&~2u)!=(expectedOtherAttributes&~2u)))throw new InvalidOperationException("file-metadata-changed");
    uint desired=hidden?(before.attributes|2u):(before.attributes&~2u);
    // NORMAL is valid only by itself; all substantive flags are retained.
    if((desired&~128u)!=0)desired&=~128u;else desired=128u;
@@ -661,6 +694,66 @@ public static class OkibaFolderView {
     for(int i=0;i<count;i++){Marshal.WriteIntPtr(array,i*IntPtr.Size,chosen[i]);Marshal.WriteInt32(points,i*8,newX[i]);Marshal.WriteInt32(points,i*8+4,newY[i]);}
     Marshal.ThrowExceptionForHR(s.Folder.GetCurrentFolderFlags(out flags));
     if(s.Folder.GetAutoArrange()!=1||(flags&1)!=0||(flags&4)==0)throw new InvalidOperationException("unsafe-shell-state");
+    // Not assumed atomic. Caller keeps metadata/originals and verifies every old icon.
+    Marshal.ThrowExceptionForHR(s.Folder.SelectAndPositionItems((uint)count,array,points,0x80));
+   }finally{if(point!=IntPtr.Zero)Marshal.FreeCoTaskMem(point);if(points!=IntPtr.Zero)Marshal.FreeCoTaskMem(points);if(array!=IntPtr.Zero)Marshal.FreeCoTaskMem(array);if(children!=null)foreach(var child in children)Marshal.FreeCoTaskMem(child);}
+  }
+ }
+ [ComImport,Guid("00000114-0000-0000-C000-000000000046"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+ interface IOleWindowLease {[PreserveSig]int GetWindow(out IntPtr hwnd);[PreserveSig]int ContextSensitiveHelp(bool enter);}
+ [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);
+ [DllImport("user32.dll")] static extern bool IsChild(IntPtr parent,IntPtr child);
+ static void AssertLeaseSession(Session s,long expectedLv,int expectedPid,string expectedStarted){
+  IntPtr hwnd;Marshal.ThrowExceptionForHR(((IOleWindowLease)s.Folder).GetWindow(out hwnd));
+  uint pid;GetWindowThreadProcessId(hwnd,out pid);
+  if(pid!=(uint)expectedPid||(hwnd.ToInt64()!=expectedLv&&!IsChild(hwnd,new IntPtr(expectedLv))))throw new InvalidOperationException("lease-view-changed");
+  using(var p=System.Diagnostics.Process.GetProcessById(expectedPid)){if(p.StartTime.ToUniversalTime().Ticks.ToString()!=expectedStarted)throw new InvalidOperationException("lease-explorer-changed");}
+ }
+ public static void SetLeaseSnap(uint expectedFlags,bool enabled,long expectedLv,int expectedPid,string expectedStarted,string[] identities,int[] xs,int[] ys){
+  if(identities==null||xs==null||ys==null||identities.Length!=xs.Length||xs.Length!=ys.Length)throw new ArgumentException("lease-invalid-guard");
+  using(var s=new Session()){
+   AssertLeaseSession(s,expectedLv,expectedPid,expectedStarted);
+   uint flags;Marshal.ThrowExceptionForHR(s.Folder.GetCurrentFolderFlags(out flags));
+   if(flags!=expectedFlags||s.Folder.GetAutoArrange()!=1||(flags&1)!=0)throw new InvalidOperationException("lease-flags-changed");
+   IntPtr[] children=null;IntPtr point=IntPtr.Zero;
+   try{
+    children=EnumerateRead(s.Folder);if(children.Length!=identities.Length)throw new InvalidOperationException("lease-items-changed");
+    var lookup=new System.Collections.Generic.Dictionary<string,int>(StringComparer.Ordinal);
+    for(int i=0;i<identities.Length;i++)lookup.Add(identities[i],i);
+    point=Marshal.AllocCoTaskMem(8);
+    foreach(var child in children){int i;if(!lookup.TryGetValue(PidlKey(child),out i))throw new InvalidOperationException("lease-identity-changed");Marshal.ThrowExceptionForHR(s.Folder.GetItemPosition(child,point));if(Marshal.ReadInt32(point,0)!=xs[i]||Marshal.ReadInt32(point,4)!=ys[i])throw new InvalidOperationException("lease-position-changed");}
+    Marshal.ThrowExceptionForHR(s.Folder.GetCurrentFolderFlags(out flags));if(flags!=expectedFlags||s.Folder.GetAutoArrange()!=1)throw new InvalidOperationException("lease-flags-changed");
+    Marshal.ThrowExceptionForHR(s.Folder.SetCurrentFolderFlags(4,enabled?4u:0u));
+    Marshal.ThrowExceptionForHR(s.Folder.GetCurrentFolderFlags(out flags));if(flags!=((expectedFlags&~4u)|(enabled?4u:0u))||s.Folder.GetAutoArrange()!=1)throw new InvalidOperationException("lease-flags-unverified");
+   }finally{if(point!=IntPtr.Zero)Marshal.FreeCoTaskMem(point);if(children!=null)foreach(var child in children)Marshal.FreeCoTaskMem(child);}
+  }
+ }
+ public static void PositionLeaseItems(string[] identities,string[] paths,int[] oldX,int[] oldY,int[] newX,int[] newY,uint expectedFlags,long expectedLv,int expectedPid,string expectedStarted) {
+  int count=identities==null?0:identities.Length;
+  if(count<1||count>10000||paths==null||oldX==null||oldY==null||newX==null||newY==null||paths.Length!=count||oldX.Length!=count||oldY.Length!=count||newX.Length!=count||newY.Length!=count)throw new ArgumentException("invalid-batch");
+  using(var s=new Session()) {
+   AssertLeaseSession(s,expectedLv,expectedPid,expectedStarted);
+   IntPtr[] children=null;IntPtr array=IntPtr.Zero,points=IntPtr.Zero,point=IntPtr.Zero;
+   try {
+    uint flags;Marshal.ThrowExceptionForHR(s.Folder.GetCurrentFolderFlags(out flags));
+    if(s.Folder.GetAutoArrange()!=1||flags!=expectedFlags||(flags&5)!=0)throw new InvalidOperationException("unsafe-shell-state");
+    children=EnumerateRead(s.Folder);
+    var byId=new System.Collections.Generic.Dictionary<string,IntPtr>(StringComparer.Ordinal);
+    foreach(var child in children){string key=PidlKey(child);if(byId.ContainsKey(key))throw new InvalidOperationException("duplicate-shell-identity");byId.Add(key,child);}
+    var chosen=new IntPtr[count];var seen=new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);var cells=new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+    point=Marshal.AllocCoTaskMem(8);
+    for(int i=0;i<count;i++) {
+     if(String.IsNullOrEmpty(identities[i])||!seen.Add(identities[i])||!byId.TryGetValue(identities[i],out chosen[i]))throw new InvalidOperationException("batch-identity-mismatch");
+     string actual=GetItemFilePath(s.Folder,chosen[i]);
+     if(String.IsNullOrEmpty(actual)||!String.Equals(System.IO.Path.GetFullPath(actual),System.IO.Path.GetFullPath(paths[i]),StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("batch-path-mismatch");
+     Marshal.ThrowExceptionForHR(s.Folder.GetItemPosition(chosen[i],point));
+     if(Marshal.ReadInt32(point,0)!=oldX[i]||Marshal.ReadInt32(point,4)!=oldY[i])throw new InvalidOperationException("batch-position-changed");
+     if(!cells.Add(newX[i].ToString(System.Globalization.CultureInfo.InvariantCulture)+","+newY[i].ToString(System.Globalization.CultureInfo.InvariantCulture)))throw new InvalidOperationException("batch-destination-overlap");
+    }
+    array=Marshal.AllocCoTaskMem(IntPtr.Size*count);points=Marshal.AllocCoTaskMem(8*count);
+    for(int i=0;i<count;i++){Marshal.WriteIntPtr(array,i*IntPtr.Size,chosen[i]);Marshal.WriteInt32(points,i*8,newX[i]);Marshal.WriteInt32(points,i*8+4,newY[i]);}
+    Marshal.ThrowExceptionForHR(s.Folder.GetCurrentFolderFlags(out flags));
+    if(s.Folder.GetAutoArrange()!=1||flags!=expectedFlags||(flags&5)!=0)throw new InvalidOperationException("unsafe-shell-state");
     // Not assumed atomic. Caller keeps metadata/originals and verifies every old icon.
     Marshal.ThrowExceptionForHR(s.Folder.SelectAndPositionItems((uint)count,array,points,0x80));
    }finally{if(point!=IntPtr.Zero)Marshal.FreeCoTaskMem(point);if(points!=IntPtr.Zero)Marshal.FreeCoTaskMem(points);if(array!=IntPtr.Zero)Marshal.FreeCoTaskMem(array);if(children!=null)foreach(var child in children)Marshal.FreeCoTaskMem(child);}
@@ -1414,7 +1507,7 @@ function Invoke-HiddenFileRequest($req,[bool]$write) {
   if($write -and ($req.expectedIdentity -isnot [string] -or [string]::IsNullOrWhiteSpace($req.expectedIdentity) -or $req.expectedHidden -isnot [bool] -or $req.hidden -isnot [bool])){return @{ok=$false;reason='invalid-attribute-contract'}}
   try {
     if($write){$value=[OkibaFileAttributes]::Set($req.path,$req.expectedIdentity,$req.expectedHidden,$req.hidden)}else{$value=[OkibaFileAttributes]::Read($req.path)}
-    return @{ok=$true;identity=$value.identity;hidden=$value.hidden;attributes=$value.attributes;directory=$value.directory}
+    return @{ok=$true;identity=$value.identity;hidden=$value.hidden;attributes=$value.attributes;directory=$value.directory;size=$value.size;mtime=$value.mtime}
   }catch{
     $inner=$_.Exception;while($null -ne $inner.InnerException){$inner=$inner.InnerException}
     $code=$null;if($inner -is [ComponentModel.Win32Exception]){$code=$inner.NativeErrorCode}elseif($inner -is [IO.IOException]){$code=$inner.HResult -band 0xffff}
@@ -1425,6 +1518,11 @@ function Invoke-HiddenFileRequest($req,[bool]$write) {
 }
 
 # ---- Main loop ------------------------------------------------------
+if($env:OKIBA_SNAP_LEASE -eq '1'){
+  $leaseScript=Join-Path $PSScriptRoot 'snap-lease.ps1'
+  if(-not (Test-Path -LiteralPath $leaseScript -PathType Leaf)){throw 'lease-script-missing'}
+  . $leaseScript
+}
 [Console]::Out.WriteLine('{"ready":true}')
 [Console]::Out.Flush()
 while ($true) {
@@ -1437,13 +1535,14 @@ while ($true) {
     $req = $line | ConvertFrom-Json
     $id = $req.id
     $result = $null
-    if(@('resolveDrop','cursorState','desktopSnapshot','positionDesktopPlan','calibrateDesktopGrid','importDesktopCalibration','exportDesktopCalibration') -contains $req.cmd){$dpiPrevious=[OkibaWin32]::EnterPhysicalScope()}
+    if($req.cmd -like 'lease*' -or @('resolveDrop','cursorState','desktopSnapshot','positionDesktopPlan','calibrateDesktopGrid','importDesktopCalibration','exportDesktopCalibration') -contains $req.cmd){$dpiPrevious=[OkibaWin32]::EnterPhysicalScope()}
     switch ($req.cmd) {
       'resolveDrop'         { $result = Resolve-DropTarget ([int]$req.x) ([int]$req.y) }
       'positionIcons'       { $result = Position-Icons ([int]$req.x) ([int]$req.y) ([string[]]@($req.names)) }
       'getDesktopPositions' { $result = Get-DesktopPositions ([string[]]@($req.names)) }
       'cursorState'         { $result = Get-CursorState }
       'desktopSnapshot'     { $result = Get-StrictDesktopSnapshot }
+      {$_ -like 'lease*'}    { if($env:OKIBA_SNAP_LEASE -eq '1'){$result = Invoke-SnapLeaseRequest $req}else{$result=@{ok=$false;reason='lease-dedicated-helper-required'}} }
       'readHiddenFile'       { $result = Invoke-HiddenFileRequest $req $false }
       'setHiddenFile'        { $result = Invoke-HiddenFileRequest $req $true }
       'moveNoReplace'        {

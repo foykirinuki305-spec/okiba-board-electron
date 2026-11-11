@@ -671,6 +671,21 @@ function registerIpc() {
   // Desktop returns are planned as a complete group before any mutation.
   // No legacy cold positioner is used by this strict path.
   const safeDesk = require('./lib/safe-desktop');
+  const leaseController=require('./lib/desktop-snap-lease-controller');
+  const leaseReceipt=require('./lib/desktop-commit-receipt');
+  let desktopLeaseClient=null,desktopLeasePending=false;
+  function leaseOptIn(){return process.env.OKIBA_TEST_HOOKS==='1'&&process.env.OKIBA_TEST_SNAP_LEASE==='1';}
+  function pendingLeaseResult(reason){return {moved:[],destinations:[],skipped:[],failed:[],error:'配置処理の結果を確認中です。再実行せず確認を待ってください。',reason,pendingVerification:true,retrySafe:false,position:{status:'pending'}};}
+  function leaseClient(){
+    if(desktopLeaseClient)return desktopLeaseClient;
+    const fake=process.env.OKIBA_TEST_HELPER==='fake';
+    const hosted=process.env.GITHUB_ACTIONS==='true'&&process.env.RUNNER_OS==='Windows'&&process.env.RUNNER_ENVIRONMENT==='github-hosted';
+    if(!leaseOptIn()||(!fake&&!hosted))throw Error('lease-test-environment-required');
+    const helper=fake?{command:process.execPath,args:[path.join(__dirname,'tools','fake-helper.js')],env:{...process.env,ELECTRON_RUN_AS_NODE:'1'}}:{command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',bundledScriptPath('shell-helper.ps1')]};
+    desktopLeaseClient=require('./lib/desktop-lease-client').createDesktopLeaseClient({journalDir:path.join(app.getPath('userData'),'desktop-lease-journals'),helper,owner:{pid:process.pid}});
+    app.once('will-quit',()=>desktopLeaseClient?.disconnect());
+    return desktopLeaseClient;
+  }
   const desktopCalibration = require('./lib/desktop-calibration');
   const calibrationCacheStore=require('./lib/desktop-calibration-cache');
   const calibrationCacheFile=path.join(app.getPath('userData'),'desktop-calibration-cache.json');
@@ -767,7 +782,34 @@ function registerIpc() {
   }
   // END tested-desktop-rollback
 
+  // BEGIN tested-lease-metadata
+  // Lease-only preparation: retain every unrelated field and saved position.
+  function prepareLeaseMetadata(before,selected,samePath) {
+    if(typeof before!=='string'||!Array.isArray(selected)||!selected.length)throw Error('lease-metadata-missing');
+    const json=JSON.parse(before);
+    if(!json||typeof json!=='object'||Array.isArray(json)||!Array.isArray(json.links))throw Error('lease-links-invalid');
+    if(selected.some((p,n)=>typeof p!=='string'||selected.some((q,j)=>j<n&&samePath(p,q))))throw Error('lease-selection-invalid');
+    for(const p of selected)if(json.links.filter(l=>l&&typeof l.path==='string'&&samePath(l.path,p)).length!==1)throw Error('lease-link-changed');
+    json.links=json.links.filter(l=>!selected.some(p=>l&&typeof l.path==='string'&&samePath(l.path,p)));
+    return JSON.stringify(json,null,2);
+  }
+  async function commitLeaseMetadata({before,after,expectedIdentity,io}) {
+    // The caller MUST hold a watchdog commit permit. This is not an OS-level CAS:
+    // an external write between the final check and replace remains a limitation.
+    const unchanged=()=>io.read()===before&&io.identity()===expectedIdentity;
+    if(!unchanged())throw Error('board-changed');
+    let temporary;
+    try {
+      temporary=await io.writeTemporary(after);
+      if(!unchanged())throw Error('board-changed');
+      await io.replace(temporary);
+      temporary=null;
+    }finally{if(temporary)await io.removeTemporary(temporary);}
+  }
+  // END tested-lease-metadata
+
   async function safeDesktopMove(payload,target) {
+    if(desktopLeasePending)return pendingLeaseResult('lease-verification-pending');
     if(desktopUnsafe)return desktopBlocked('helper-not-stopped');
     if(desktopBusy) return desktopBlocked('busy');
     desktopBusy=true;
@@ -822,7 +864,33 @@ function registerIpc() {
       planMs=Date.now()-started;
       diagnostic('plan',{automatic:!!payload.automatic,screenPoint:{x:payload.screenX,y:payload.screenY},clientPoint:point,anchor,geometry:{origin:snap.origin,sx:snap.sx,sy:snap.sy,gx:snap.gx,gy:snap.gy,areas:snap.areas,autoArrange:snap.autoArrange,snap:snap.snap,iconCount:snap.icons?.length},displays:screen.getAllDisplays().map(d=>({id:d.id,bounds:d.bounds,workArea:d.workArea,scaleFactor:d.scaleFactor})),items:planned.map(i=>({name:i.name,source:i.path,destination:i.dest,isLink:i.isLink,hidden:i.hidden,samePath:ln.samePath(i.path,i.dest),crossVolume:i.crossVolume,cell:i.cell,offset:i.offset})),plan});
       if(!plan.ok)return desktopBlocked(plan.reason);
-      const tx=await safeDesk.executeDesktop({items:planned,plan,snapshot:snap,adapter:{
+      let leaseTransaction=null;
+      if(leaseOptIn()) {
+        const first=plan.targets?.[0];
+        const targetAreaIndex=(snap.areas||[]).findIndex(a=>first&&first.x>=a.left&&first.x<a.right&&first.y>=a.top&&first.y<a.bottom);
+        const candidate={kind:'samepath-hidden',desktop:target.path,items:planned.map(i=>({path:i.path,destination:i.dest,hidden:i.hidden,fileIdentity:String(i.identity.dev)+':'+String(i.identity.ino)})),snapshot:snap,targetAreaIndex,metadataPaths:[meta],targets:(plan.targets||[]).map(t=>({...t,path:planned.find(i=>i.path===t.path)?.dest})),buffer:plan.buffer};
+        const eligible=!calibrationPlan&&planned.every(i=>i.isLink&&i.hidden&&ln.samePath(i.path,i.dest))&&leaseController.validateScope(candidate);
+        if(eligible){
+          const after=prepareLeaseMetadata(before,planned.map(i=>i.path),ln.samePath);
+          const receipts=[{path:meta,beforeHash:leaseReceipt.hash(before),afterHash:leaseReceipt.hash(after)}];
+          const identity=()=>{const st=fs.statSync(meta);return String(st.dev)+':'+String(st.ino);};
+          const metadataIdentity=identity();
+          const checkSources=()=>{for(const i of planned){const st=fs.statSync(i.path);if(st.dev!==i.identity.dev||st.ino!==i.identity.ino)throw Error('source-changed');}};
+          checkSources();const client=leaseClient();const ready=await client.ready();if(!ready.ok)throw Error(ready.reason||'lease-not-ready');
+          const scope=await client.prepareScope(candidate);checkSources();
+          // Ordinary executeDesktop rollback is deliberately NOT used after a lease commit gate.
+          const commitFn=async()=>commitLeaseMetadata({before,after,expectedIdentity:metadataIdentity,io:{
+            read:readMeta,identity,
+            writeTemporary:text=>{const tmp=meta+'.lease-'+process.pid+'-'+Date.now()+'.tmp';fs.writeFileSync(tmp,text,{encoding:'utf8',flag:'wx'});return tmp;},
+            replace:tmp=>fs.renameSync(tmp,meta),
+            removeTemporary:tmp=>{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}
+          }});
+          leaseTransaction=await leaseController.runLease({scope,receipts,adapter:client.adapter(commitFn)});
+          diagnostic('lease-transaction',{result:leaseTransaction});
+          if(leaseTransaction.pendingVerification||(!leaseTransaction.ok&&leaseTransaction.resolution?.state!=='aborted')){desktopLeasePending=true;return pendingLeaseResult(leaseTransaction.reason);}
+        }else diagnostic('lease-not-covered',{reason:calibrationPlan?'unknown-grid-calibration':'scope-not-supported',legacyArrivalRiskUnresolved:true});
+      }
+      const tx=leaseTransaction||await safeDesk.executeDesktop({items:planned,plan,snapshot:snap,adapter:{
         snapshot:desktopSnapshot,
         completePlanAfterFirstMove:calibrationPlan?async probe=>{
           if(!shellHelper)return {ok:false,reason:'helper-unavailable'};

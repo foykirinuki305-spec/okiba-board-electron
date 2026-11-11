@@ -35,6 +35,12 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "PowerShell script check failed for $f" }
           }
 
+      - name: Opt-in main lease integration with in-memory adapters
+        run: node tools/main-lease-integration-selftest.js
+
+      - name: Lease metadata preservation and concurrent edit pure checks
+        run: node tools/lease-metadata-selftest.js
+
       - name: Unused snap controller and commit receipt pure checks
         run: node tools/snap-lease-controller-selftest.js
 
@@ -93,6 +99,17 @@ jobs:
         run: node tests/gui.e2e.js
         env:
           OKIBA_SHOTS: ${{ github.workspace }}\screenshots
+
+      - name: Opt-in lease GUI through real Node watchdog and isolated fake helper
+        run: npm run test:lease-gui
+
+      - name: Upload lease GUI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lease-gui-evidence
+          path: lease-gui-evidence/
+          if-no-files-found: ignore
 
       - name: Build installer + portable exe
         # --publish never: electron-builder's implicit CI publishing
