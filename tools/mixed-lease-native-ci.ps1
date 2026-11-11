@@ -13,11 +13,14 @@ function Mixed-Trace([string]$phase,$detail=$null){
  }else{[Console]::Error.WriteLine($line)}
 }
 function Mixed-WaitVisibility($r,[bool]$visible){
- $until=[DateTime]::UtcNow.AddSeconds(15);$stable=0;$poll=0
+ $until=[DateTime]::UtcNow.AddSeconds(15);$stable=0;$poll=0;$previousSelected=$null
  do{
   $s=Lease-Snapshot;$selected=Lease-Guard $r $s
   $indices=@();for($j=0;$j -lt @($r.records).Count;$j++){if($selected.ContainsKey((Lease-Path $r.records[$j].path))){$indices+=,$j}}
   if(($visible -and $selected.Count -eq @($r.records).Count) -or (-not $visible -and $selected.Count -eq 0)){$stable++}else{$stable=0}
+  $owned=@($selected.Values|ForEach-Object{@{identity=$_.identity;path=$_.path;x=$_.x;y=$_.y}})
+  $ownedKey=$owned|ConvertTo-Json -Depth 4 -Compress
+  if($poll -eq 0 -or $ownedKey -cne $previousSelected){Mixed-Trace 'rollback-visibility-selected-change' @{poll=$poll;selected=$owned};$previousSelected=$ownedKey}
   Mixed-Trace 'rollback-visibility-poll' @{poll=$poll;selectedCount=$selected.Count;selectedIndices=$indices;wantVisible=$visible;stable=$stable;flags=$s.folderFlags}
   if($stable -ge 2){return $s};Start-Sleep -Milliseconds 100;$poll++
  }while([DateTime]::UtcNow -lt $until)
@@ -143,17 +146,43 @@ function Mixed-TerminalRestored($r){
  foreach($link in $r.linkRecords){$n=Lease-CheckRecord $link;if(-not $n.hidden -or [uint32]$n.attributes -ne [uint32]$link.attributes){throw 'mixed-link-not-restored'}}
  foreach($i in $r.residentRecords){$n=Resident-Locate $i;if($n.state -cne 'unmoved' -or [uint32]$n.record.attributes -ne [uint32]$i.originalAttributes){throw 'mixed-source-not-restored'}}
 }
+function Mixed-HideBeforeRestore($r){
+ # No source rename is allowed until the entire original group is invisible.
+ $null=Lease-Guard $r (Lease-Snapshot)
+ $index=0
+ foreach($link in $r.linkRecords){
+  $script:LeasePhase='mixed-rollback-rehide';Mixed-Trace 'rehide-before' @{index=$index}
+  $null=Lease-Guard $r (Lease-Snapshot);Lease-SetHidden $link $true
+  Mixed-Trace 'rehide-after' @{index=$index};$index++
+ }
+ $index=0
+ foreach($i in $r.residentRecords){
+  $script:LeasePhase='mixed-rollback-prehide-resident';$null=Lease-Guard $r (Lease-Snapshot)
+  $n=Resident-Locate $i;Mixed-Trace 'resident-prehide-located' @{index=$index;state=$n.state}
+  if($n.state -ceq 'moved'){
+   $projection=@($r.records|Where-Object{(Lease-Path $_.path) -ieq (Lease-Path $i.destination)})
+   if($projection.Count -ne 1 -or $projection[0].identity -cne $i.identity){throw 'mixed-prehide-projection-invalid'}
+   Lease-SetHidden $projection[0] $true
+   $after=Resident-Locate $i
+   if($after.state -cne 'moved' -or -not $after.record.hidden -or [uint32]$after.record.attributes -ne ([uint32]$i.originalAttributes -bor 2)){throw 'mixed-prehide-unverified'}
+   Mixed-Trace 'resident-prehide-verified' @{index=$index;attributes=$after.record.attributes}
+  }elseif($n.state -cne 'unmoved'){throw 'mixed-prehide-location-unknown'}
+  $index++
+ }
+ $script:LeasePhase='mixed-rollback-pre-rename-visibility';Mixed-Trace 'pre-rename-visibility-before'
+ $s=Mixed-WaitVisibility $r $false;$selected=Lease-Guard $r $s
+ if($selected.Count -ne 0){throw 'mixed-pre-rename-visible'}
+ foreach($link in $r.linkRecords){if(-not (Lease-CheckRecord $link).hidden){throw 'mixed-pre-rename-link-visible'}}
+ foreach($i in $r.residentRecords){$n=Resident-Locate $i;if($n.state -ceq 'moved' -and -not $n.record.hidden){throw 'mixed-pre-rename-resident-visible'}}
+ Mixed-Trace 'pre-rename-all-group-zero' @{selectedCount=$selected.Count;flags=$s.folderFlags}
+ return $s
+}
 function Lease-Rollback([string]$token){
  $r=Lease-Require $token;if(-not (Mixed-Is $r)){return Lease-Rollback-CoreMixedBase $token}
  Mixed-CIOnly;Mixed-Trace 'rollback-start' @{links=@($r.linkRecords).Count;residents=@($r.residentRecords).Count}
  try{
   Mixed-Validate $r (Lease-Snapshot);Mixed-Trace 'rollback-preflight-done'
-  $index=0
-  foreach($link in $r.linkRecords){
-   $script:LeasePhase='mixed-rollback-rehide';Mixed-Trace 'rehide-before' @{index=$index}
-   $null=Lease-Guard $r (Lease-Snapshot);Lease-SetHidden $link $true
-   Mixed-Trace 'rehide-after' @{index=$index};$index++
-  }
+  $s=Mixed-HideBeforeRestore $r
   $index=0
   foreach($i in $r.residentRecords){
    $script:LeasePhase='mixed-rollback-resident';Mixed-Trace 'resident-restore-before' @{index=$index}

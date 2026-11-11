@@ -79,3 +79,20 @@ remain required. No Refresh, synthetic DELETE, or existing-icon repositioning.
 
 Reference verified 2026-11-11:
 https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shchangenotify
+
+## 770d observation and revised rollback ordering
+
+The true rename notifications were issued only after all three original sources
+were revalidated (same ID, original attributes 32, destination absent), but Shell
+still enumerated destination projections 3/4/5 for 78 polls. Therefore notification
+issuance alone is not considered successful recovery.
+
+Next research ordering: rehide samepath links; locate each resident, and only if it
+is moved, hide its real Desktop destination with the existing recorded attribute
+setter/notification. Verify the entire selected group absent against the real
+unchanged baseline before any resident rename back. Unmoved source files do not
+receive Desktop notifications. Then restore residents and verify original file
+identity/attributes, old icons, visibility and original snap state as before.
+No snapshot subset, global Refresh, fake DELETE, changed receipt semantics, or
+additional OFF epoch is introduced. This isolates Shell disappearance from the
+subsequent physical rename. Original attributes stay immutable in the journal.

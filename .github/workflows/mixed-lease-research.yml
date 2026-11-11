@@ -41,6 +41,9 @@ jobs:
       - name: Native canonical file-record matching
         shell: pwsh
         run: node tools/resident-read-path-selftest.js
+      - name: Whole-group Hidden barrier before physical restore (pure)
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/mixed-prehide-selftest.ps1
       - name: Truthful rename notification proof (no notification invoked)
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/mixed-rename-notify-selftest.ps1
