@@ -59,7 +59,7 @@ function fakeLeaseCommand(req){
  const identity=p=>{const st=calibrationFs.statSync(leaseOwned(p));return st.dev+':'+st.ino;};
  const alive=()=>{try{process.kill(fakeOwner.pid,0);return 'alive';}catch{return 'exited';}};
  switch(req.cmd){
- case 'leaseOwnerPin':fakeOwner={pid:req.pid,started:req.started||String(req.pid)};return {ok:true,...fakeOwner,state:alive()};
+ case 'leaseOwnerPin':fakeOwner={pid:req.pid,started:req.started||(req.pid===process.ppid?'2':'1')};return {ok:true,...fakeOwner,state:alive()};
  case 'leaseOwnerState':return {ok:true,...fakeOwner,state:alive()};
  case 'leaseReadFiles':return {ok:true,records:req.paths.map(p=>({path:p,identity:identity(p)}))};
  case 'leasePrepare':
