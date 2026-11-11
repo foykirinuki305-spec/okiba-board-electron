@@ -1,0 +1,32 @@
+name: unknown-grid-lease-slice
+on:
+  push:
+    paths:
+      - 'tools/unknown-grid-lease-*'
+      - '.github/workflows/unknown-grid-lease-slice.yml'
+  workflow_dispatch:
+jobs:
+  isolated:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Pure v2 phase regression
+        shell: pwsh
+        run: node tools/unknown-grid-lease-flow-selftest.js
+      - name: Native probe sample abort slice only
+        shell: pwsh
+        run: |
+          & node tools/unknown-grid-lease-slice-ci.js ([Environment]::GetFolderPath('Desktop')) 2>&1 | Tee-Object unknown-grid-lease-slice-ci.log
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unknown-grid-lease-slice-evidence
+          path: |
+            unknown-grid-lease-slice-ci.json
+            unknown-grid-lease-slice-ci.log
+            unknown-grid-lease-slice-journals/**

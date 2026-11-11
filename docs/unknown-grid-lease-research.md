@@ -87,3 +87,66 @@ All native mutation must run in the same dedicated lease helper under the global
 | abort/recovery | Last durable phase, original states and revealed subset | Confirm failed helper stopped; watchdog identity-bound rehide selected subset, verify disappearance and old icons, restore flags | Uncertain termination or old-state mismatch stays unresolved. No blind toggle, duplicate mutation or old-position repair |
 
 For resident source-to-Desktop moves, exact rename/rollback identity records must also be integrated with this state table; this document does not authorize a second competing transaction owner. Interrupted calibration must never grant metadata commit. Test every phase boundary, timeout, probe replacement, foreign patch entry, Explorer restart, no-fit, and post-commit recovery independently before enabling unknown-grid lease mode.
+
+
+## Concrete code mapping for a test-only v2 prototype
+
+No code changes authorized by this section. Do not implement one long calibration RPC. Keep production/main routing disabled. Initially support only same-path hidden files, not the separately developed resident archive transaction.
+
+### Current constraints
+
+- `lib/desktop-snap-lease-controller.js::validateScope` requires the target area's grid. Introduce a distinct test-only validator, not a relaxation of existing known-grid validation.
+- `scripts/snap-lease.ps1::Lease-ValidateRecovery` requires all targets resolved and their count equal to records. Unknown calibration recovery must have a distinct v2 validator that permits unresolved targets only for abort.
+- `Lease-SetSnap` invokes `Lease-AllGrid` before ON. Calibration requires a separate gate proving all OLD icons on measured grids with exactly one identified probe allowed off-grid inside its reserved patch. Reuse native `OkibaFolderView.SetLeaseSnap`, which verifies all current identities/positions/flags before toggling. Do not weaken the ordinary gate.
+- `Lease-MarkRestored` seals the terminal restore state and prohibits subsequent OFF. Calibration ON is not terminal restoration; never call this marker during calibration.
+- `lib/desktop-lease-watchdog.js::restart` currently re-adopts ordinary recovery. An interrupted unknown v2 scope needs abort-only adoption, never unverified resumption or commit.
+- Ordinary helper timeout is approximately 15 seconds, while fixed adaptive takes over 21 seconds. Watchdog owner polling is queued behind native requests. A single long RPC both times out and delays owner-death processing. Use bounded sample-sized RPCs, owner checks between them, and keep native waits unchanged.
+
+### Proposed durable v2 fields
+
+`version:2`, `kind:'samepath-hidden-unknown-grid-ci'`, authenticated token/owner PID+birth, original Desktop/session/Explorer identity, original flags, immutable full old snapshot, complete selected records (canonical path, file ID, size, mtime, original attributes/Hidden), metadata paths and eventual receipts, target area index, unresolved original placement intent (drop anchor and selected relative offsets), guarded patch/maxSpacing, probe record identity, calibration subphase, and optional validated proof/resolved targets.
+
+`targets` may be absent only while the v2 recovery is abort-only. Keep raw original snapshot immutable; measured grid/proof belong in separate fields or a separately validated resolved snapshot. Probe identities must refer to one selected record. Never accept arbitrary caller-supplied pitch/origin as proof. Every selected record is preserved from prepare onward, so recovery need not trust whether the last mutation reply was delivered.
+
+### API and durable transitions
+
+| Watchdog API / native command | Phase written before mutation | Required result |
+|---|---|---|
+| prepareUnknown / leasePrepareUnknown | unknown-prepared after native read-only prepare, global reservation acquired first | v2 recovery persisted before any reveal |
+| revealProbe / leaseRevealProbe | probe-reveal-intent | OFF, probe-only reveal, old guards, exact bounded patch position; others hidden |
+| beginCalibration / leaseBeginCalibration | probe-snap-intent | dedicated old-grid/probe-exception gate; ON, fixed settling, old exact; not terminal restored |
+| calibrationSample / leaseCalibrationSample | calibrating before first sample | owner alive, query bounds/previous position checked, strict old/geometry/flags guards, existing fixed settling; one bounded sample per RPC |
+| resolveCalibration / leaseResolveCalibration | resolve-intent | full candidate-search/evidence verification, actual grid and original shape plan, no-fit cancellation; no metadata permit |
+| adopt resolved plan | resolved | journal stores verified proof/targets before the next mutating RPC; native state and durable recovery agree |
+| placeRemaining / leasePlaceRemaining | remaining-reveal-intent | OFF, remaining reveal, normal guarded batch exact placement |
+| restore/verify, commit permission, receipt/release | placed, restored, existing permitted/committed/released | existing terminal protocol only after full exact verification |
+| abortUnknown / leaseAbortUnknown; adoptUnknownForAbort | aborting | original selected Hidden restored, all selected disappeared, all old exact, original flags verified; then terminal abort/release |
+
+Adaptive query selection can run in a test controller, but native/watchdog validation must not trust its conclusion. Validate the full observations and state binding independently before resolving targets. Retain full candidate discrimination: the documented doubled-pitch counterexample rules out replacing it with a DPI hypothesis.
+
+No per-sample fsync is required to continue an interrupted calibration, because interrupted calibration is never continued: durable `calibrating` state always recovers by abort. The original records/flags/old snapshot must already be durable. Proof and resolved targets must be durable before remaining-file mutation. A lost result between native validation and journal update remains abortable from the original records.
+
+### Owner death, timeout and cleanup
+
+Check pinned owner PID/birth before every sample and between queued calls. The existing 500 ms watchdog poll must remain able to run between short requests. Live-owner IPC disconnect is not permission to roll back. Confirm owner exit, or explicit abort, before recovery. If a sample times out, first confirm the old helper stopped; only then start a fresh helper and adopt v2 for abort. No second mutator while termination is uncertain.
+
+Recovery re-reads every selected record identity/metadata. Rehide any revealed selected item using handle-bound operations, including a probe whose last coordinates are unknown; already-hidden records remain unchanged. Verify disappearance and every old identity/coordinate before restoring original flags. If the state is already original ON, verify rather than toggle. If OFF, prove old grid exact before restoring ON. If foreign state or identities prevent proof, leave the transaction unresolved with diagnostics rather than perform blind restoration. No metadata/history/cache changes before permission. Never repair old icon coordinates to hide failure.
+
+### Implementation ownership and isolation
+
+Potential new test-only files: unknown-v2 controller/validator and unit tests, a hosted-only driver/owner host, dedicated unknown-v2 PowerShell extension, and an independent workflow. Build a disposable copy of the needed library/scripts and apply checked anchors there; normal sources/main remain untouched and default-off. Gate entry with all three hosted-Windows environment checks plus an explicit unknown-grid CI flag. Reuse the single global lock, dedicated helper and watchdog; do not start an ordinary mutating calibration helper beside it.
+
+Relevant integration points are controller validation/flow, client adapter methods, watchdog dispatch/journal/restart/rollback routing, and native lease request dispatch/recovery guards. Coordinate ownership before any edits to these shared files, especially the resident path. Do not blend resident rename recovery into the first unknown-grid prototype.
+
+### Required first hosted CI cases
+
+Success with original shape preserved; no-fit abort; occupied patch refusal before reveal; owner kill immediately after reveal, after calibration ON, mid-sample, and after proof before remaining reveal; helper hang and confirmed restart; lost replies; old icon or foreign patch changes; wrong flags; global lock contention. Assert no leaked snap-OFF state, unchanged old identities/coordinates, original selected Hidden/metadata/content after abort, unchanged metadata beforeHash without commit, expected receipt after success, terminal journal and cleanup. Preserve single-monitor versus true 150% evidence boundaries. Standard hosted 100% tests do not prove empty mixed-DPI monitor support.
+
+
+### Initial prototype slice saved (not yet a native CI pass)
+
+New research-only files: `tools/unknown-grid-lease-flow-ci.js`, `tools/unknown-grid-lease-flow-selftest.js`, `tools/unknown-grid-lease-copy-ci.js`, and `tools/unknown-grid-lease-native-ci.ps1`. The builder changes only an owned empty temporary copy of lib/scripts. It does not edit or launch the original runtime. The first slice supports prepare, probe reveal, calibration ON, one fixed-settle sample per RPC, and abort/release. Resolved-plan placement/commit and the hosted orchestration/fault driver are still unimplemented.
+
+Pure mocks cover journal-before-mutation ordering, invalid phase, owner exit refusing further samples, lost reply preserving recovery intent, payload token override prevention, and refusal to release the global lock if native release is unverified. Generated-copy JavaScript and PowerShell parse successfully; native extension has not been executed locally or validated in hosted CI yet.
+
+Prepare is strictly read-only with respect to Desktop/files: identity and snapshot checks plus helper-local state creation only. A transport-uncertain prepare can release reservation only under that guarantee and after the native adapter's confirmed-stop/restart handling; no reveal, flags or position mutation is allowed in prepare. Later uncertain mutations retain their durable intent and are recovered by abort. Abort marks restoration attempted before native recovery; fresh-helper abort-only adoption applies the existing conservative restoration-state check rather than blindly toggling snap after a lost restore reply.
