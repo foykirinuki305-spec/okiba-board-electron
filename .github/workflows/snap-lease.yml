@@ -1,0 +1,32 @@
+name: snap-lease-research
+on:
+  push:
+    paths:
+      - 'tools/snap-lease-*'
+      - 'scripts/shell-helper.ps1'
+      - 'lib/safe-desktop.js'
+      - '.github/workflows/snap-lease.yml'
+  workflow_dispatch:
+jobs:
+  watchdog-faults:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Isolated hidden-link watchdog faults, never production
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -File ./tools/snap-lease-ci.ps1 2>&1 | Tee-Object -FilePath snap-lease-ci.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain journal and fault evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snap-lease-research-evidence
+          path: |
+            snap-lease-ci.json
+            snap-lease-ci.log
+            snap-lease-journals/**

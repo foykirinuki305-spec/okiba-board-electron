@@ -901,19 +901,46 @@ function Strict-InferAreaGrid($members,[int]$sx,[int]$sy,[int]$scale,[int]$viewD
   if($residues.Count -ne 1){return $null}
   $xy=$residues[0].Split(',');return @{gx=[int]$xy[0];gy=[int]$xy[1];sx=$sx;sy=$sy}
 }
+# Observer-only timings. Durations overlap (inclusive), never sum categories.
+$script:DesktopPerf=$null
+function Add-DesktopPerf([string]$name,$clock) {
+  if($null -eq $script:DesktopPerf){return}
+  $m=$script:DesktopPerf.metrics
+  if(-not $m.ContainsKey($name)){$m[$name]=@{count=0;ms=0.0}}
+  $m[$name].count++;$m[$name].ms+=$clock.Elapsed.TotalMilliseconds
+}
+function Set-DesktopPerfPhase([string]$name) {
+  if($null -eq $script:DesktopPerf){return}
+  if($null -ne $script:DesktopPerf.phaseClock){Add-DesktopPerf ('phase_'+$script:DesktopPerf.phase) $script:DesktopPerf.phaseClock}
+  $script:DesktopPerf.phase=$name;$script:DesktopPerf.phaseClock=[Diagnostics.Stopwatch]::StartNew()
+}
+function Wait-DesktopPerf([int]$ms) {
+  $clock=[Diagnostics.Stopwatch]::StartNew()
+  try{Start-Sleep -Milliseconds $ms}finally{Add-DesktopPerf 'settle' $clock}
+}
 function Get-RawStrictDesktopSnapshot {
+  $clock=[Diagnostics.Stopwatch]::StartNew()
+  try{return Get-RawStrictDesktopSnapshotCore}finally{Add-DesktopPerf 'rawSnapshot' $clock}
+}
+function Get-StrictDesktopSnapshot {
+  $clock=[Diagnostics.Stopwatch]::StartNew()
+  try{return Get-StrictDesktopSnapshotCore}finally{Add-DesktopPerf 'strictSnapshot' $clock}
+}
+function Get-RawStrictDesktopSnapshotCore {
   $lv = Find-BestListView
   if ($lv -eq [IntPtr]::Zero) { return @{ok=$false; reason='no-listview'} }
   $reader = New-Object OkibaDesk+Reader -ArgumentList $lv
   try {
-    try { $shellState=[OkibaFolderView]::ReadState() } catch { return @{ok=$false;reason='shell-folder-state-unavailable'} }
+    $stateClock=[Diagnostics.Stopwatch]::StartNew()
+    try { $shellState=[OkibaFolderView]::ReadState() } catch { return @{ok=$false;reason='shell-folder-state-unavailable'} } finally{Add-DesktopPerf 'shellState' $stateClock}
     $sx = [OkibaDesk]::GetSpacingX($lv); $sy = [OkibaDesk]::GetSpacingY($lv)
     if ($sx -le 0 -or $sy -le 0) { return @{ok=$false;reason='unknown-spacing'} }
     $viewDpi=[int][OkibaWin32]::GetDpiForWindow($lv)
     $explorerProcess=[uint32]0;[void][OkibaDesk]::GetWindowThreadProcessId($lv,[ref]$explorerProcess)
     $explorerStarted=[Diagnostics.Process]::GetProcessById([int]$explorerProcess).StartTime.ToUniversalTime().Ticks.ToString()
     $generation=('{0}:{1}:{2}' -f $explorerProcess,$explorerStarted,$lv.ToInt64())
-    try {$shellIcons=[OkibaFolderView]::ReadShellBatch($generation)}catch{return @{ok=$false;reason='shell-snapshot-error';detail=$_.Exception.Message}}
+    $batchClock=[Diagnostics.Stopwatch]::StartNew()
+    try {$shellIcons=[OkibaFolderView]::ReadShellBatch($generation)}catch{return @{ok=$false;reason='shell-snapshot-error';detail=$_.Exception.Message}}finally{Add-DesktopPerf 'shellRead' $batchClock}
     $count=@($shellIcons).Count
     $icons = New-Object 'System.Collections.Generic.List[object]'
     foreach($item in $shellIcons){$icons.Add(@{label=$item.label;x=$item.x;y=$item.y;index=$item.index;identity=$item.identity;path=$item.path})}
@@ -959,7 +986,7 @@ function Strict-AreaGrid($area,$s) {
   return @{gx=$s.gx;gy=$s.gy;sx=$s.sx;sy=$s.sy}
 }
 function Strict-IconsKey($s) { return (@($s.icons | ForEach-Object { Strict-IconKey $_ } | Sort-Object) | ConvertTo-Json -Compress) }
-function Get-StrictDesktopSnapshot {
+function Get-StrictDesktopSnapshotCore {
   try {
     $a=Get-RawStrictDesktopSnapshot
     if (-not $a.ok) { return $a }
@@ -970,7 +997,7 @@ function Get-StrictDesktopSnapshot {
       return @{ok=$false;reason='desktop-changing'}
     }
     return $b
-  } catch { return @{ok=$false;reason='snapshot-error'} }
+  } catch { return @{ok=$false;reason='snapshot-error';detail=$_.Exception.Message} }
 }
 function Strict-PointValid($p) {
   if ($null -eq $p -or $null -eq $p.x -or $null -eq $p.y) { return $false }
@@ -995,7 +1022,8 @@ function Strict-Overlap($a,$b,$s) {
 }
 function Strict-Near($a,$b) { return [Math]::Abs($a.x-$b.x) -le 1 -and [Math]::Abs($a.y-$b.y) -le 1 }
 function Get-StrictTransactionState($baseline,$current,$targets) {
-  if(-not $current.ok -or (Strict-GeometryKey $baseline) -cne (Strict-GeometryKey $current)){return @{ok=$false;reason='desktop-changed'}}
+  if(-not $current.ok){return @{ok=$false;reason='desktop-changed';detailKind='current-snapshot-unavailable';snapshotReason=$current.reason;snapshotDetail=$current.detail}}
+  if((Strict-GeometryKey $baseline) -cne (Strict-GeometryKey $current)){return @{ok=$false;reason='desktop-changed';detailKind='physical-geometry-changed'}}
   foreach($snapshot in @($baseline,$current)){
     $seen=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     foreach($i in $snapshot.icons){if([string]::IsNullOrEmpty([string]$i.identity) -or -not $seen.Add([string]$i.identity)){return @{ok=$false;reason='missing-or-duplicate-icon-identity'}}}
@@ -1170,7 +1198,7 @@ function Get-StrictFreeWave($state,$targets,$unfinished,$buffer,$baseline) {
   }
   return @{ok=$true;items=@($wave.ToArray())}
 }
-function Position-DesktopPlan($baseline,$targets,$buffer,$calibration=$null) {
+function Position-DesktopPlanCore($baseline,$targets,$buffer,$calibration=$null) {
   $operation=[System.Diagnostics.Stopwatch]::StartNew()
   $targets=@($targets)
   if(-not $baseline.ok -or $baseline.autoArrange -or -not $baseline.snap -or $targets.Count -eq 0 -or -not (Strict-PointValid $buffer)) {return @{ok=$false;reason='invalid-plan'}}
@@ -1215,6 +1243,7 @@ function Position-DesktopPlan($baseline,$targets,$buffer,$calibration=$null) {
   }
   try {
     # Do not force a shell refresh that might rearrange existing icons.
+    Set-DesktopPerfPhase 'arrival'
     $deadline=[DateTime]::UtcNow.AddSeconds(8)
     do {
       $current=Get-StrictDesktopSnapshot
@@ -1233,13 +1262,15 @@ function Position-DesktopPlan($baseline,$targets,$buffer,$calibration=$null) {
       $pn=@(0..($targets.Count-1)|Where-Object {$targets[$_].path -ieq $proof.probePath})[0]
       if(-not (Strict-Near $state.new[$pn] $proof.probePosition)){return @{ok=$false;reason='calibration-probe-changed'}}
     }
+    Set-DesktopPerfPhase 'waves'
     $batchSizes=New-Object 'System.Collections.Generic.List[int]'
     $maxSteps=$targets.Count*3+3
     for($step=0;$step -lt $maxSteps;$step++) {
       if($operation.ElapsedMilliseconds -ge 50000){return @{ok=$false;reason='position-deadline'}}
       $unfinished=@(0..($targets.Count-1) | Where-Object {-not (Strict-Near $state.new[$_] $targets[$_])})
       if($unfinished.Count -eq 0) {
-        Start-Sleep -Milliseconds 180
+        Set-DesktopPerfPhase 'final'
+        Wait-DesktopPerf 180
         $last=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) $targets
         if(-not $last.ok){$last.phase='final';return $last}
         if($last.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed';phase='final'}}
@@ -1247,7 +1278,8 @@ function Position-DesktopPlan($baseline,$targets,$buffer,$calibration=$null) {
         if($null -ne $proof){$cacheNow=[DateTime]::UtcNow;$script:CalibratedDesktopGrids[[int]$proof.areaIndex]=@{areaIndex=[int]$proof.areaIndex;geometry=(Strict-GeometryKey $last.current);grid=$calibration.grid;proof=@{samples=$proof.samples;maxSpacing=$proof.maxSpacing};createdUtc=$cacheNow.ToString("o");expiresUtc=$cacheNow.AddHours(24).ToString("o")}}
         return @{ok=$true;positioned=$targets.Count;reason='';batchSizes=@($batchSizes.ToArray())}
       }
-      $wave=Get-StrictFreeWave $state $targets $unfinished $buffer $selectedGrid
+      $waveClock=[Diagnostics.Stopwatch]::StartNew()
+      try{$wave=Get-StrictFreeWave $state $targets $unfinished $buffer $selectedGrid}finally{Add-DesktopPerf 'wavePlanning' $waveClock}
       if(-not $wave.ok){return $wave}
       # Revalidate immediately before each write, including every new icon's
       # exact current location. A user move aborts, it is never overwritten.
@@ -1264,13 +1296,15 @@ function Position-DesktopPlan($baseline,$targets,$buffer,$calibration=$null) {
         $ids+=[string]$item.identity;$paths+=[string]$targets[$n].path;$oldX+=[int]$item.x;$oldY+=[int]$item.y;$newX+=[int]$entry.destination.x;$newY+=[int]$entry.destination.y;$waveIndexes[$n]=$true
       }
       if($operation.ElapsedMilliseconds -ge 50000){return @{ok=$false;reason='position-deadline'}}
-      try {[OkibaFolderView]::PositionNewItems([string[]]$ids,[string[]]$paths,[int[]]$oldX,[int[]]$oldY,[int[]]$newX,[int[]]$newY)} catch {
+      $comClock=[Diagnostics.Stopwatch]::StartNew()
+      try {try {[OkibaFolderView]::PositionNewItems([string[]]$ids,[string[]]$paths,[int[]]$oldX,[int[]]$oldY,[int[]]$newX,[int[]]$newY)} catch {
         $failed=@{ok=$false;reason='batch-call-failed';phase='batch-call-failed';partialPossible=$true;detail=$_.Exception.Message}
         try {$diagnostic=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) $targets;$failed.afterState=$diagnostic;if($null -ne $diagnostic.changed){$failed.changed=$diagnostic.changed}}catch{$failed.afterState=@{ok=$false;reason='diagnostic-unavailable'}}
         return $failed
       }
+      }finally{Add-DesktopPerf 'COMset' $comClock}
       $batchSizes.Add($ids.Count)
-      Start-Sleep -Milliseconds 180
+      Wait-DesktopPerf 180
       $after=Get-StrictTransactionState $baseline (Get-StrictDesktopSnapshot) $targets
       if(-not $after.ok){$after.phase='after-batch';$after.batchCount=$wave.items.Count;return $after}
       if($after.new.Count -ne $targets.Count){return @{ok=$false;reason='desktop-changed';phase='after-batch'}}
@@ -1281,6 +1315,20 @@ function Position-DesktopPlan($baseline,$targets,$buffer,$calibration=$null) {
     }
     return @{ok=$false;reason='position-step-limit'}
   } catch { return @{ok=$false;reason='position-error';detail=$_.Exception.Message} }
+}
+
+function Position-DesktopPlan($baseline,$targets,$buffer,$calibration=$null) {
+  $previous=$script:DesktopPerf
+  $script:DesktopPerf=@{inclusive=$true;metrics=@{};phase='validation';phaseClock=[Diagnostics.Stopwatch]::StartNew()}
+  $clock=[Diagnostics.Stopwatch]::StartNew()
+  try {
+    $answer=Position-DesktopPlanCore $baseline $targets $buffer $calibration
+    Set-DesktopPerfPhase 'complete'
+    Add-DesktopPerf 'total' $clock
+    foreach($m in $script:DesktopPerf.metrics.Values){$m.ms=[Math]::Round($m.ms,2)}
+    if($answer -is [System.Collections.IDictionary]){$answer.perf=@{inclusive=$true;metrics=$script:DesktopPerf.metrics}}
+    return $answer
+  }finally{$script:DesktopPerf=$previous}
 }
 
 # ---- cursorState (v2.2.2: drag pre-resolution witness) -------------

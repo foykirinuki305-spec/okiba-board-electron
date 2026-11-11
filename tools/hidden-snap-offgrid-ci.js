@@ -41,8 +41,9 @@ async function main(){
  const txStart=helperSource.indexOf('function Get-StrictTransactionState('),txEnd=helperSource.indexOf('\n# One transaction-local proof',txStart);
  assert(txStart>=0&&txEnd>txStart,'Diagnostic transaction anchor missing');
  let txSource=helperSource.slice(txStart,txEnd).replace("return @{ok=$false;reason='desktop-changed'}","return @{ok=$false;reason='desktop-changed';baseline=$baseline;current=$current;baselineGeometry=(Strict-GeometryKey $baseline);currentGeometry=$(if($current.ok){Strict-GeometryKey $current}else{$null})}");
+ txSource=txSource.replace("snapshotDetail=$current.detail}","snapshotDetail=$current.detail;baseline=$baseline;current=$current;baselineGeometry=(Strict-GeometryKey $baseline)}").replace("detailKind='physical-geometry-changed'}","detailKind='physical-geometry-changed';baseline=$baseline;current=$current;baselineGeometry=(Strict-GeometryKey $baseline);currentGeometry=(Strict-GeometryKey $current)}");
  helperSource=helperSource.slice(0,txStart)+txSource+helperSource.slice(txEnd);
- const stableStart=helperSource.indexOf('function Get-StrictDesktopSnapshot {'),stableEnd=helperSource.indexOf('function Strict-PointValid',stableStart);
+ const stableStart=helperSource.includes('function Get-StrictDesktopSnapshotCore {')?helperSource.indexOf('function Get-StrictDesktopSnapshotCore {'):helperSource.indexOf('function Get-StrictDesktopSnapshot {'),stableEnd=helperSource.indexOf('function Strict-PointValid',stableStart);
  assert(stableStart>=0&&stableEnd>stableStart,'Diagnostic snapshot anchor missing');
  let stableSource=helperSource.slice(stableStart,stableEnd).replace("return @{ok=$false;reason='desktop-changing'}","return @{ok=$false;reason='desktop-changing';first=$a;second=$b;firstGeometry=(Strict-GeometryKey $a);secondGeometry=(Strict-GeometryKey $b)}").replace("return @{ok=$false;reason='snapshot-error'}","return @{ok=$false;reason='snapshot-error';detail=$_.Exception.Message}");
  helperSource=helperSource.slice(0,stableStart)+stableSource+helperSource.slice(stableEnd);

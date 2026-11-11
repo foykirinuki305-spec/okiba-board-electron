@@ -18,7 +18,7 @@ async function main(){
  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-safe-ci-')),owned=[];
  const client=createShellHelperClient({command:'powershell.exe',args:['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(ROOT,'scripts','shell-helper.ps1')],timeoutMs:65000});
  let unsafeHelper=false;
- const request=async(cmd,args={})=>{const r=await client.request(cmd,args,{timeoutMs:65000});if(!r.ok){const stopped=await client.stopAndWait(10000);if(!stopped){unsafeHelper=true;return {ok:false,unsafe:true,reason:'helper-not-stopped'};}}assert(r.ok&&r.result,'helper '+cmd+' failed '+JSON.stringify(r));return r.result;};
+ const request=async(cmd,args={})=>{const r=await client.request(cmd,args,{timeoutMs:65000});if(!r.ok){const stopped=await client.stopAndWait(10000);if(!stopped){unsafeHelper=true;return {ok:false,unsafe:true,reason:'helper-not-stopped'};}}assert(r.ok&&r.result,'helper '+cmd+' failed '+JSON.stringify(r));if(cmd==='positionDesktopPlan')note('position perf '+JSON.stringify({ok:r.result.ok,reason:r.result.reason,targets:args.targets?.length,perf:r.result.perf}));return r.result;};
  const snap=()=>request('desktopSnapshot');
  async function stable(){let a=await snap();for(let n=0;n<30;n++){await sleep(200);const b=await snap();if(sameSnapshot(a,b))return b;a=b;}throw Error('desktop did not stabilize');}
  async function cold(name){const {stdout}=await run('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(ROOT,'scripts','position-desktop-icons.ps1'),'-GetPosition','0','0',name],{windowsHide:true,timeout:30000});return JSON.parse(stdout.split(/\r?\n/).filter(x=>/^\s*\{/.test(x)).pop());}
