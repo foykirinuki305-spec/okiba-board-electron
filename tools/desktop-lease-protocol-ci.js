@@ -103,7 +103,7 @@ async function main(){
    let helperPath=path.join(root,'scripts','shell-helper.ps1');
    if(commitCase==='helper-hang'){
     const hd=path.join(caseDir,'helper');fs.mkdirSync(hd);helperPath=path.join(hd,'shell-helper.ps1');fs.copyFileSync(path.join(root,'scripts','shell-helper.ps1'),helperPath);
-    let lease=fs.readFileSync(path.join(root,'scripts','snap-lease.ps1'),'utf8');const anchor=' $s=Lease-WaitVisibility $r $true;$selected=Lease-Guard $r $s';assert(lease.includes(anchor));lease=lease.replace(anchor," if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'CI fault only'};Start-Sleep -Seconds 60\n"+anchor);fs.writeFileSync(path.join(hd,'snap-lease.ps1'),lease);
+    let lease=fs.readFileSync(path.join(root,'scripts','snap-lease.ps1'),'utf8');const anchor=" $script:LeasePhase='reveal-arrival'";assert.equal(lease.split(anchor).length-1,1,'unique post-unhide/pre-arrival phase marker required');lease=lease.replace(anchor," if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'){throw 'CI fault only'};Start-Sleep -Seconds 60\n"+anchor);fs.writeFileSync(path.join(hd,'snap-lease.ps1'),lease);
    }
    const journalDir=index===1?warmJournal:path.join(caseDir,'journal');
    const spec={desktop,caseDir,journalDir,commitCase,helperPath,baseline:before,selected:selected.map(i=>({path:i.dest})),targets,targetAreaIndex,receipts};
