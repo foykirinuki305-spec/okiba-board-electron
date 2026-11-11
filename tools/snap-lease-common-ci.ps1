@@ -29,11 +29,14 @@ public static class LeaseFileCI {
 }
 '@
 function Invoke-LeaseFileExchange($action){
- for($attempt=0;$attempt -lt 20;$attempt++){
+ $clock=[Diagnostics.Stopwatch]::StartNew();$attempt=0
+ while($true){
+  $attempt++
   try{return (& $action)}catch{
    $ex=$_.Exception;while($ex.InnerException){$ex=$ex.InnerException}
    $code=$ex.HResult -band 65535
-   if($ex -isnot [IO.IOException] -or $code -notin @(2,32,33) -or $attempt -eq 19){throw}
+   if($ex -isnot [IO.IOException] -or $code -notin @(2,32,33)){throw}
+   if($clock.ElapsedMilliseconds -ge 2000){throw [IO.IOException]::new(('Lease file exchange contention exhausted: code='+$code+' attempts='+$attempt+' elapsedMs='+$clock.ElapsedMilliseconds),$ex)}
    Start-Sleep -Milliseconds 10
   }
  }
