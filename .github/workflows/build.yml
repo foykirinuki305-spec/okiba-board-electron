@@ -35,6 +35,9 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "PowerShell script check failed for $f" }
           }
 
+      - name: Unused snap controller and commit receipt pure checks
+        run: node tools/snap-lease-controller-selftest.js
+
       - name: Hidden attribute protocol on owned temporary files
         shell: pwsh
         run: powershell -NoProfile -File ./tools/hidden-attributes-protocol-test.ps1
