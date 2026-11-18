@@ -530,7 +530,7 @@ async function main() {
     'linked menu has 戻し先フォルダへ移動 (v2.1: a real move, distinct from 外す)');
   // Retain legacy backend coverage without restoring a removed UI action.
   await page.evaluate(async p => {
-    document.getElementById('ctxMenu').hidden = true;
+    hideMenu();
     await unlinkFlow([p]);
   }, originFile);
   await waitFor(async () => {
@@ -577,7 +577,7 @@ async function main() {
     'missing menu does not expose legacy copy or unlink');
   // Retain legacy backend coverage without restoring a removed UI action.
   await page.evaluate(async p => {
-    document.getElementById('ctxMenu').hidden = true;
+    hideMenu();
     await unlinkFlow([p]);
   }, originFile);
   await waitFor(async () => {
@@ -629,7 +629,7 @@ async function main() {
       're-creating refreshes the same .lnk instead of duplicating');
   } else {
     console.log('  skip - .lnk write/read-back runs on the Windows CI runner');
-    await page.evaluate(() => { document.getElementById('ctxMenu').hidden = true; });
+    await page.evaluate(() => { hideMenu(); });
   }
   await app5.close();
 

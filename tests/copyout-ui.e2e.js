@@ -38,7 +38,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
   assert(!labels.some(t=>/原本を残してコピー|ボードから外す/.test(t)),'removed copy/unlink menu actions must stay absent');
   assert(labels.some(t=>t.includes('戻し先フォルダへ移動')),'return-folder action must remain available');
   await page.evaluate(async shouldWait=>{
-   document.getElementById('ctxMenu').hidden=true;
+   hideMenu();
    if(typeof copySelectionOut!=='function')throw Error('legacy copy renderer function missing');
    const pending=copySelectionOut();
    if(shouldWait)await pending;
