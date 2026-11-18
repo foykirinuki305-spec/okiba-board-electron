@@ -8,7 +8,7 @@ let checks=0;const ok=(condition,message)=>{assert(condition,message);checks++;}
 const bytes=Buffer.from(Array.from({length:262147},(_,i)=>(i*71)%256));
 const id=s=>String(s.dev)+':'+String(s.ino);
 async function fixture(fn){
- const token=crypto.randomUUID(),cParent=path.resolve(os.tmpdir()),dParent='D:\\';
+ const token=crypto.randomUUID(),cParent=path.resolve(fs.realpathSync.native(os.tmpdir())),dParent='D:\\';
  assert.equal(path.parse(cParent).root.toUpperCase(),'C:\\','Requires C temp');
  await ordinaryAncestors(cParent);await ordinaryAncestors(dParent);
  assert.notEqual((await fsp.stat(cParent)).dev,(await fsp.stat(dParent)).dev,'C/D must be distinct volumes');

@@ -17,7 +17,7 @@ const dragCoords = require('./lib/dragcoords');
 const desktopPreviewPolicy = require('./lib/desktop-preview-policy');
 // User-facing builds never place icons directly on the Desktop. Keep the old
 // implementation only for isolated regression tests; actual output uses returnToFolder.
-function leasePreview(){return false;}
+function leasePreview(){return !app.isPackaged&&process.env.GITHUB_ACTIONS==='true'&&process.env.OKIBA_TEST_HOOKS==='1'&&desktopPreviewPolicy.enabled({isPackaged:false,platform:process.platform,env:process.env});}
 function legacyDesktopTest(){return !app.isPackaged&&process.env.GITHUB_ACTIONS==='true'&&process.env.OKIBA_TEST_HOOKS==='1'&&process.env.OKIBA_TEST_RETURN_MODE==='legacy';}
 function unknownLeasePreview(){return desktopPreviewPolicy.unknownEnabled({isPackaged:app.isPackaged,platform:process.platform,env:process.env});}
 

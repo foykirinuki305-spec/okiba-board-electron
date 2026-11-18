@@ -2,7 +2,7 @@
 // Real Electron UI + real transfer service; all files/profile are disposable TEMP fixtures.
 const fs=require('fs'),os=require('os'),path=require('path'),assert=require('assert/strict');
 const {_electron:electron}=require('playwright');
-const ROOT=path.resolve(__dirname,'..'),temp=fs.mkdtempSync(path.join(os.tmpdir(),'okiba-storage-gui-'));
+const ROOT=path.resolve(__dirname,'..'),temp=fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()),'okiba-storage-gui-'));
 const base=path.join(temp,'boards'),c=path.join(base,'Existing'),external=path.join(temp,'external'),profile=path.join(temp,'profile'),input=path.join(temp,'input'),dest=path.join(temp,'return'),old=path.join(temp,'old');
 for(const p of [c,external,profile,input,dest,old])fs.mkdirSync(p,{recursive:true});
 const cmeta=path.join(c,'.okiba-board.json');fs.writeFileSync(cmeta,JSON.stringify({version:6,positions:{'keep.txt':{col:3,row:4}},links:[],notes:[],future:{keep:true}}));fs.writeFileSync(path.join(c,'keep.txt'),'unchanged');const original=fs.readFileSync(cmeta);

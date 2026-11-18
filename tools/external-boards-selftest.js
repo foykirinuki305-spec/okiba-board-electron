@@ -1,7 +1,7 @@
 'use strict';
 const assert = require('assert/strict'), fs = require('fs'), path = require('path'), os = require('os');
 const eb = require('../lib/external-boards');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'okiba-external-unit-'));
+const root = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'okiba-external-unit-'));
 let checks = 0;
 const check = (value, label) => { assert(value, label); checks++; };
 const rejects = (fn, regex) => { assert.throws(fn, regex); checks++; };
@@ -54,6 +54,6 @@ try {
   check(fs.readFileSync(path.join(original, '.okiba-board.json')).equals(raw), 'legacy metadata unchanged throughout');
   console.log('external boards ' + checks + ' checks PASS; isolated fixtures only');
 } finally {
-  if (path.dirname(root) !== os.tmpdir() || !path.basename(root).startsWith('okiba-external-unit-')) throw Error('unsafe fixture cleanup');
+  if (path.dirname(root) !== fs.realpathSync.native(os.tmpdir()) || !path.basename(root).startsWith('okiba-external-unit-')) throw Error('unsafe fixture cleanup');
   fs.rmSync(root, { recursive: true });
 }
