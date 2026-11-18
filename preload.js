@@ -14,6 +14,9 @@ contextBridge.exposeInMainWorld('okiba', {
   watchHome: () => ipcRenderer.invoke('watch-home'),
   thumb: (fullPath) => ipcRenderer.invoke('thumb', fullPath),
 
+  migrateBoard: (id) => ipcRenderer.invoke('migrate-board',id),
+  storageStatus: () => ipcRenderer.invoke('storage-status'),
+  createStorageBoard: (name) => ipcRenderer.invoke('create-storage-board', name),
   createBoard: (name) => ipcRenderer.invoke('create-board', name),
   renameBoard: (oldName, newName) => ipcRenderer.invoke('rename-board', oldName, newName),
   trashBoard: (name) => ipcRenderer.invoke('trash-board', name),

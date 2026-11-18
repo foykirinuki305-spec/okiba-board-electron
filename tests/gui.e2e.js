@@ -279,6 +279,8 @@ async function main() {
   const menuLabels = await page.locator('#ctxMenu .ctx-item').allTextContents();
   assert(menuLabels.some((t) => t.includes('名前を変更')), 'menu has 名前を変更');
   assert(menuLabels.some((t) => t.includes('戻し先フォルダへ移動')), 'menu has 戻し先フォルダへ移動');
+  assert(!menuLabels.some(t => /原本を残してコピー|ボードから外す/.test(t)),
+    'resident menu does not expose legacy copy or unlink');
   await page.locator('#ctxMenu .ctx-item', { hasText: '名前を変更' }).dispatchEvent('mousedown');
   await page.waitForSelector('#modalOverlay:not([hidden])');
   assert(true, 'rename modal opened');
@@ -516,17 +518,21 @@ async function main() {
     console.log('  skip - real attrib read-back runs on the Windows CI runner');
   }
 
-  step('unlink via context menu: card gone, origin intact, hidden cleared');
+  step('unlink backend regression via renderer API; removed menu stays absent');
   await page.locator('.item', { hasText: '外部素材' }).first().click({ button: 'right' });
   await page.waitForSelector('#ctxMenu:not([hidden]) .ctx-item');
   const linkMenu = await page.locator('#ctxMenu .ctx-item').allTextContents();
-  assert(linkMenu.some((t) => t.includes('ボードから外す')), 'linked menu has ボードから外す');
+  assert(!linkMenu.some(t => /原本を残してコピー|ボードから外す/.test(t)),
+    'linked menu does not expose legacy copy or unlink');
   assert(linkMenu.some((t) => t.includes('ファイルをゴミ箱へ削除')),
     'linked menu has the explicit real-file delete');
   assert(linkMenu.some((t) => t.includes('戻し先フォルダへ移動')),
     'linked menu has 戻し先フォルダへ移動 (v2.1: a real move, distinct from 外す)');
-  await page.locator('#ctxMenu .ctx-item', { hasText: 'ボードから外す' })
-    .dispatchEvent('mousedown');
+  // Retain legacy backend coverage without restoring a removed UI action.
+  await page.evaluate(async p => {
+    document.getElementById('ctxMenu').hidden = true;
+    await unlinkFlow([p]);
+  }, originFile);
   await waitFor(async () => {
     const ns = await page.locator('.item .name').allTextContents();
     return !ns.some((t) => t.includes('外部素材'));
@@ -544,7 +550,7 @@ async function main() {
     assert(true, 'Hidden attribute cleared after unlink (real attrib)');
   }
 
-  step('missing state: external deletion greys the card; cleanup via menu');
+  step('missing state: search-only menu; legacy cleanup backend regression');
   await page.evaluate(
     (arg) => window.okiba.linkFiles(arg.board, [arg.p]),
     { board: boardName, p: originFile });
@@ -565,10 +571,15 @@ async function main() {
   await page.locator('.item', { hasText: '外部素材' }).first().click({ button: 'right' });
   await page.waitForSelector('#ctxMenu:not([hidden]) .ctx-item');
   const missMenu = await page.locator('#ctxMenu .ctx-item').allTextContents();
-  assert(missMenu.length === 2 && missMenu[0].includes('素材を探す') && missMenu[1].includes('ボードから外す'),
-    'missing item menu offers search and unlink only (nothing destructive)');
-  await page.locator('#ctxMenu .ctx-item', { hasText: 'ボードから外す' })
-    .dispatchEvent('mousedown');
+  assert(missMenu.length === 1 && missMenu[0].includes('素材を探す'),
+    'missing item menu offers search only (nothing destructive)');
+  assert(!missMenu.some(t => /原本を残してコピー|ボードから外す/.test(t)),
+    'missing menu does not expose legacy copy or unlink');
+  // Retain legacy backend coverage without restoring a removed UI action.
+  await page.evaluate(async p => {
+    document.getElementById('ctxMenu').hidden = true;
+    await unlinkFlow([p]);
+  }, originFile);
   await waitFor(async () => {
     const ns = await page.locator('.item .name').allTextContents();
     return !ns.some((t) => t.includes('外部素材'));

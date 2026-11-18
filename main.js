@@ -1,5 +1,6 @@
 'use strict';
 const { app, BrowserWindow, ipcMain, shell, nativeImage, dialog, screen } = require('electron');
+const nativeIpcMain=ipcMain;
 const fs = require('fs');
 const path = require('path');
 const bf = require('./lib/boardfs');
@@ -14,8 +15,10 @@ const cu = require('./lib/cleanup');
 const pr = require('./lib/preresolve');
 const dragCoords = require('./lib/dragcoords');
 const desktopPreviewPolicy = require('./lib/desktop-preview-policy');
-function leasePreview(){return desktopPreviewPolicy.enabled({isPackaged:app.isPackaged,platform:process.platform,env:process.env});}
-function legacyDesktopTest(){return process.env.OKIBA_TEST_HOOKS==='1'&&process.env.OKIBA_TEST_RETURN_MODE==='legacy';}
+// User-facing builds never place icons directly on the Desktop. Keep the old
+// implementation only for isolated regression tests; actual output uses returnToFolder.
+function leasePreview(){return false;}
+function legacyDesktopTest(){return !app.isPackaged&&process.env.GITHUB_ACTIONS==='true'&&process.env.OKIBA_TEST_HOOKS==='1'&&process.env.OKIBA_TEST_RETURN_MODE==='legacy';}
 function unknownLeasePreview(){return desktopPreviewPolicy.unknownEnabled({isPackaged:app.isPackaged,platform:process.platform,env:process.env});}
 
 // Hidden-attribute runner for linked items (v2.0). Real attrib.exe
@@ -24,6 +27,7 @@ const attrib = leasePreview()?ln.createAttribRunner():ln.attribRunnerFromEnv();
 
 // ------------------------------------------------------------------ paths
 let BASE = null;
+const externalBoards = require('./lib/external-boards');
 let MIGRATED_COUNT = 0;
 // Retained response field; automatic update cleanup is disabled.
 let CLEANED_COUNT = 0;
@@ -137,7 +141,9 @@ function peekThumb(fullPath, px) {
 }
 
 async function boardPreview(boardName) {
-  const folder = path.join(BASE, boardName);
+  const descriptor=externalBoards.resolve(BASE,boardName);
+  if(descriptor.missing||descriptor.invalid)return {name:boardName,displayName:descriptor.name,external:true,missing:true,count:0,thumbs:[],kinds:[]};
+  const folder = guardBoard(boardName);
   let entries = [];
   try { entries = bf.scanFolder(folder); } catch (e) {}
   let data = { links: [] };
@@ -169,7 +175,7 @@ async function boardPreview(boardName) {
     }
   }
   const count = entries.length + (data.links || []).length;
-  return { name: boardName, count, thumbs, kinds };
+  return { name: boardName, displayName:descriptor.name, external:descriptor.external, folder, count, thumbs, kinds };
 }
 
 // ----------------------------------------------------------------- state
@@ -185,7 +191,7 @@ function homeState() {
 }
 
 async function boardsState() {
-  const names = bf.listBoards(BASE);
+  const names = [...bf.listBoards(BASE), ...externalBoards.list(BASE).map(b => b.id)];
   const boards = [];
   for (const n of names) boards.push(await boardPreview(n));
   return Object.assign(homeState(), { boards });
@@ -193,13 +199,15 @@ async function boardsState() {
 
 const boardSaveGuard = require('./lib/board-save-guard');
 function boardState(boardName) {
-  const folder = path.join(BASE, boardName);
+  const folder = guardBoard(boardName);
   const snapshot = boardSaveGuard.loadSnapshot(folder,bf.loadBoard);
   const data = snapshot.data;
   let entries = [];
   try { entries = bf.scanFolder(folder); } catch (e) {}
   return {
     name: boardName,
+    displayName: externalBoards.resolve(BASE,boardName).name,
+    external: externalBoards.isExternal(boardName),
     revision: snapshot.revision,
     folder,
     entries: entries.map((e) => Object.assign(e, {
@@ -250,7 +258,7 @@ function setupWatchers(boardName) {
     } catch (e) {}
   };
   add(BASE);
-  if (boardName) add(path.join(BASE, boardName));
+  if (boardName) add(guardBoard(boardName));
 }
 
 function createWindow() {
@@ -307,7 +315,7 @@ if (!gotSingleInstanceLock) {
 } else if (!SELFTEST_MODE) {
   app.on('second-instance', (_e, argv) => {
     if (!BASE) return;
-    const route = sc.routeFromArgv(argv, BASE);
+    const route = boardRoute(argv);
     if (focusMainWindow()) {
       win.webContents.send('open-board-request', route);
     } else {
@@ -332,15 +340,36 @@ function runVersionCleanup() {
 }
 // ------------------------------------------------------------------- IPC
 function guardBoard(name) {
-  if (!name || name.includes('/') || name.includes('\\') || name === '.' || name === '..') {
-    throw new Error('invalid board name');
-  }
-  return path.join(BASE, name);
+  const board=externalBoards.resolve(BASE,name);
+  if(board.missing||board.invalid)throw Error('保管ボードを確認できません。ドライブや保存先を確認してください。');
+  return board.folder;
+}
+function boardRoute(argv){
+  const arg=(argv||[]).find(a=>typeof a==='string'&&a.startsWith('--board-id='));
+  if(arg){const id=arg.slice(11);try{guardBoard(id);return {boardName:id,invalidBoard:false};}catch(_){return {boardName:null,invalidBoard:true};}}
+  return sc.routeFromArgv(argv,BASE);
 }
 
 function registerIpc() {
+  let mutationActive=false;
+  const mutatingChannels=new Set(['repair-missing-material','storage-status','migrate-board','create-storage-board','create-board','rename-board','trash-board','create-board-shortcut','save-home-positions','set-theme','save-board','link-files','unlink-items','rename-linked','safe-takeout','move-linked-to-desktop','trash-linked','trash-item','rename-item','move-to-desktop','drop-files','restore-history-group','restore-history-item','discard-history-item','discard-history-group','resolve-drop-move','copy-selected-out']);
+  const ipcMain={handle:(channel,fn)=>nativeIpcMain.handle(channel,!mutatingChannels.has(channel)?fn:async(...args)=>{
+    if(mutationActive){
+      if(channel==='save-board')return {saved:false,conflict:true,busy:true};
+      if(channel==='copy-selected-out')return {ok:false,error:'copy-already-running',reason:'copy-already-running'};
+      throw Error('別の処理中です。完了してから操作してください。');
+    }
+    mutationActive=true;try{await storageReady;if(channel!=='storage-status'){if(channel==='save-board'&&storageBlocked)return {saved:false,conflict:true,busy:true};requireStorageIdle();}return await fn(...args);}finally{mutationActive=false;}
+  })};
   // Desktop drops go to a user-selected normal folder; no copies or icon placement.
   let folderReturnBusy=false,rescueRepairOwned=false;
+  const storageOptions={base:BASE,storageRoot:path.join(app.getPath('userData'),'storage-transfers'),stagingRootForSource:source=>{const parent=path.parse(source).root.toLowerCase()===path.parse(app.getPath('userData')).root.toLowerCase()?app.getPath('userData'):path.parse(source).root;externalBoards.validateDirectory(parent);const root=path.join(parent,parent===app.getPath('userData')?'storage-staging':'OkibaBoard_移動保護');fs.mkdirSync(root,{recursive:true});externalBoards.validateDirectory(root);return root;},onProgress:p=>{if(win&&!win.isDestroyed())win.webContents.send('status','素材を移動中です。'+(p.percent!=null?Math.round(p.percent)+'% ': '')+(p.phase||'')+' 元の場所と移動先は履歴に記録します。');}};
+  const storageService=require('./lib/storage-board-service').createStorageBoardService(storageOptions);
+  const migrationService=require('./lib/board-migration-service').createBoardMigrationService({...storageOptions,storageRoot:path.join(app.getPath('userData'),'board-migrations')});
+  let storageBlocked=true;
+  let storageReady=storageService.recover().then(async r=>{const m=r.ok?await migrationService.recover():r;storageBlocked=!r.ok||!m.ok;return !r.ok?r:m;}).catch(e=>({ok:false,error:String(e.message||e)}));
+  const requireStorageIdle=()=>{if(folderReturnBusy||(storageService.busy||migrationService.busy)||storageBlocked)throw Error('移動の確認中です。完了後に操作してください。');};
+  const storageResult=r=>{const items=r.items||[];return {moved:r.ok?items.map(i=>i.src):[],destinations:r.ok?items.map(i=>i.dest):[],failed:r.ok?[]:items.map(i=>i.src),skipped:[],metadataCommitted:r.ok===true,error:r.ok?null:(r.error||'移動を完了できませんでした。元の場所と移動先を確認してください。'),recovery:r.recoveryPaths,warningText:r.ok?'戻し先フォルダへ移動しました。':''};};
   const rescue=require('./lib/material-rescue');
   const returnScript=()=>path.join(app.isPackaged?process.resourcesPath:__dirname,'scripts','folder-return.ps1');
   async function probeMaterial(p){
@@ -360,16 +389,17 @@ function registerIpc() {
     })});
   }
   const rescueController=require('./lib/material-rescue-controller').createController({
-    base:BASE,guardBoard,probe:probeMaterial,isBusy:()=>folderReturnBusy&&!rescueRepairOwned,
+    base:BASE,guardBoard,probe:probeMaterial,isBusy:()=>(storageService.busy||migrationService.busy)||storageBlocked||(folderReturnBusy&&!rescueRepairOwned),
     roots:(_folder,oldPath)=>{let dest;try{dest=JSON.parse(fs.readFileSync(path.join(BASE,'.folder-return.json'),'utf8')).destination;}catch(_){}return [dest,path.dirname(oldPath),app.getPath('desktop'),BASE].filter(Boolean);},
     withLock:async(_folder,fn)=>{if(folderReturnBusy)throw Error('処理中です。完了してから操作してください。');folderReturnBusy=true;rescueRepairOwned=true;try{return await fn();}finally{rescueRepairOwned=false;folderReturnBusy=false;}},
     notify:()=>{if(win&&!win.isDestroyed())win.webContents.send('fs-changed');}
   });
   ipcMain.handle('find-missing-material',(_e,name,oldPath)=>rescueController.find(name,oldPath));
-  ipcMain.handle('repair-missing-material',(_e,token)=>rescueController.repair(token));
+  ipcMain.handle('repair-missing-material',(_e,token)=>{requireStorageIdle();return rescueController.repair(token);});
   async function returnToFolder(payload){
+    await storageReady;requireStorageIdle();
     const empty={moved:[],destinations:[],failed:[],skipped:[],metadataCommitted:true};
-    if(folderReturnBusy)return {...empty,error:'移動処理中です。完了まで待ってください。'};
+    if(folderReturnBusy||(storageService.busy||migrationService.busy))return {...empty,error:'移動処理中です。完了まで待ってください。'};
     folderReturnBusy=true;
     try{
       const config=path.join(BASE,'.folder-return.json');let dir=null;
@@ -385,6 +415,14 @@ function registerIpc() {
       const canonical=fs.realpathSync.native(dir), forbidden=[app.getPath('desktop'),path.join(process.env.PUBLIC||'C:\\Users\\Public','Desktop'),BASE];
       if(forbidden.some(p=>path.resolve(p).toLowerCase()===canonical.toLowerCase())||canonical.toLowerCase().startsWith(path.resolve(BASE).toLowerCase()+path.sep))throw Error('デスクトップ直下やボード以外の通常フォルダを選んでください');
       if(process.env.OKIBA_TEST_HOOKS!=='1')require('./lib/folder-return').atomic(config,JSON.stringify({destination:canonical},null,2));
+      if(externalBoards.isExternal(payload.boardName)){
+        if(payload.linkedPaths?.length)throw Error('D保管ボードの参照項目は安全に移動できません。');
+        const ready=await storageReady;if(!ready.ok||storageBlocked)throw Error('中断した移動を先に確認してください。');
+        const r=await storageService.takeout(payload.boardName,payload.paths||[],canonical);
+        if(!r.ok)storageBlocked=true;
+        if(r.ok){const snap=JSON.parse(r.metadata?.beforeRaw||'{}');mh.recordItems(BASE,{id:r.operationId,boardName:payload.boardName,boardFolder:guardBoard(payload.boardName),items:(r.items||[]).map(i=>({kind:'resident',destPath:i.dest,fileName:path.basename(i.src),col:cellOfPos(snap.positions?.[path.basename(i.src)])[0],row:cellOfPos(snap.positions?.[path.basename(i.src)])[1]}))});await shell.openPath(canonical);}
+        return storageResult(r);
+      }
       const run=require('./lib/folder-return').createFolderReturn({base:BASE,guardBoard,destination:canonical,forbidden,
         scriptPath:path.join(app.isPackaged?process.resourcesPath:__dirname,'scripts','folder-return.ps1'),
         onRecord:recordReturned,
@@ -394,7 +432,8 @@ function registerIpc() {
     }catch(e){return {...empty,error:'移動先を確認できません。'+String(e.message||e)};}finally{folderReturnBusy=false;}
   }
   ipcMain.handle('get-home', async () => boardsState());
-  ipcMain.handle('get-board', (_e, name) => {
+  ipcMain.handle('get-board', async (_e, name) => {
+    if(externalBoards.isExternal(name)){const r=await storageReady;if(!r.ok)throw Error('中断した移動があります。ホームの『移動の場所と状態』で確認してください。');}
     guardBoard(name);
     setupWatchers(name);
     return boardState(name);
@@ -414,15 +453,49 @@ function registerIpc() {
 
   ipcMain.handle('thumb', async (_e, fullPath) => thumbnailFor(fullPath, 300));
 
+  ipcMain.handle('storage-status',async()=>{
+    if((storageService.busy||migrationService.busy)||folderReturnBusy)throw Error('Transfer is still running');
+    const records=[...await storageService.status(),...await migrationService.status()];
+    const detail=records.length?records.slice(-20).map(r=>`${r.phase==='complete'?'完了':'要確認'}
+${(r.items||[]).map(i=>'元: '+i.src+'\n先: '+i.dest+(i.backup?'\n移動保護: '+i.backup:'')).join('\n')}
+${r.error||''}`).join('\n\n'):'D保管ボードの移動履歴はまだありません。';
+    const choice=await dialog.showMessageBox(win,{type:'info',title:'移動の場所と状態',message:'素材の元の場所と移動先',detail,buttons:['閉じる','中断した移動を再確認'],defaultId:0,cancelId:0});
+    if(choice.response===1){storageBlocked=true;storageReady=storageService.recover().then(async r=>{const m=r.ok?await migrationService.recover():r;storageBlocked=!r.ok||!m.ok;return !r.ok?r:m;});const r=await storageReady;await dialog.showMessageBox(win,{type:r.ok?'info':'warning',message:r.ok?'移動の確認が完了しました。':'確認が必要な移動が残っています。元の場所と移動先は変更せず保護しています。',buttons:['閉じる']});}return true;
+  });
+  ipcMain.handle('migrate-board',async(_e,sourceId)=>{
+    await storageReady;requireStorageIdle();
+    const source=externalBoards.resolve(BASE,sourceId);guardBoard(sourceId);
+    const candidates=[...bf.listBoards(BASE).map(id=>externalBoards.resolve(BASE,id)),...externalBoards.list(BASE)].filter(b=>b.id!==sourceId&&!b.missing&&!b.invalid&&!!b.external!==!!source.external);
+    if(!candidates.length)throw Error('先に移行先の空のボードを作ってください。C用とD保管ボードの間で移せます。');
+    const selected=await dialog.showMessageBox(win,{type:'question',message:'移行先の空ボードを選んでください',detail:'素材と配置を別ボードへ移します。元のボードは空になります。空ではないボードには移せません。',buttons:['中止',...candidates.map(b=>(b.name||b.id)+' — '+b.folder)],defaultId:0,cancelId:0});
+    if(selected.response===0)return {cancelled:true};requireStorageIdle();
+    const target=candidates[selected.response-1];if(!target)throw Error('移行先が確認できません。');
+    await migrationService.plan(sourceId,target.id);
+    const confirmation=await dialog.showMessageBox(win,{type:'warning',message:'素材と配置をこの別ボードへ移しますか？',detail:'元：'+source.folder+'\n先：'+target.folder+'\n\n元ボードは削除せず空になります。素材の保存パスが変わるため、AviUtlで編集中のプロジェクトは素材を見失う可能性があります。デスクトップの旧位置へは戻しません。',buttons:['中止','移行する'],defaultId:0,cancelId:0});
+    if(confirmation.response!==1)return {cancelled:true};requireStorageIdle();
+    const result=await migrationService.migrate(sourceId,target.id);if(!result.ok)storageBlocked=true;
+    if(win&&!win.isDestroyed())win.webContents.send('fs-changed');
+    if(!result.ok)throw Error(result.error||'移行を停止しました。元の場所と移行先は「移動の場所と状態」で確認してください。');
+    return {ok:true,home:await boardsState()};
+  });
+  ipcMain.handle('create-storage-board',async(_e,name)=>{
+    if(folderReturnBusy||(storageService.busy||migrationService.busy))throw Error('移動中です。完了まで待ってください。');
+    const choice=await dialog.showOpenDialog(win,{title:'Dに保管する空のフォルダを選択',defaultPath:'D:\\',properties:['openDirectory','createDirectory']});
+    if(choice.canceled||!choice.filePaths?.length)return boardsState();
+    const folder=path.resolve(choice.filePaths[0]);
+    if(path.parse(folder).root.toLowerCase()===path.parse(BASE).root.toLowerCase())throw Error('CではなくD側の空のフォルダを選んでください。');
+    externalBoards.create(BASE,folder,name);return boardsState();
+  });
   ipcMain.handle('create-board', async (_e, name) => {
     const created = bf.createBoard(BASE, name);
     return boardsState().then((s) => Object.assign(s, { created }));
   });
   ipcMain.handle('rename-board', async (_e, oldName, newName) => {
-    const renamed = bf.renameBoard(BASE, oldName, newName);
+    if((storageService.busy||migrationService.busy)||folderReturnBusy||storageBlocked)throw Error('移動処理の確認が済むまで名前は変更できません。');
+    const renamed = externalBoards.isExternal(oldName)?(externalBoards.rename(BASE,oldName,newName),oldName):bf.renameBoard(BASE, oldName, newName);
     // keep saved home position under the new name
     const home = bf.loadHome(BASE);
-    if (home.positions[oldName]) {
+    if (renamed !== oldName && home.positions[oldName]) {
       home.positions[renamed] = home.positions[oldName];
       delete home.positions[oldName];
       bf.saveHome(BASE, home.positions);
@@ -430,6 +503,7 @@ function registerIpc() {
     return boardsState();
   });
   ipcMain.handle('trash-board', async (_e, name) => {
+    if((storageService.busy||migrationService.busy)||folderReturnBusy||storageBlocked)throw Error('移動処理の確認が済むまで削除できません。');
     const folder = guardBoard(name);
     // Linked originals are NOT in the folder and must survive board
     // deletion untouched — but their Hidden attribute (if we set it)
@@ -437,6 +511,7 @@ function registerIpc() {
     let heldLinks = [];
     try { heldLinks = bf.loadBoard(folder).links; } catch (e) {}
     await shell.trashItem(folder);
+    if(externalBoards.isExternal(name))externalBoards.removeRegistration(BASE,name);
     try { await ln.releaseBoardLinks({ base: BASE, links: heldLinks, attrib }); }
     catch (e) { /* releasing visibility must never block deletion */ }
     return boardsState();
@@ -466,7 +541,8 @@ function registerIpc() {
         return st.isDirectory() ? 'dir' : 'file';
       } catch (e) { return null; }
     };
-    const fileName = sc.planShortcutFileName(name, probe);
+    const label=externalBoards.resolve(BASE,name).name+(externalBoards.isExternal(name)?' (D保管 '+name.slice(-8)+')':'');
+    const fileName = sc.planShortcutFileName(label, probe);
     const lnkPath = path.join(desk, fileName);
     const written = shell.writeShortcutLink(lnkPath, 'create', {
       target: process.execPath,
@@ -475,7 +551,7 @@ function registerIpc() {
       // instance's argv to the running app (the value comes back as
       // a stray trailing argument and the flag reads as valueless).
       // An attached value survives that round trip intact.
-      args: '--board-path="' + folder + '"',
+      args: externalBoards.isExternal(name)?'--board-id='+name:'--board-path="' + folder + '"',
       cwd: folder,
       description: name,
       icon: process.execPath,
@@ -501,7 +577,7 @@ function registerIpc() {
   });
 
   ipcMain.handle('save-board', (_e, name, positions, notes, sizePercent, links, expectedRevision) => {
-    if(folderReturnBusy)return {saved:false,conflict:true,busy:true,currentRevision:boardSaveGuard.revision(boardSaveGuard.readRaw(guardBoard(name)))};
+    if(folderReturnBusy||(storageService.busy||migrationService.busy)||storageBlocked)return {saved:false,conflict:true,busy:true,currentRevision:boardSaveGuard.revision(boardSaveGuard.readRaw(guardBoard(name)))};
     return boardSaveGuard.save(guardBoard(name),{positions,notes,sizePercent,links:links||[],expectedRevision},{allowMissingRevision:process.env.OKIBA_TEST_HOOKS==='1'&&!app.isPackaged});
   });
 
@@ -568,6 +644,15 @@ function registerIpc() {
   // becomes the offsets — read BEFORE any hiding happens, because
   // hiding is exactly what makes those icons vanish.
   ipcMain.handle('link-files', async (_e, boardName, paths, placeOpts) => {
+    await storageReady;requireStorageIdle();
+    if(externalBoards.isExternal(boardName)){
+      const ready=await storageReady;if(!ready.ok||storageBlocked)throw Error('中断した移動を先に確認してください。');
+      const r=await storageService.intake(boardName,paths,placeOpts||{});
+      if(!r.ok){storageBlocked=true;throw Error(r.error||'移動できませんでした。元の素材は保護しています。');}
+      if(win&&!win.isDestroyed())win.webContents.send('fs-changed');
+      return {added:(r.items||[]).map(i=>i.dest),duplicates:[],skipped:[],attribFailed:[]};
+    }
+    if((storageService.busy||migrationService.busy))throw Error('素材を移動中です。完了まで待ってください。');
     const intakeStart = Date.now();
     const timings = { layoutMs: 0, placementMs: 0, loadMs: 0, registryMs: 0, attribMs: 0, saveMs: 0 };
     let intakeStatus = 'error';
@@ -650,6 +735,7 @@ function registerIpc() {
     }
   });
   ipcMain.handle('unlink-items', async (_e, boardName, paths) => {
+    requireStorageIdle();
     const folder = guardBoard(boardName);
     const results = await ln.removeLinks({
       base: BASE, boardFolder: folder, targetPaths: paths || [], attrib,
@@ -658,6 +744,7 @@ function registerIpc() {
     return results;
   });
   ipcMain.handle('rename-linked', async (_e, boardName, oldPath, newName) => {
+    requireStorageIdle();
     const folder = guardBoard(boardName);
     const cleaned = bf.validateBoardName(newName); // same invalid-char rules
     const dest = path.join(path.dirname(oldPath), cleaned);
@@ -1097,6 +1184,7 @@ function registerIpc() {
 
   ipcMain.handle('move-linked-to-desktop', (_e, boardName, paths, groupId) => (leasePreview()||legacyDesktopTest())?safeDesktopMove({boardName,linkedPaths:paths,paths:[],groupId,automatic:true},{type:'desktop',path:desktopReturnDir()}):returnToFolder({boardName,linkedPaths:paths,paths:[],groupId}));
   ipcMain.handle('trash-linked', async (_e, boardName, targetPath) => {
+    requireStorageIdle();
     const folder = guardBoard(boardName);
     // Explicit REAL-file delete (distinct from ボードから外す）:
     // trash the original, then drop the reference. No unhide needed
@@ -1121,18 +1209,22 @@ function registerIpc() {
     return true;
   });
   ipcMain.handle('trash-item', async (_e, fullPath) => {
+    requireStorageIdle();
     await shell.trashItem(fullPath);
     return true;
   });
   ipcMain.handle('rename-item', (_e, fullPath, newName) => {
+    requireStorageIdle();
     const cleaned = bf.validateBoardName(newName); // same invalid-char rules
     const dest = path.join(path.dirname(fullPath), cleaned);
     if (fs.existsSync(dest)) throw new Error('同じ名前のものがあります');
     fs.renameSync(fullPath, dest);
     return dest;
   });
-  ipcMain.handle('move-to-desktop', (_e, fullPath, boardName, groupId) => safeDesktopMove({boardName,paths:[fullPath],linkedPaths:[],groupId,automatic:true},{type:'desktop',path:desktopReturnDir()}));
-  ipcMain.handle('drop-files', (_e, boardName, paths, placeOpts) => {
+  ipcMain.handle('move-to-desktop', (_e, fullPath, boardName, groupId) => returnToFolder({boardName,paths:[fullPath],linkedPaths:[],groupId}));
+  ipcMain.handle('drop-files', async (_e, boardName, paths, placeOpts) => {
+    await storageReady;requireStorageIdle();
+    if(externalBoards.isExternal(boardName)){const ready=await storageReady;if(!ready.ok||storageBlocked)throw Error('Interrupted transfer requires review');const r=await storageService.intake(boardName,paths,placeOpts||{});if(!r.ok){storageBlocked=true;throw Error(r.error||'移動できませんでした');}return (r.items||[]).map(i=>i.dest);}
     const folder = guardBoard(boardName);
     const placed = bf.placeDroppedItems(paths, folder);
     // Anchored placement for moved-in residents (v2.2): with an
@@ -1398,6 +1490,14 @@ function registerIpc() {
   // cells scan forward to the nearest free one, layout preserved).
   // Items whose destination vanished stay in the history.
   async function restoreHistoryItems(group, scope) {
+    await storageReady;requireStorageIdle();
+    if(externalBoards.isExternal(group.boardName)){
+      const ready=scope.filter(i=>fs.existsSync(i.destPath)),missing=scope.filter(i=>!fs.existsSync(i.destPath)).map(i=>i.fileName);
+      if(!ready.length)return {restored:[],missing};
+      const r=await storageService.intake(group.boardName,ready.map(i=>i.destPath),{anchor:[0,0],offsets:ready.map(i=>[i.col||0,i.row||0]),rows:Math.max(8,...ready.map(i=>(i.row||0)+1))});
+      if(!r.ok){storageBlocked=true;return {restored:[],missing,error:r.error||'復元を完了できませんでした。素材は保護しています。'};}
+      mh.removeItems(BASE,group.id,ready.map(i=>i.destPath));return {restored:ready.map(i=>i.fileName),missing};
+    }
     const folder = group.boardFolder || (() => {
       try { return guardBoard(group.boardName); } catch (e) { return null; }
     })();
@@ -1582,7 +1682,7 @@ function registerIpc() {
       result.resolved = target;
       if (target?.error) result.error = target.error;
       dropLog.push({ kind: 'resolve', x, y, target, pre: resolveStage === 'pre' });
-      if(target?.type==='desktop' && target.path) {
+      if(target?.path && (!legacyDesktopTest() || target.type==='desktop')) {
         const tm=Date.now();const strict=(leasePreview()||legacyDesktopTest())?await safeDesktopMove({...payload,automatic:false},target):await returnToFolder(payload);moveMs=Date.now()-tm;
         dropLog.push({kind:'safe-desktop',ok:!strict.error,reason:strict.reason||null});
         writeTiming();return {...result,...strict,resolved:target};
@@ -1756,7 +1856,7 @@ app.whenReady().then(async () => {
   // --board-path "<board folder>" (from a board shortcut) opens the
   // app directly into that board; the renderer asks for this route
   // once its home data has loaded.
-  startupRoute = sc.routeFromArgv(process.argv, BASE);
+  startupRoute = boardRoute(process.argv);
   registerIpc();
   createWindow();
   if(process.platform==='win32'&&!leasePreview()&&!legacyDesktopTest())require('./lib/folder-return').warmNative(path.join(app.isPackaged?process.resourcesPath:__dirname,'scripts','folder-return.ps1')).catch(()=>{});

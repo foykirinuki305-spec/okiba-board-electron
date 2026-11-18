@@ -4,7 +4,7 @@
 const api = { ...window.okiba };
 let boardEpoch = 0, boardReadSeq = 0, boardOperation = 0;
 // Invalidate old reads at both boundaries; block a second UI mutation until completion.
-for (const name of ['repairMissingMaterial','saveBoard','linkFiles','unlinkItems','renameLinked','trashLinked','trashItem','renameItem','safeTakeout','moveToDesktop','dropFiles','resolveDropMove','moveLinkedToDesktop','restoreHistoryGroup','restoreHistoryItem','renameBoard','trashBoard']) {
+for (const name of ['migrateBoard','storageStatus','repairMissingMaterial','saveBoard','linkFiles','unlinkItems','renameLinked','trashLinked','trashItem','renameItem','safeTakeout','moveToDesktop','dropFiles','resolveDropMove','moveLinkedToDesktop','restoreHistoryGroup','restoreHistoryItem','renameBoard','trashBoard']) {
   const original = api[name]; if (typeof original !== 'function') continue;
   api[name] = async (...args) => {
     if (boardOperation) throw Error('処理中です。完了してから操作してください。');
@@ -271,14 +271,15 @@ function renderHome() {
       }
     }
     const nm = document.createElement('div');
-    nm.className = 'board-card-name'; nm.textContent = b.name; nm.title = b.name;
+    nm.className = 'board-card-name'; nm.textContent = b.displayName || b.name; nm.title = b.folder || b.name;
     const sub = document.createElement('div');
-    sub.className = 'board-card-sub'; sub.textContent = `${b.count}件`;
+    sub.className = 'board-card-sub'; sub.textContent = b.missing?'保存先を確認してください':`${b.count}件${b.external?' ・ Dに実体保存':''}`;
     card.append(collage, nm, sub);
     card.addEventListener('pointerdown', (e) => homeCardPointer(e, card, b));
     card.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       showMenu(e.clientX, e.clientY, [
+        { label: '配置ごと別ドライブのボードへ移す', action: async()=>{try{const r=await api.migrateBoard(b.name);if(r.ok){homeData=r.home;renderHome();toast('素材と配置を移しました。元のボードは空になりました。');}}catch(e){toast(String(e.message||e),15000);}} },
         { label: '名前を変更', action: () => renameBoardFlow(b.name) },
         { label: '場所を開く', action: () => api.openBoardFolder(b.name) },
         { label: 'デスクトップにショートカットを作る', action: async () => {
@@ -314,7 +315,7 @@ function homeCardPointer(e, card, board) {
     card.classList.remove('dragging');
     card.style.transform = '';
     dragging = false;
-    if (!moved) { openBoard(board.name); return; }
+    if (!moved) { if(board.missing){toast('保存先のドライブやフォルダを確認してください。',15000);return;}openBoard(board.name).catch(e=>toast(String(e.message||e),15000)); return; }
     // swap with the card under the pointer (if any)
     card.style.pointerEvents = 'none';
     const under = document.elementFromPoint(ev.clientX, ev.clientY);
@@ -334,7 +335,7 @@ function homeCardPointer(e, card, board) {
 }
 
 async function renameBoardFlow(oldName) {
-  const v = await promptModal({ title: 'ボードの名前を変更', value: oldName });
+  const v = await promptModal({ title: 'ボードの名前を変更', value: (homeData.boards.find(b=>b.name===oldName)?.displayName || oldName) });
   if (v === null) return;
   try {
     homeData = await api.renameBoard(oldName, v);
@@ -524,7 +525,7 @@ async function persistBoard() {
 
 function renderBoard() {
   if (!boardData) return;
-  $('boardTitle').textContent = boardData.name;
+  $('boardTitle').textContent = boardData.displayName || boardData.name;
   $('percentSel').value = String(boardData.sizePercent);
   // Rebuilding the DOM collapses the scroll area for a moment;
   // remember where the user was scrolled to and put it back, so
@@ -615,8 +616,7 @@ function renderBoard() {
           k.startsWith('file:') || k.startsWith('link:'));
         const items = [{ label: `${selection.size}件を選択中`, action: () => {} }];
         if (hasOut) {
-          items.push({ label: '選択をボードから出す', action: () => takeOutSelection() });
-          items.push({ label: '原本を残してコピー…', action: () => copySelectionOut() });
+          items.push({ label: '選択を戻し先フォルダへ移動', action: () => takeOutSelection() });
         }
         items.push({ label: 'ゴミ箱へ削除（実ファイルも削除）', danger: true, action: () => trashSelection() });
         showMenu(e.clientX, e.clientY, items);
@@ -637,16 +637,13 @@ function renderBoard() {
           // Search repairs a reference only, never the material itself.
           showMenu(e.clientX, e.clientY, [
             { label: '素材を探す', action: () => findMissingFlow(fullPath) },
-            { label: 'ボードから外す', action: () => unlinkFlow([fullPath]) },
           ]);
         } else {
           showMenu(e.clientX, e.clientY, [
             { label: '開く', action: () => api.openItem(fullPath) },
             { label: '名前を変更', action: () => renameLinkedFlow(key, link) },
             { label: '場所を開く', action: () => api.showItem(fullPath) },
-            { label: '原本を残してコピー…', action: () => copySelectionOut() },
             { label: '戻し先フォルダへ移動', action: () => moveLinkedToDesktopFlow([fullPath]) },
-            { label: 'ボードから外す', action: () => unlinkFlow([fullPath]) },
             { label: 'ファイルをゴミ箱へ削除', danger: true, action: async () => {
                 await api.trashLinked(boardData.name, fullPath); refreshBoard();
               } },
@@ -657,7 +654,6 @@ function renderBoard() {
           { label: '開く', action: () => api.openItem(fullPath) },
           { label: '名前を変更', action: () => renameItemFlow(key, fullPath, label) },
           { label: '場所を開く', action: () => api.showItem(fullPath) },
-            { label: '原本を残してコピー…', action: () => copySelectionOut() },
           { label: '戻し先フォルダへ移動', action: async () => {
               const result=await api.safeTakeout({boardName:boardData.name,paths:[fullPath],linkedPaths:[],layout:[{path:fullPath,cell:cells.get(key)}]}); if(result?.error)toast(result.error,15000);else if(result?.warningText)toast(result.warningText,15000); refreshBoard();
             } },
@@ -1025,7 +1021,7 @@ function moveKeyTo(key, target) {
 }
 
 async function renameItemFlow(key, fullPath, oldName) {
-  const v = await promptModal({ title: '名前を変更', value: oldName });
+  const v = await promptModal({ title: '名前を変更', value: (homeData.boards.find(b=>b.name===oldName)?.displayName || oldName) });
   if (v === null || v.trim() === oldName) return;
   try {
     await api.renameItem(fullPath, v.trim());
@@ -1316,6 +1312,11 @@ $('backBtn').addEventListener('click', async () => {
 });
 $('homeThemeBtn').addEventListener('click', cycleTheme);
 $('boardThemeBtn').addEventListener('click', cycleTheme);
+$('storageStatusBtn').addEventListener('click',()=>api.storageStatus().catch(e=>toast(String(e.message||e))));
+$('addStorageBoardBtn').addEventListener('click',async()=>{
+  const name=await promptModal({title:'Dに実体を保管するボードの名前'});if(name===null)return;
+  try{homeData=await api.createStorageBoard(name);renderHome();}catch(e){toast(String(e.message||e),15000);}
+});
 $('addBoardBtn').addEventListener('click', async () => {
   const v = await promptModal({ title: '新しいボードの名前' });
   if (v === null) return;

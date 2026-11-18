@@ -28,11 +28,27 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
  async function unchanged(){assert.deepEqual(fs.readFileSync(meta),raw);assert.deepEqual(fs.readFileSync(link),content);assert.deepEqual(fs.readFileSync(resident),residentContent);assert.deepEqual(fs.readdirSync(dest),[]);assert.equal(await page.locator('.item.selected').count(),2);}
  const item=p=>page.locator('[data-key='+JSON.stringify(p)+']');
  await item('file:resident.txt').click();await item('link:'+link).click({modifiers:['Control']});
- async function clickCopy(){await item('file:resident.txt').click({button:'right'});await page.locator('#ctxMenu').getByText('原本を残してコピー…',{exact:true}).click();}
+ // Production menus no longer expose copy/unlink. Exercise the retained
+ // renderer/API path explicitly so cancellation and native worker regression
+ // coverage survives without making these actions available to users.
+ async function clickCopy(wait=true){
+  await page.locator('#boardArea .item.selected').first().click({button:'right'});
+  await page.waitForSelector('#ctxMenu:not([hidden]) .ctx-item');
+  const labels=await page.locator('#ctxMenu .ctx-item').allTextContents();
+  assert(!labels.some(t=>/原本を残してコピー|ボードから外す/.test(t)),'removed copy/unlink menu actions must stay absent');
+  assert(labels.some(t=>t.includes('戻し先フォルダへ移動')),'return-folder action must remain available');
+  await page.evaluate(async shouldWait=>{
+   document.getElementById('ctxMenu').hidden=true;
+   if(typeof copySelectionOut!=='function')throw Error('legacy copy renderer function missing');
+   const pending=copySelectionOut();
+   if(shouldWait)await pending;
+   else globalThis.__legacyCopyPending=pending;
+  },wait);
+ }
  await clickCopy();await sleep(200);assert.equal((await stats()).copies,0);assert.equal((await stats()).dialogs,1);assert.deepEqual((await stats()).options.properties,['openDirectory']);await unchanged();evidence.cases.push('cancel-no-worker-no-change');
  await mode('fail');await clickCopy();await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('未完了 2件'));await unchanged();evidence.cases.push('failure-keeps-selection-and-metadata');
  await mode('success');await clickCopy();await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('コピー完了 2件'));await unchanged();evidence.cases.push('explicit-retry-after-failure-stub-success-originals-stay');
- await mode('hold');await clickCopy();await sleep(100);const before=await stats();await clickCopy();await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('コピー処理中'));assert.equal((await stats()).dialogs,before.dialogs);await app.evaluate(()=>global.__copyUi.release({canceled:true,filePaths:[]}));await sleep(100);await unchanged();evidence.cases.push('repeated-action-while-dialog-held-no-second-worker');
+ await mode('hold');await clickCopy(false);await sleep(100);const before=await stats();await clickCopy();await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('コピー処理中'));assert.equal((await stats()).dialogs,before.dialogs);await app.evaluate(()=>global.__copyUi.release({canceled:true,filePaths:[]}));await sleep(100);await unchanged();evidence.cases.push('repeated-action-while-dialog-held-no-second-worker');
  await mode('partial');await clickCopy();await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('確認するまで再実行しない'));await unchanged();evidence.cases.push('unresolved-partial-not-success');
  evidence.stats=await stats();await page.screenshot({path:path.join(out,'copy-partial.png')});evidence.passed=true;
 }catch(e){evidence.error=e.stack;process.exitCode=1;}finally{if(app)await app.close();fs.writeFileSync(path.join(out,'result.json'),JSON.stringify(evidence,null,2));}})();

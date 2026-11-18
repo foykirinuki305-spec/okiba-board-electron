@@ -22,6 +22,9 @@ jobs:
       - name: Headless self-test (pure fs logic)
         run: npm run selftest
 
+      - name: Storage board UI and safe transfer integration
+        run: node tests/storage-board.e2e.js
+
       - name: Packaged copy fixture ASCII wire roundtrip
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File ./tools/packaged-copyout-wire-selftest.ps1
