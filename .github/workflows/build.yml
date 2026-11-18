@@ -19,6 +19,13 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
 
+      - name: Canonical temporary paths for identity-bound fixtures
+        shell: pwsh
+        run: |
+          $canonical = node -p "require('fs').realpathSync.native(require('os').tmpdir())"
+          "TEMP=$canonical" >> $env:GITHUB_ENV
+          "TMP=$canonical" >> $env:GITHUB_ENV
+
       - name: Headless self-test (pure fs logic)
         run: npm run selftest
 

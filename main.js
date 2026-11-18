@@ -356,7 +356,7 @@ function registerIpc() {
   const ipcMain={handle:(channel,fn)=>nativeIpcMain.handle(channel,!mutatingChannels.has(channel)?fn:async(...args)=>{
     if(mutationActive){
       if(channel==='save-board')return {saved:false,conflict:true,busy:true};
-      if(channel==='copy-selected-out')return {ok:false,error:'copy-already-running',reason:'copy-already-running'};
+      if(channel==='copy-selected-out')return {ok:false,error:'copy-already-running',reason:'copy-already-running',message:'コピー処理中です。完了まで待ってください。'};
       throw Error('別の処理中です。完了してから操作してください。');
     }
     mutationActive=true;try{await storageReady;if(channel!=='storage-status'){if(channel==='save-board'&&storageBlocked)return {saved:false,conflict:true,busy:true};requireStorageIdle();}return await fn(...args);}finally{mutationActive=false;}
